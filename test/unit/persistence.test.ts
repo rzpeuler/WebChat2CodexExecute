@@ -77,6 +77,19 @@ describe('local persistence', () => {
     expect((await readFile(filePath, 'utf8')).split('\n').filter(Boolean)).toHaveLength(3);
   });
 
+  it('does not lose concurrent appends from independent instances or leave temp files', async () => {
+    const directory = await makeTemporaryDirectory();
+    const filePath = join(directory, 'events', 'events.jsonl');
+    const events = Array.from({ length: 20 }, (_, sequence) => ({ sequence }));
+
+    await Promise.all(events.map((event) => new JsonlFileEventLog(filePath, { timeoutMs: 1_000 }).append(event)));
+
+    const persistedEvents = await new JsonlFileEventLog(filePath).readAll();
+    expect(persistedEvents).toHaveLength(events.length);
+    expect(persistedEvents).toEqual(expect.arrayContaining(events));
+    expect(await readdir(join(directory, 'events'))).toEqual(['events.jsonl']);
+  });
+
   it('serializes writes from two independent store instances with one filesystem lock', async () => {
     const directory = await makeTemporaryDirectory();
     const filePath = join(directory, 'state', 'snapshot.json');

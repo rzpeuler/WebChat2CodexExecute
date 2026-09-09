@@ -410,14 +410,26 @@ export class JsonlFileEventLog<T> implements EventLog<T> {
         this.filePath,
         async () => {
           await ensureParentDirectory(this.filePath);
-          const handle = await open(this.filePath, 'a', 0o600);
+          let contents = '';
           try {
-            await handle.writeFile(`${JSON.stringify(event)}\n`, 'utf8');
-            await handle.sync();
-          } finally {
-            await handle.close();
+            contents = await readFile(this.filePath, 'utf8');
+          } catch (error) {
+            if (!isNodeError(error, 'ENOENT')) {
+              throw error;
+            }
           }
-          await this.chmodWithDiagnostic(this.filePath);
+
+          const tempPath = join(
+            dirname(this.filePath),
+            `.${basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`,
+          );
+          try {
+            await writePrivateFile(tempPath, `${contents}${JSON.stringify(event)}\n`);
+            await replaceAtomically(tempPath, this.filePath);
+            await this.chmodWithDiagnostic(this.filePath);
+          } finally {
+            await rm(tempPath, { force: true });
+          }
         },
         this.lock,
       ),

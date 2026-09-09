@@ -61,7 +61,6 @@ describe('application initialization gate', () => {
     }, onFailure);
 
     await expect(gate.initialize()).resolves.toBeUndefined();
-    await expect(gate.initialize()).resolves.toBeUndefined();
     expect(onFailure).toHaveBeenCalledTimes(1);
     expect(onFailure).toHaveBeenCalledWith(
       {
@@ -83,13 +82,12 @@ describe('application initialization gate', () => {
     expect(initialize).toHaveBeenCalledTimes(2);
   });
 
-  it('allows a new initialization after a failed initialization settles', async () => {
+  it('allows a new initialization after a failed initialization settles without reset', async () => {
     const failure = new Error('state initialization failed');
     const initialize = vi.fn<() => Promise<void>>().mockRejectedValueOnce(failure).mockResolvedValueOnce(undefined);
     const gate = createInitializationGate(initialize, vi.fn());
 
     await gate.initialize();
-    gate.reset();
     await gate.initialize();
 
     expect(initialize).toHaveBeenCalledTimes(2);

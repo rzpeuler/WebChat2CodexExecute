@@ -16,12 +16,12 @@ export function createInitializationGate(
   let initializationSettled = false;
   let resetRequested = false;
 
-  const settleInitialization = (promise: Promise<void>): void => {
+  const settleInitialization = (promise: Promise<void>, failed: boolean): void => {
     if (initializationPromise !== promise) {
       return;
     }
     initializationSettled = true;
-    if (resetRequested) {
+    if (resetRequested || failed) {
       initializationPromise = null;
       initializationSettled = false;
       resetRequested = false;
@@ -31,9 +31,11 @@ export function createInitializationGate(
   return {
     initialize: (): Promise<void> => {
       if (initializationPromise === null) {
-        initializationPromise = Promise.resolve()
+        let failed = false;
+        const promise = Promise.resolve()
           .then(initialize)
           .catch((error: unknown) => {
+            failed = true;
             const diagnostic: ApplicationInitializationDiagnostic = {
               code: 'APPLICATION_INITIALIZATION_FAILED',
               message: 'The Electron application could not be initialized.',
@@ -45,10 +47,10 @@ export function createInitializationGate(
               // back into an unhandled rejection.
             }
           });
-        const promise = initializationPromise;
+        initializationPromise = promise;
         void promise.then(
-          () => settleInitialization(promise),
-          () => settleInitialization(promise),
+          () => settleInitialization(promise, failed),
+          () => settleInitialization(promise, failed),
         );
       }
       return initializationPromise;
