@@ -93,7 +93,10 @@ function sanitizeValue(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value)
         .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, child]) => [key, sanitizeValue(child)]),
+        .map(([key, child]) => [
+          key,
+          /cookie|password|token|secret|api[_-]?key|auth/i.test(key) ? '[REDACTED]' : sanitizeValue(child),
+        ]),
     );
   }
   return value;
@@ -110,12 +113,33 @@ function documentsFrom(governance: GovernanceManifest | GovernanceManifestIndex)
   return (governance as GovernanceManifest).documents;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function governanceVersion(governance: GovernanceManifest | GovernanceManifestIndex): string | number {
+  return 'version' in governance ? governance.version : 1;
+}
+
+function governanceExtensions(governance: GovernanceManifest | GovernanceManifestIndex): Record<string, unknown> {
+  const extensions = (governance as GovernanceManifestIndex).extensions;
+  if (isRecord(extensions)) {
+    return extensions;
+  }
+  if ('version' in governance) {
+    return Object.fromEntries(Object.entries(governance).filter(([key]) => key !== 'version' && key !== 'documents'));
+  }
+  return {};
+}
+
 function manifestIndex(governance: GovernanceManifest | GovernanceManifestIndex): GovernanceManifestIndex {
   if (Array.isArray((governance as GovernanceManifestIndex).all)) {
     return governance as GovernanceManifestIndex;
   }
   const all = documentsFrom(governance);
   return {
+    version: governanceVersion(governance),
+    extensions: governanceExtensions(governance),
     all,
     active: all.filter((document) => document.status === 'active'),
     candidate: all.filter((document) => document.status === 'candidate'),
@@ -125,15 +149,7 @@ function manifestIndex(governance: GovernanceManifest | GovernanceManifestIndex)
 }
 
 function formatDocuments(label: string, documents: GovernanceManifestDocument[]): string {
-  const entries = documents.map((document) => ({
-    id: document.id,
-    path: document.path,
-    audience: document.audience,
-    version: document.version,
-    status: document.status,
-    ...(typeof document.type === 'string' ? { type: document.type } : {}),
-  }));
-  return `${label}: ${stableJson(entries)}`;
+  return `${label}: ${stableJson(documents)}`;
 }
 
 function formatArchitecture(revisions: SolArchitectureRevision[]): string {
@@ -163,6 +179,8 @@ export class SolPromptCompiler {
       `current_branch: ${sanitizeText(input.project.currentBranch)}`,
       `current_commit: ${sanitizeText(input.project.headCommit)}`,
       `governance_manifest: ${sanitizeText(input.project.governanceManifestPath)}`,
+      `governance_version: ${sanitizeText(String(index.version))}`,
+      `governance_extensions: ${stableJson(index.extensions)}`,
       formatDocuments('governance_active', index.active),
       formatDocuments('governance_candidate', index.candidate),
       formatDocuments('governance_history', index.history),

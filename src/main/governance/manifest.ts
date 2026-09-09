@@ -2,7 +2,13 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parse, stringify } from 'yaml';
 import { AtomicTextFileStore } from '../state/persistence.js';
-import { isPathWithinProject, resolveProjectPath } from '../project/config.js';
+import {
+  assertSafeProjectPath,
+  isPathWithinProject,
+  realProjectRoot,
+  resolveProjectPath,
+  PathSafetyError,
+} from '../security/path-safety.js';
 
 export const GOVERNANCE_DOCUMENT_STATUSES = ['active', 'candidate', 'history'] as const;
 export type GovernanceDocumentStatus = (typeof GOVERNANCE_DOCUMENT_STATUSES)[number];
@@ -24,6 +30,8 @@ export interface GovernanceManifest {
 }
 
 export interface GovernanceManifestIndex {
+  version: string | number;
+  extensions: Record<string, unknown>;
   all: GovernanceManifestDocument[];
   active: GovernanceManifestDocument[];
   candidate: GovernanceManifestDocument[];
@@ -32,7 +40,11 @@ export interface GovernanceManifestIndex {
 }
 
 export type GovernanceManifestErrorCode =
-  'MANIFEST_NOT_FOUND' | 'MANIFEST_INVALID_YAML' | 'MANIFEST_INVALID' | 'MANIFEST_PATH_OUTSIDE_PROJECT';
+  | 'MANIFEST_NOT_FOUND'
+  | 'MANIFEST_INVALID_YAML'
+  | 'MANIFEST_INVALID'
+  | 'MANIFEST_PATH_OUTSIDE_PROJECT'
+  | 'MANIFEST_PATH_UNSAFE';
 
 export class GovernanceManifestError extends Error {
   readonly code: GovernanceManifestErrorCode;
@@ -105,7 +117,12 @@ export function validateGovernanceManifest(value: unknown, projectRoot: string):
 
 export function indexGovernanceManifest(manifest: GovernanceManifest): GovernanceManifestIndex {
   const all = [...manifest.documents];
+  const extensions = Object.fromEntries(
+    Object.entries(manifest).filter(([key]) => key !== 'version' && key !== 'documents'),
+  );
   return {
+    version: manifest.version,
+    extensions,
     all,
     active: all.filter((document) => document.status === 'active'),
     candidate: all.filter((document) => document.status === 'candidate'),
@@ -140,6 +157,7 @@ export class GovernanceManifestStore {
   }
 
   async load(): Promise<GovernanceManifest | null> {
+    await this.assertSafeManifestPath();
     const source = await this.textStore.load();
     if (source === null) {
       return null;
@@ -156,7 +174,9 @@ export class GovernanceManifestStore {
         },
       );
     }
-    return validateGovernanceManifest(value, this.projectRoot);
+    const manifest = validateGovernanceManifest(value, this.projectRoot);
+    await this.assertSafeDocumentPaths(manifest);
+    return manifest;
   }
 
   async loadIndex(): Promise<GovernanceManifestIndex> {
@@ -165,12 +185,14 @@ export class GovernanceManifestStore {
   }
 
   async save(manifest: GovernanceManifest): Promise<void> {
+    await this.assertSafeManifestPath();
     const validated = validateGovernanceManifest(manifest, this.projectRoot);
+    await this.assertSafeDocumentPaths(validated);
     await this.textStore.save(stringify(validated));
   }
 
   async readDocument(document: GovernanceManifestDocument): Promise<string> {
-    const documentPath = resolveProjectPath(this.projectRoot, document.path);
+    const documentPath = await this.safeDocumentPath(document);
     try {
       return await readFile(documentPath, 'utf8');
     } catch (error) {
@@ -178,6 +200,41 @@ export class GovernanceManifestStore {
         cause: error,
       });
     }
+  }
+
+  private async assertSafeManifestPath(): Promise<void> {
+    try {
+      await realProjectRoot(this.projectRoot);
+      await assertSafeProjectPath(this.projectRoot, this.manifestPath);
+    } catch (error) {
+      if (error instanceof PathSafetyError) {
+        throw new GovernanceManifestError(
+          error.code === 'PATH_OUTSIDE_PROJECT' ? 'MANIFEST_PATH_OUTSIDE_PROJECT' : 'MANIFEST_PATH_UNSAFE',
+          `Manifest path is not safe: ${this.manifestPath}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async safeDocumentPath(document: GovernanceManifestDocument): Promise<string> {
+    try {
+      return await assertSafeProjectPath(this.projectRoot, resolveProjectPath(this.projectRoot, document.path));
+    } catch (error) {
+      if (error instanceof PathSafetyError) {
+        throw new GovernanceManifestError(
+          'MANIFEST_PATH_OUTSIDE_PROJECT',
+          `Manifest document path is not safe: ${document.path}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async assertSafeDocumentPaths(manifest: GovernanceManifest): Promise<void> {
+    await Promise.all(manifest.documents.map((document) => this.safeDocumentPath(document)));
   }
 }
 

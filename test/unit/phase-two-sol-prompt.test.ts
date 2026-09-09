@@ -87,4 +87,37 @@ describe('Sol initialization prompt compiler', () => {
     expect(prompt).toContain('More than one LUNA_TASK is a protocol error');
     expect(prompt).toContain('Multiple governance changes and architecture freezes are allowed');
   });
+
+  it('includes the manifest version and sanitized deterministic extension fields', () => {
+    const input = {
+      project,
+      governance: {
+        version: 9,
+        extensionZ: 'authorization: Bearer ghp_hidden',
+        extensionA: { password: 'do-not-leak', stable: true },
+        documents: [
+          {
+            id: 'policy',
+            path: 'docs/policy.md',
+            audience: ['Sol'],
+            version: 2,
+            status: 'active' as const,
+            customField: 'preserve-me',
+          },
+        ],
+      },
+    };
+    const compiler = new SolPromptCompiler();
+    const first = compiler.compile(input);
+    const second = compiler.compile({ ...input, governance: { ...input.governance } });
+
+    expect(first).toEqual(second);
+    expect(first.dynamicContext).toContain('governance_version: 9');
+    expect(first.dynamicContext).toContain('customField');
+    expect(first.dynamicContext).toContain('preserve-me');
+    expect(first.dynamicContext).toContain('extensionA');
+    expect(first.dynamicContext).toContain('[REDACTED-CREDENTIAL]');
+    expect(first.dynamicContext).not.toContain('ghp_hidden');
+    expect(first.dynamicContext).not.toContain('do-not-leak');
+  });
 });

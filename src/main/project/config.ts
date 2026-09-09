@@ -1,7 +1,7 @@
-import { access, realpath } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { execFile as execFileCallback } from 'node:child_process';
-import { isAbsolute, relative, resolve, sep, join } from 'node:path';
+import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AtomicJsonFileStore } from '../state/persistence.js';
 import {
@@ -11,8 +11,10 @@ import {
   type ProjectConfigInput,
   type ProjectScanResult,
 } from '../../shared/contracts/project-config.js';
-import { GovernanceManifestStore } from '../governance/manifest.js';
+import { GovernanceManifestStore, type GovernanceManifestDocument } from '../governance/manifest.js';
 import { SolPromptCompiler, type SolPromptCompilation } from '../sol/prompt-compiler.js';
+import { assertSafeProjectPath, realProjectRoot, PathSafetyError } from '../security/path-safety.js';
+import { resolveProjectPath } from '../security/path-safety.js';
 
 const execFile = promisify(execFileCallback);
 const DEFAULT_MANIFEST_RELATIVE_PATH = 'docs/governance/governance-manifest.yaml';
@@ -45,20 +47,7 @@ function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && 'code' in error && error.code === code;
 }
 
-export function isPathWithinProject(projectRoot: string, candidatePath: string): boolean {
-  const root = resolve(projectRoot);
-  const candidate = resolve(candidatePath);
-  const difference = relative(root, candidate);
-  return difference === '' || (difference !== '..' && !difference.startsWith(`..${sep}`) && !isAbsolute(difference));
-}
-
-export function resolveProjectPath(projectRoot: string, candidatePath: string): string {
-  const resolved = resolve(projectRoot, candidatePath);
-  if (!isPathWithinProject(projectRoot, resolved)) {
-    throw new ProjectConfigError('PATH_OUTSIDE_PROJECT', `Path must remain inside project: ${candidatePath}`);
-  }
-  return resolved;
-}
+export { isPathWithinProject, resolveProjectPath } from '../security/path-safety.js';
 
 export function redactRemoteUrl(remoteUrl: string | null | undefined): string | null {
   if (remoteUrl === null || remoteUrl === undefined || remoteUrl.trim() === '') {
@@ -99,7 +88,7 @@ export async function scanGitProject(localPath: string): Promise<ProjectScanResu
   }
   const requestedPath = resolve(localPath);
   try {
-    await access(requestedPath);
+    await realProjectRoot(requestedPath);
   } catch (error) {
     throw new ProjectConfigError('INVALID_PROJECT_PATH', `Project path is not accessible: ${requestedPath}`, {
       cause: error,
@@ -108,7 +97,7 @@ export async function scanGitProject(localPath: string): Promise<ProjectScanResu
 
   let repositoryRoot: string;
   try {
-    repositoryRoot = await realpath(await runGit(['rev-parse', '--show-toplevel'], requestedPath));
+    repositoryRoot = await realProjectRoot(await runGit(['rev-parse', '--show-toplevel'], requestedPath));
     if (trimOutput(await runGit(['rev-parse', '--is-inside-work-tree'], requestedPath)) !== 'true') {
       throw new Error('not a work tree');
     }
@@ -143,6 +132,35 @@ export async function scanGitProject(localPath: string): Promise<ProjectScanResu
       });
     }
   }
+  try {
+    await assertSafeProjectPath(repositoryRoot, manifestPath);
+  } catch (error) {
+    if (error instanceof PathSafetyError) {
+      throw new ProjectConfigError(
+        error.code === 'PATH_OUTSIDE_PROJECT' ? 'PATH_OUTSIDE_PROJECT' : 'INVALID_PROJECT_PATH',
+        error.message,
+        {
+          cause: error,
+        },
+      );
+    }
+    throw error;
+  }
+
+  let governanceDocumentCandidates: ProjectScanResult['governanceDocumentCandidates'] = [];
+  if (manifestExists) {
+    try {
+      const manifest = await new GovernanceManifestStore(repositoryRoot, manifestPath).load();
+      governanceDocumentCandidates = await Promise.all(
+        (manifest?.documents ?? []).map((document) => toGovernanceDocumentCandidate(repositoryRoot, document)),
+      );
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'MANIFEST_INVALID_YAML')) {
+        throw error;
+      }
+    }
+  }
+
   return {
     projectId: randomUUID(),
     localPath: repositoryRoot,
@@ -151,6 +169,34 @@ export async function scanGitProject(localPath: string): Promise<ProjectScanResu
     headCommit: headResult.value,
     governanceManifestPath: manifestPath,
     governanceManifestExists: manifestExists,
+    governanceDocumentCandidates,
+  };
+}
+
+async function toGovernanceDocumentCandidate(
+  projectRoot: string,
+  document: GovernanceManifestDocument,
+): Promise<ProjectScanResult['governanceDocumentCandidates'][number]> {
+  const documentPath = await assertSafeProjectPath(projectRoot, document.path);
+  let exists = false;
+  try {
+    await access(documentPath);
+    exists = true;
+  } catch (error) {
+    if (!isNodeError(error, 'ENOENT')) {
+      throw new ProjectConfigError('INVALID_PROJECT_PATH', `Could not inspect governance document: ${document.path}`, {
+        cause: error,
+      });
+    }
+  }
+  return {
+    id: document.id,
+    path: document.path,
+    exists,
+    audience: [...document.audience],
+    version: document.version,
+    status: document.status,
+    ...(typeof document.type === 'string' ? { type: document.type } : {}),
   };
 }
 
@@ -174,6 +220,9 @@ function assertNoForbiddenKeys(value: unknown, path = 'config'): void {
 }
 
 export function normalizeProjectConfig(input: ProjectConfigInput): ProjectConfig {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project config must be an object');
+  }
   assertNoForbiddenKeys(input);
   const localPath = resolve(input.localPath);
   const headCommit = input.headCommit?.trim() || '';
@@ -249,8 +298,36 @@ export class ProjectConfigService {
     return scanGitProject(localPath);
   }
 
-  save(config: ProjectConfigInput | ProjectConfig): Promise<ProjectConfig> {
-    return this.store.save(config);
+  async save(configInput: ProjectConfigInput | ProjectConfig): Promise<ProjectConfig> {
+    if (typeof configInput !== 'object' || configInput === null || Array.isArray(configInput)) {
+      throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project config must be an object');
+    }
+    const scan = await scanGitProject(configInput.localPath);
+    const suppliedBranch = typeof configInput.currentBranch === 'string' ? configInput.currentBranch.trim() : '';
+    if (suppliedBranch !== '' && suppliedBranch !== scan.currentBranch) {
+      throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project current branch does not match the Git scan');
+    }
+    const suppliedCommit = typeof configInput.headCommit === 'string' ? configInput.headCommit.trim() : '';
+    if (suppliedCommit !== '' && suppliedCommit !== scan.headCommit) {
+      throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project HEAD commit does not match the Git scan');
+    }
+    const suppliedRemote =
+      configInput.remoteUrl === undefined ? scan.remoteUrl : redactRemoteUrl(configInput.remoteUrl);
+    if (suppliedRemote !== scan.remoteUrl) {
+      throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project remote does not match the Git scan');
+    }
+    const normalized = normalizeProjectConfig({
+      ...configInput,
+      projectId: configInput.projectId ?? scan.projectId,
+      localPath: scan.localPath,
+      remoteUrl: scan.remoteUrl,
+      currentBranch: scan.currentBranch,
+      headCommit: scan.headCommit,
+      governanceManifestPath: configInput.governanceManifestPath ?? scan.governanceManifestPath,
+    });
+    await assertSafeProjectPath(normalized.localPath, normalized.reportDirectory);
+    await assertSafeProjectPath(normalized.localPath, normalized.governanceManifestPath);
+    return this.store.save(normalized);
   }
 
   load(projectId: string): Promise<ProjectConfig | null> {
@@ -263,6 +340,9 @@ export class ProjectConfigService {
 
   async previewSolPrompt(configInput: ProjectConfigInput | ProjectConfig): Promise<SolPromptCompilation> {
     const project = normalizeProjectConfig(configInput);
+    await realProjectRoot(project.localPath);
+    await assertSafeProjectPath(project.localPath, project.reportDirectory);
+    await assertSafeProjectPath(project.localPath, project.governanceManifestPath);
     const manifest = await new GovernanceManifestStore(project.localPath, project.governanceManifestPath).load();
     return new SolPromptCompiler().compile({
       project,

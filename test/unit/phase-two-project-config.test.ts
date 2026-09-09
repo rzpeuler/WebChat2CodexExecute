@@ -1,10 +1,15 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile, mkdir } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ProjectConfigStore, normalizeProjectConfig, scanGitProject } from '../../src/main/project/config.js';
+import {
+  ProjectConfigService,
+  ProjectConfigStore,
+  normalizeProjectConfig,
+  scanGitProject,
+} from '../../src/main/project/config.js';
 
 const execFile = promisify(execFileCallback);
 const directories: string[] = [];
@@ -57,9 +62,34 @@ describe('phase two project configuration', () => {
     expect(saved.localPath).toBe(await realpath(repository));
     expect(saved.headCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(saved.remoteUrl).toBe('https://example.com/team/repo.git');
+    expect(scan.governanceDocumentCandidates).toEqual([]);
     expect(await store.get(scan.projectId)).toEqual(saved);
     const persisted = await readFile(storePath, 'utf8');
     expect(persisted).not.toContain('super-secret');
+  });
+
+  it('returns safe registered governance document candidates from a parseable manifest', async () => {
+    const repository = await gitRepository();
+    await mkdir(join(repository, 'docs', 'governance'), { recursive: true });
+    await writeFile(join(repository, 'docs', 'governance', 'policy.md'), '# policy\n', 'utf8');
+    await writeFile(
+      join(repository, 'docs', 'governance', 'governance-manifest.yaml'),
+      'version: 7\ndocuments:\n  - id: policy\n    path: docs/governance/policy.md\n    audience: [Sol]\n    version: 2\n    status: active\n    type: internal-policy\n',
+      'utf8',
+    );
+
+    const scan = await scanGitProject(repository);
+    expect(scan.governanceDocumentCandidates).toEqual([
+      {
+        id: 'policy',
+        path: 'docs/governance/policy.md',
+        exists: true,
+        audience: ['Sol'],
+        version: 2,
+        status: 'active',
+        type: 'internal-policy',
+      },
+    ]);
   });
 
   it('rejects non-repositories and report paths outside the repository', async () => {
@@ -84,5 +114,51 @@ describe('phase two project configuration', () => {
         password: 'must-not-save',
       } as never),
     ).rejects.toMatchObject({ code: 'CREDENTIAL_FIELD_FORBIDDEN' });
+  });
+
+  it('re-scans Git before saving and rejects forged repository facts', async () => {
+    const repository = await gitRepository();
+    const scan = await scanGitProject(repository);
+    const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
+
+    await expect(
+      service.save({
+        ...scan,
+        reportDirectory: 'reports',
+        currentBranch: scan.currentBranch === 'HEAD' ? 'forged-branch' : 'forged-branch',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PROJECT_CONFIG' });
+    await expect(
+      service.save({
+        ...scan,
+        reportDirectory: 'reports',
+        headCommit: 'a'.repeat(40),
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PROJECT_CONFIG' });
+  });
+
+  it('rejects report paths that resolve through a junction or symlink outside the repository', async () => {
+    const repository = await gitRepository();
+    const outside = await temporaryDirectory();
+    const link = join(repository, 'reports-link');
+    let linked = true;
+    try {
+      await symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      linked = false;
+    }
+
+    const scan = await scanGitProject(repository);
+    const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
+    if (linked) {
+      await expect(service.save({ ...scan, reportDirectory: 'reports-link/new' })).rejects.toMatchObject({
+        code: 'PATH_OUTSIDE_PROJECT',
+      });
+    } else {
+      await mkdir(join(repository, 'missing-parent'), { recursive: true });
+      await expect(service.save({ ...scan, reportDirectory: 'missing-parent/new/reports' })).resolves.toMatchObject({
+        reportDirectory: join(repository, 'missing-parent', 'new', 'reports'),
+      });
+    }
   });
 });

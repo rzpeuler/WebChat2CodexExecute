@@ -18,6 +18,17 @@ export interface ProjectScanResult {
   headCommit: string;
   governanceManifestPath: string;
   governanceManifestExists: boolean;
+  governanceDocumentCandidates: GovernanceDocumentCandidate[];
+}
+
+export interface GovernanceDocumentCandidate {
+  id: string;
+  path: string;
+  exists: boolean;
+  audience: string[];
+  version: string | number;
+  status: 'active' | 'candidate' | 'history';
+  type?: string;
 }
 
 export interface ProjectConfigInput {

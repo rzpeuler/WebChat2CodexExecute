@@ -53,7 +53,9 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     }
     if (!ipcRegistered) {
       const projectConfigStore = createProjectConfigStore(defaultProjectConfigPath(app.getPath('userData')));
-      registerIpcHandlers(ipcMain, app.getVersion(), new ProjectConfigService(projectConfigStore));
+      registerIpcHandlers(ipcMain, app.getVersion(), new ProjectConfigService(projectConfigStore), {
+        getTrustedWindow: () => mainWindow,
+      });
       ipcRegistered = true;
     }
     mainWindow = new BrowserWindow({

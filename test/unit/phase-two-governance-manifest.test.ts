@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -79,5 +79,36 @@ describe('governance manifest registry', () => {
     await expect(new GovernanceManifestStore(projectRoot, manifestPath).load()).rejects.toBeInstanceOf(
       GovernanceManifestError,
     );
+  });
+
+  it('rejects a registered document that resolves through a symlink outside the project', async () => {
+    const projectRoot = await temporaryDirectory();
+    const outside = await temporaryDirectory();
+    const outsideDocument = join(outside, 'policy.md');
+    const linkedDocument = join(projectRoot, 'policy.md');
+    await writeFile(outsideDocument, 'outside\n', 'utf8');
+    let linked = true;
+    try {
+      await symlink(outsideDocument, linkedDocument, 'file');
+    } catch {
+      linked = false;
+    }
+    const manifest = {
+      version: 1,
+      documents: [{ id: 'policy', path: 'policy.md', audience: ['Sol'], version: 1, status: 'active' as const }],
+    };
+    const manifestPath = join(projectRoot, 'governance-manifest.yaml');
+    await writeFile(
+      manifestPath,
+      'version: 1\ndocuments:\n  - id: policy\n    path: policy.md\n    audience: [Sol]\n    version: 1\n    status: active\n',
+      'utf8',
+    );
+    if (linked) {
+      await expect(new GovernanceManifestStore(projectRoot, manifestPath).load()).rejects.toMatchObject({
+        code: 'MANIFEST_PATH_OUTSIDE_PROJECT',
+      });
+    } else {
+      await expect(new GovernanceManifestStore(projectRoot, manifestPath).save(manifest)).resolves.toBeUndefined();
+    }
   });
 });
