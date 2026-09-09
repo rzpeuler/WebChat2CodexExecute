@@ -3,10 +3,7 @@ export interface SingleInstanceHost {
   onSecondInstance(handler: () => void): void;
 }
 
-export function acquireSingleInstanceLock(
-  host: SingleInstanceHost,
-  onSecondInstance: () => void,
-): boolean {
+export function acquireSingleInstanceLock(host: SingleInstanceHost, onSecondInstance: () => void): boolean {
   const acquired = host.requestSingleInstanceLock();
   if (!acquired) {
     return false;

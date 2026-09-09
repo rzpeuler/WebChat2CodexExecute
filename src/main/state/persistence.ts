@@ -16,6 +16,13 @@ export type SnapshotValidator<T> = (value: unknown) => T;
 
 export interface AtomicJsonFileStoreOptions<T> {
   validate?: SnapshotValidator<T>;
+  lock?: FileLockOptions;
+}
+
+export interface FileLockOptions {
+  timeoutMs?: number;
+  retryMs?: number;
+  staleMs?: number;
 }
 
 export class SnapshotFormatError extends Error {
@@ -83,11 +90,7 @@ async function readLockOwner(lockPath: string): Promise<FileLockOwner | null> {
       return null;
     }
     const record = value as Record<string, unknown>;
-    if (
-      typeof record.pid !== 'number'
-      || typeof record.token !== 'string'
-      || typeof record.createdAt !== 'string'
-    ) {
+    if (typeof record.pid !== 'number' || typeof record.token !== 'string' || typeof record.createdAt !== 'string') {
       return null;
     }
     return { pid: record.pid, token: record.token, createdAt: record.createdAt };
@@ -96,7 +99,7 @@ async function readLockOwner(lockPath: string): Promise<FileLockOwner | null> {
   }
 }
 
-async function removeStaleLock(lockPath: string): Promise<void> {
+async function removeStaleLock(lockPath: string, staleMs: number): Promise<void> {
   const owner = await readLockOwner(lockPath);
   if (owner !== null && processIsAlive(owner.pid)) {
     return;
@@ -104,7 +107,7 @@ async function removeStaleLock(lockPath: string): Promise<void> {
 
   try {
     const lockStats = await stat(lockPath);
-    if (Date.now() - lockStats.mtimeMs < FILE_LOCK_STALE_MS) {
+    if (Date.now() - lockStats.mtimeMs < staleMs) {
       return;
     }
     await rm(lockPath, { force: true });
@@ -115,9 +118,12 @@ async function removeStaleLock(lockPath: string): Promise<void> {
   }
 }
 
-async function acquireFileLock(targetPath: string): Promise<() => Promise<void>> {
+async function acquireFileLock(targetPath: string, options: FileLockOptions = {}): Promise<() => Promise<void>> {
   const lockPath = `${targetPath}.lock`;
-  const deadline = Date.now() + FILE_LOCK_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? FILE_LOCK_TIMEOUT_MS;
+  const retryMs = options.retryMs ?? FILE_LOCK_RETRY_MS;
+  const staleMs = options.staleMs ?? FILE_LOCK_STALE_MS;
+  const deadline = Date.now() + timeoutMs;
 
   await ensureParentDirectory(lockPath);
   while (Date.now() <= deadline) {
@@ -148,16 +154,20 @@ async function acquireFileLock(targetPath: string): Promise<() => Promise<void>>
       if (!isNodeError(error, 'EEXIST')) {
         throw error;
       }
-      await removeStaleLock(lockPath);
-      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, FILE_LOCK_RETRY_MS));
+      await removeStaleLock(lockPath, staleMs);
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, retryMs));
     }
   }
 
   throw new FileLockTimeoutError(lockPath);
 }
 
-async function withFileLock<T>(targetPath: string, operation: () => Promise<T>): Promise<T> {
-  const release = await acquireFileLock(targetPath);
+async function withFileLock<T>(
+  targetPath: string,
+  operation: () => Promise<T>,
+  options: FileLockOptions | undefined,
+): Promise<T> {
+  const release = await acquireFileLock(targetPath, options);
   try {
     return await operation();
   } finally {
@@ -187,7 +197,10 @@ async function replaceAtomically(tempPath: string, targetPath: string): Promise<
     await rm(backupPath, { force: true });
   } catch (error) {
     try {
-      const targetExists = await readFile(targetPath).then(() => true, () => false);
+      const targetExists = await readFile(targetPath).then(
+        () => true,
+        () => false,
+      );
       if (!targetExists) {
         await rename(backupPath, targetPath);
       }
@@ -199,10 +212,7 @@ async function replaceAtomically(tempPath: string, targetPath: string): Promise<
   }
 }
 
-async function readJson<T>(
-  filePath: string,
-  validate: SnapshotValidator<T> | undefined,
-): Promise<T> {
+async function readJson<T>(filePath: string, validate: SnapshotValidator<T> | undefined): Promise<T> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(filePath, 'utf8')) as unknown;
@@ -225,15 +235,17 @@ async function readJson<T>(
 export class AtomicJsonFileStore<T> implements StateSnapshotStore<T> {
   private readonly filePath: string;
   private readonly validate: SnapshotValidator<T> | undefined;
+  private readonly lock: FileLockOptions | undefined;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(filePath: string, options: AtomicJsonFileStoreOptions<T> = {}) {
     this.filePath = resolve(filePath);
     this.validate = options.validate;
+    this.lock = options.lock;
   }
 
   load(): Promise<T | null> {
-    return withFileLock(this.filePath, () => this.loadWithoutLock());
+    return withFileLock(this.filePath, () => this.loadWithoutLock(), this.lock);
   }
 
   private async loadWithoutLock(): Promise<T | null> {
@@ -272,60 +284,73 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T> {
   }
 
   private async saveOne(value: T): Promise<void> {
-    await withFileLock(this.filePath, async () => {
-      const tempPath = join(
-        dirname(this.filePath),
-        `.${basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`,
-      );
-      try {
-        await writePrivateFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
-        await replaceAtomically(tempPath, this.filePath);
-        await chmod(this.filePath, 0o600).catch(() => undefined);
-      } finally {
-        await rm(tempPath, { force: true });
-      }
-    });
+    await withFileLock(
+      this.filePath,
+      async () => {
+        const tempPath = join(dirname(this.filePath), `.${basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`);
+        try {
+          await writePrivateFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
+          await replaceAtomically(tempPath, this.filePath);
+          await chmod(this.filePath, 0o600).catch(() => undefined);
+        } finally {
+          await rm(tempPath, { force: true });
+        }
+      },
+      this.lock,
+    );
   }
 }
 
 export class JsonlFileEventLog<T> implements EventLog<T> {
   private readonly filePath: string;
+  private readonly lock: FileLockOptions | undefined;
   private writeChain: Promise<void> = Promise.resolve();
 
-  constructor(filePath: string) {
+  constructor(filePath: string, options: FileLockOptions | undefined = undefined) {
     this.filePath = resolve(filePath);
+    this.lock = options;
   }
 
   append(event: T): Promise<void> {
-    const appendOperation = this.writeChain.then(() => withFileLock(this.filePath, async () => {
-      await ensureParentDirectory(this.filePath);
-      const handle = await open(this.filePath, 'a', 0o600);
-      try {
-        await handle.writeFile(`${JSON.stringify(event)}\n`, 'utf8');
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      await chmod(this.filePath, 0o600).catch(() => undefined);
-    }));
+    const appendOperation = this.writeChain.then(() =>
+      withFileLock(
+        this.filePath,
+        async () => {
+          await ensureParentDirectory(this.filePath);
+          const handle = await open(this.filePath, 'a', 0o600);
+          try {
+            await handle.writeFile(`${JSON.stringify(event)}\n`, 'utf8');
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          await chmod(this.filePath, 0o600).catch(() => undefined);
+        },
+        this.lock,
+      ),
+    );
     this.writeChain = appendOperation.catch(() => undefined);
     return appendOperation;
   }
 
   readAll(): Promise<T[]> {
-    return withFileLock(this.filePath, async () => {
-      try {
-        const contents = await readFile(this.filePath, 'utf8');
-        return contents
-          .split('\n')
-          .filter((line) => line.length > 0)
-          .map((line) => JSON.parse(line) as T);
-      } catch (error) {
-        if (isNodeError(error, 'ENOENT')) {
-          return [];
+    return withFileLock(
+      this.filePath,
+      async () => {
+        try {
+          const contents = await readFile(this.filePath, 'utf8');
+          return contents
+            .split('\n')
+            .filter((line) => line.length > 0)
+            .map((line) => JSON.parse(line) as T);
+        } catch (error) {
+          if (isNodeError(error, 'ENOENT')) {
+            return [];
+          }
+          throw error;
         }
-        throw error;
-      }
-    });
+      },
+      this.lock,
+    );
   }
 }

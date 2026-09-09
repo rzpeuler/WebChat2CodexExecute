@@ -1,11 +1,4 @@
-export const TOP_LEVEL_STATUSES = [
-  'IDLE',
-  'ARMED',
-  'RUNNING',
-  'PAUSED',
-  'NEEDS_USER_ACTION',
-  'FAILED',
-] as const;
+export const TOP_LEVEL_STATUSES = ['IDLE', 'ARMED', 'RUNNING', 'PAUSED', 'NEEDS_USER_ACTION', 'FAILED'] as const;
 
 export type TopLevelStatus = (typeof TOP_LEVEL_STATUSES)[number];
 
@@ -80,13 +73,14 @@ export function assertTopLevelState(value: unknown): asserts value is TopLevelSt
   if (state.activeTaskId !== null && typeof state.activeTaskId !== 'string') {
     throw new TypeError('State activeTaskId must be a string or null');
   }
-  if (state.lastError !== null && (
-    typeof state.lastError !== 'object'
-    || state.lastError === null
-    || Array.isArray(state.lastError)
-    || typeof (state.lastError as Record<string, unknown>).code !== 'string'
-    || typeof (state.lastError as Record<string, unknown>).message !== 'string'
-  )) {
+  if (
+    state.lastError !== null &&
+    (typeof state.lastError !== 'object' ||
+      state.lastError === null ||
+      Array.isArray(state.lastError) ||
+      typeof (state.lastError as Record<string, unknown>).code !== 'string' ||
+      typeof (state.lastError as Record<string, unknown>).message !== 'string')
+  ) {
     throw new TypeError('State lastError must be an error object or null');
   }
 }
