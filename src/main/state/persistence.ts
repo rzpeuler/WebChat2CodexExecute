@@ -53,6 +53,11 @@ export interface JsonlFileEventLogOptions extends FileLockOptions {
   chmod?: ChmodFile;
 }
 
+export interface AtomicTextFileStoreOptions extends FileLockOptions {
+  onDiagnostic?: (diagnostic: PersistenceDiagnostic) => void;
+  chmod?: ChmodFile;
+}
+
 export class SnapshotFormatError extends Error {
   readonly filePath: string;
 
@@ -179,7 +184,10 @@ async function acquireFileLock(targetPath: string, options: FileLockOptions = {}
         }
       };
     } catch (error) {
-      if (!isNodeError(error, 'EEXIST')) {
+      const lockContention =
+        isNodeError(error, 'EEXIST') ||
+        (process.platform === 'win32' && (isNodeError(error, 'EPERM') || isNodeError(error, 'EACCES')));
+      if (!lockContention) {
         throw error;
       }
       await removeStaleLock(lockPath, staleMs);
@@ -387,6 +395,87 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
     );
     this.writeChain = clearOperation.catch(() => undefined);
     return clearOperation;
+  }
+}
+
+/**
+ * Crash-safe text persistence for formats such as YAML that cannot be stored
+ * through AtomicJsonFileStore. It deliberately shares the same lock,
+ * temporary-file, backup, and permission rules as JSON state.
+ */
+export class AtomicTextFileStore implements StateSnapshotStore<string> {
+  private readonly filePath: string;
+  private readonly lock: FileLockOptions | undefined;
+  private readonly onDiagnostic: ((diagnostic: PersistenceDiagnostic) => void) | undefined;
+  private readonly chmod: ChmodFile;
+  private writeChain: Promise<void> = Promise.resolve();
+
+  constructor(filePath: string, options: AtomicTextFileStoreOptions = {}) {
+    this.filePath = resolve(filePath);
+    this.lock = options;
+    this.onDiagnostic = options.onDiagnostic;
+    this.chmod = options.chmod ?? chmod;
+  }
+
+  load(): Promise<string | null> {
+    return withFileLock(
+      this.filePath,
+      async () => {
+        try {
+          return await readFile(this.filePath, 'utf8');
+        } catch (error) {
+          if (!isNodeError(error, 'ENOENT')) {
+            throw error;
+          }
+          try {
+            return await readFile(`${this.filePath}.bak`, 'utf8');
+          } catch (backupError) {
+            if (isNodeError(backupError, 'ENOENT')) {
+              return null;
+            }
+            throw backupError;
+          }
+        }
+      },
+      this.lock,
+    );
+  }
+
+  save(value: string): Promise<void> {
+    const saveOperation = this.writeChain.then(() =>
+      withFileLock(
+        this.filePath,
+        async () => {
+          const tempPath = join(
+            dirname(this.filePath),
+            `.${basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`,
+          );
+          try {
+            await writePrivateFile(tempPath, value);
+            await replaceAtomically(tempPath, this.filePath);
+            try {
+              await this.chmod(this.filePath, 0o600);
+            } catch (error) {
+              const diagnostic: ChmodFailureDiagnostic = {
+                code: 'PERSISTENCE_CHMOD_FAILED',
+                filePath: this.filePath,
+                message: `Could not restrict permissions for persisted file ${this.filePath}.`,
+              };
+              try {
+                this.onDiagnostic?.(diagnostic);
+              } finally {
+                throw error;
+              }
+            }
+          } finally {
+            await rm(tempPath, { force: true });
+          }
+        },
+        this.lock,
+      ),
+    );
+    this.writeChain = saveOperation.catch(() => undefined);
+    return saveOperation;
   }
 }
 

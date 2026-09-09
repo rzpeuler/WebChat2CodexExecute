@@ -39,3 +39,63 @@ p {
   color: #aab4c7;
   font-size: 0.9rem;
 }
+
+.panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 28px;
+  padding: 20px;
+  border: 1px solid #34415d;
+  border-radius: 14px;
+  background: rgb(15 20 31 / 70%);
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: #c8d2e8;
+  font-size: 0.88rem;
+}
+
+input,
+button {
+  box-sizing: border-box;
+  border: 1px solid #465574;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font: inherit;
+}
+
+input {
+  width: 100%;
+  color: #f4f7fb;
+  background: #111827;
+}
+
+button {
+  color: #f4f7fb;
+  background: #263b72;
+  cursor: pointer;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.preview {
+  max-height: 360px;
+  overflow: auto;
+  margin-top: 18px;
+  padding: 16px;
+  white-space: pre-wrap;
+  border-radius: 10px;
+  color: #d7e0f5;
+  background: #0a0e16;
+  font:
+    0.8rem/1.5 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+}

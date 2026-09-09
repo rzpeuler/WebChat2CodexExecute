@@ -12,7 +12,8 @@
     "start": "npm run build && electron ."
   },
   "dependencies": {
-    "electron": "^38.1.0"
+    "electron": "^38.1.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

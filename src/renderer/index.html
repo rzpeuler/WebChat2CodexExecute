@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -12,10 +12,22 @@
   </head>
   <body>
     <main class="shell">
-      <p class="eyebrow">LOCAL ORCHESTRATOR</p>
-      <h1>Web Chat 2 Codex</h1>
-      <p id="status">Starting secure renderer…</p>
-      <p id="version" class="muted">Loading runtime information…</p>
+      <p class="eyebrow">LOCAL ORCHESTRATOR / PHASE 2</p>
+      <h1>项目初始化</h1>
+      <p id="status">正在启动安全渲染器…</p>
+      <p id="version" class="muted">正在读取运行时信息…</p>
+      <form id="project-form" class="panel">
+        <label>本地 Git 仓库路径<input id="local-path" required placeholder="C:\\Projects\\my-repo" /></label>
+        <label>目标分支<input id="target-branch" placeholder="保持扫描到的当前分支" /></label>
+        <label>报告目录<input id="report-directory" required value="docs/task-reports" /></label>
+        <div class="actions">
+          <button id="scan" type="button">扫描项目</button>
+          <button id="save" type="submit">保存配置</button>
+          <button id="preview" type="button">预览 Sol 提示词</button>
+        </div>
+      </form>
+      <pre id="project-details" class="preview" aria-live="polite"></pre>
+      <pre id="prompt-preview" class="preview" aria-live="polite"></pre>
     </main>
     <script type="module" src="./app.js"></script>
   </body>

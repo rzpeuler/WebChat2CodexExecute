@@ -13,6 +13,7 @@ import {
   type TopLevelStateTransitionEvent,
 } from './state/coordinator.js';
 import { parseTopLevelState, type TopLevelState } from '../shared/contracts/top-level-state.js';
+import { createProjectConfigStore, defaultProjectConfigPath, ProjectConfigService } from './project/config.js';
 
 const appDirectory = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
@@ -51,7 +52,8 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
       );
     }
     if (!ipcRegistered) {
-      registerIpcHandlers(ipcMain, app.getVersion());
+      const projectConfigStore = createProjectConfigStore(defaultProjectConfigPath(app.getPath('userData')));
+      registerIpcHandlers(ipcMain, app.getVersion(), new ProjectConfigService(projectConfigStore));
       ipcRegistered = true;
     }
     mainWindow = new BrowserWindow({

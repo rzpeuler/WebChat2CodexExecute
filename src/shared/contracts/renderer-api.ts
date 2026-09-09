@@ -3,6 +3,17 @@ export interface RuntimeInfo {
   version: string;
 }
 
+import type { ProjectConfig, ProjectConfigInput, ProjectScanResult } from './project-config.js';
+
+export interface SolPromptPreview {
+  initializationPrompt: string;
+  dynamicContext: string;
+}
+
 export interface RendererApi {
   getRuntimeInfo(): Promise<RuntimeInfo>;
+  scanProject(localPath: string): Promise<ProjectScanResult>;
+  saveProjectConfig(config: ProjectConfigInput): Promise<ProjectConfig>;
+  loadProjectConfigs(): Promise<ProjectConfig[]>;
+  previewSolPrompt(config: ProjectConfigInput): Promise<SolPromptPreview>;
 }
