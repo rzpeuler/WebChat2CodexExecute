@@ -213,6 +213,7 @@ describe('top-level state coordinator', () => {
   it('recovers an appended event when snapshot save fails and then resumes safely', async () => {
     const initialState = createInitialState();
     const snapshotStore = new RecordingSnapshotStore();
+    snapshotStore.saved = initialState;
     const originalSave = snapshotStore.save.bind(snapshotStore);
     let failSave = true;
     snapshotStore.save = async (state) => {
@@ -286,6 +287,64 @@ describe('top-level state coordinator', () => {
         transactionLockPath: transactionLockPath(),
       }),
     ).rejects.toBeInstanceOf(PendingTopLevelStateTransactionRecoveryError);
+    expect(journal.pending).not.toBeNull();
+  });
+
+  it('does not skip the pending transition when the snapshot has the wrong state fields', async () => {
+    const initialState = createInitialState(new Date('2026-09-10T00:00:00.000Z'));
+    const event: TopLevelStateTransitionEvent = {
+      type: 'top-level-state-transition',
+      transactionId: 'mismatched-from-transaction',
+      from: initialState,
+      to: { ...initialState, status: 'ARMED', revision: 1 },
+    };
+    const journal = new MemoryTransactionJournal();
+    await journal.save({ version: 1, status: 'pending', transactionId: event.transactionId, event });
+    const snapshotStore = new RecordingSnapshotStore();
+    snapshotStore.saved = { ...initialState, updatedAt: '2026-09-10T00:00:01.000Z' };
+    const eventLog = new RecordingEventLog();
+    eventLog.events.push(event);
+
+    await expect(
+      recoverPendingTopLevelStateTransaction({
+        eventLog,
+        snapshotStore,
+        transactionJournal: journal,
+        transactionLockPath: transactionLockPath(),
+      }),
+    ).rejects.toMatchObject({
+      name: 'PendingTopLevelStateTransactionRecoveryError',
+      diagnostic: { code: 'PENDING_TOP_LEVEL_STATE_TRANSACTION_UNSAFE' },
+    });
+    expect(snapshotStore.saved).toEqual({ ...initialState, updatedAt: '2026-09-10T00:00:01.000Z' });
+    expect(journal.pending).not.toBeNull();
+  });
+
+  it('refuses to recover a pending event when the current snapshot is missing', async () => {
+    const initialState = createInitialState();
+    const event: TopLevelStateTransitionEvent = {
+      type: 'top-level-state-transition',
+      transactionId: 'missing-snapshot-transaction',
+      from: initialState,
+      to: { ...initialState, status: 'ARMED', revision: 1 },
+    };
+    const journal = new MemoryTransactionJournal();
+    await journal.save({ version: 1, status: 'pending', transactionId: event.transactionId, event });
+    const snapshotStore = new RecordingSnapshotStore();
+    const eventLog = new RecordingEventLog();
+    eventLog.events.push(event);
+
+    await expect(
+      recoverPendingTopLevelStateTransaction({
+        eventLog,
+        snapshotStore,
+        transactionJournal: journal,
+        transactionLockPath: transactionLockPath(),
+      }),
+    ).rejects.toMatchObject({
+      diagnostic: { code: 'PENDING_TOP_LEVEL_STATE_TRANSACTION_UNSAFE' },
+    });
+    expect(snapshotStore.saved).toBeNull();
     expect(journal.pending).not.toBeNull();
   });
 });

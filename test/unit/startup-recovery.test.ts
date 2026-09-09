@@ -2,8 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { createInitialState, type TopLevelState } from '../../src/shared/contracts/top-level-state.js';
 import { recoverTopLevelState } from '../../src/main/state/startup-recovery.js';
 
-function loader(value: unknown | null): { load: () => Promise<unknown | null> } {
-  return { load: async () => value };
+function loader(value: unknown | null): { load: () => Promise<unknown | null>; save: (next: TopLevelState) => Promise<void> } {
+  return {
+    load: async () => value,
+    save: async (next) => {
+      value = next;
+    },
+  };
 }
 
 describe('startup state recovery', () => {
@@ -11,7 +16,8 @@ describe('startup state recovery', () => {
 
   it('starts safely in IDLE and records a diagnostic when no snapshot exists', async () => {
     const diagnostics: string[] = [];
-    const result = await recoverTopLevelState(loader(null), {
+    const snapshotStore = loader(null);
+    const result = await recoverTopLevelState(snapshotStore, {
       now,
       onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.code),
     });
@@ -33,10 +39,12 @@ describe('startup state recovery', () => {
       },
     });
     expect(diagnostics).toEqual(['STATE_SNAPSHOT_MISSING']);
+    await expect(snapshotStore.load()).resolves.toEqual(result.state);
   });
 
   it('falls back to IDLE and records a diagnostic for an invalid snapshot', async () => {
-    const result = await recoverTopLevelState(loader({ status: 'BROKEN' }), { now });
+    const snapshotStore = loader({ status: 'BROKEN' });
+    const result = await recoverTopLevelState(snapshotStore, { now });
 
     expect(result.state).toMatchObject({
       status: 'IDLE',
@@ -46,6 +54,7 @@ describe('startup state recovery', () => {
     });
     expect(result.restored).toBe(false);
     expect(result.diagnostic?.code).toBe('STATE_SNAPSHOT_INVALID');
+    await expect(snapshotStore.load()).resolves.toEqual(result.state);
   });
 
   it('restores state but never permits automatic resume of an unconfirmed task', async () => {

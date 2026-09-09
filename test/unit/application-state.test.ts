@@ -47,8 +47,9 @@ describe('application state initialization', () => {
   });
 
   it('keeps a safe IDLE recovery state queryable when the snapshot is missing', async () => {
+    const snapshotStore = new MemorySnapshotStore(null);
     const applicationState = await initializeApplicationState(
-      new MemorySnapshotStore(null),
+      snapshotStore,
       {
         eventLog: new MemoryEventLog(),
         transactionLockPath: join(tmpdir(), `web-chat2codex-application-${randomUUID()}`),
@@ -60,5 +61,10 @@ describe('application state initialization', () => {
       status: 'IDLE',
       lastError: { code: 'STATE_SNAPSHOT_MISSING' },
     });
+    await expect(applicationState.coordinator.transition('ARMED')).resolves.toMatchObject({
+      status: 'ARMED',
+      revision: 1,
+    });
+    await expect(snapshotStore.load()).resolves.toMatchObject({ status: 'ARMED', revision: 1 });
   });
 });

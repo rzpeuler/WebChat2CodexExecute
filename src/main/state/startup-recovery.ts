@@ -1,5 +1,5 @@
 import { createInitialState, parseTopLevelState, type TopLevelState } from '../../shared/contracts/top-level-state.js';
-import { SnapshotFormatError, type SnapshotLoadDiagnostic } from './persistence.js';
+import { SnapshotFormatError, type SnapshotLoadDiagnostic, type StateSnapshotStore } from './persistence.js';
 
 export interface StartupDiagnostic {
   code:
@@ -24,7 +24,7 @@ export interface StartupRecoveryOptions {
   onDiagnostic?: (diagnostic: StartupDiagnostic, cause?: unknown) => void;
 }
 
-export interface SnapshotLoader {
+export interface SnapshotLoader extends StateSnapshotStore<TopLevelState> {
   load(): Promise<unknown | null>;
   getLastLoadDiagnostic?: () => SnapshotLoadDiagnostic | null;
 }
@@ -40,16 +40,19 @@ function emitDiagnostic(diagnostic: StartupDiagnostic, cause: unknown, options: 
   options.onDiagnostic?.(diagnostic, cause);
 }
 
-function failedRecovery(
+async function failedRecovery(
+  store: SnapshotLoader,
   code: StartupDiagnostic['code'],
   message: string,
   cause: unknown,
   options: StartupRecoveryOptions,
-): StartupRecoveryResult {
+): Promise<StartupRecoveryResult> {
   const diagnostic = { code, message } satisfies StartupDiagnostic;
   emitDiagnostic(diagnostic, cause, options);
+  const safeState = stateWithDiagnostic(options.now ?? new Date(), diagnostic);
+  await store.save(safeState);
   return {
-    state: stateWithDiagnostic(options.now ?? new Date(), diagnostic),
+    state: safeState,
     restored: false,
     requiresUserConfirmation: false,
     canAutoResume: false,
@@ -71,6 +74,7 @@ export async function recoverTopLevelState(
         ? 'STATE_SNAPSHOT_INVALID'
         : 'STATE_SNAPSHOT_LOAD_FAILED';
     return failedRecovery(
+      store,
       code,
       code === 'STATE_SNAPSHOT_INVALID'
         ? 'The persisted top-level state snapshot is invalid.'
@@ -82,6 +86,7 @@ export async function recoverTopLevelState(
 
   if (snapshot === null) {
     return failedRecovery(
+      store,
       'STATE_SNAPSHOT_MISSING',
       'No persisted top-level state snapshot was found; starting safely in IDLE.',
       undefined,
@@ -112,6 +117,7 @@ export async function recoverTopLevelState(
     };
   } catch (error) {
     return failedRecovery(
+      store,
       'STATE_SNAPSHOT_INVALID',
       'The persisted top-level state snapshot is invalid; starting safely in IDLE.',
       error,

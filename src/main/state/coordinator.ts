@@ -12,6 +12,7 @@ import {
   type StateSnapshotStore,
   type TransactionJournal,
 } from './persistence.js';
+import { isDeepStrictEqual } from 'node:util';
 
 export interface TopLevelStateTransitionEvent {
   type: 'top-level-state-transition';
@@ -57,10 +58,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function valuesEqual(first: unknown, second: unknown): boolean {
-  return JSON.stringify(first) === JSON.stringify(second);
-}
-
 function parseTransitionEvent(value: unknown): TopLevelStateTransitionEvent {
   if (!isRecord(value) || value.type !== 'top-level-state-transition' || typeof value.transactionId !== 'string') {
     throw new TypeError('Pending top-level state event is invalid');
@@ -75,7 +72,7 @@ function parseTransitionEvent(value: unknown): TopLevelStateTransitionEvent {
     activeTaskId: value.to.activeTaskId,
     lastError: value.to.lastError,
   });
-  if (!valuesEqual(expected, value.to)) {
+  if (!isDeepStrictEqual(expected, value.to)) {
     throw new TypeError('Pending top-level state event does not describe its state transition');
   }
   return value as unknown as TopLevelStateTransitionEvent;
@@ -162,20 +159,26 @@ export async function recoverPendingTopLevelStateTransaction(
     } catch (error) {
       return unsafeRecovery('The matching top-level state event is invalid.', error);
     }
-    if (!valuesEqual(event, pending.event)) {
+    if (!isDeepStrictEqual(event, pending.event)) {
       return unsafeRecovery('The journal event and event-log event do not match.');
     }
 
-    if (snapshot === null || snapshot.revision < event.to.revision) {
-      await dependencies.snapshotStore.save(event.to);
-      await journal.clear();
-      return { status: 'recovered' };
+    if (snapshot === null) {
+      return unsafeRecovery('The pending transaction cannot be reconciled because the current snapshot is missing.');
     }
-    if (snapshot.revision === event.to.revision && valuesEqual(snapshot, event.to)) {
+    if (isDeepStrictEqual(snapshot, event.to)) {
       await journal.clear();
       return { status: 'cleared' };
     }
-    return unsafeRecovery('The pending transaction cannot be reconciled with the current snapshot.');
+    if (!isDeepStrictEqual(snapshot, event.from)) {
+      return unsafeRecovery(
+        'The pending transaction cannot be reconciled because the current snapshot does not match the event.from state.',
+      );
+    }
+
+    await dependencies.snapshotStore.save(event.to);
+    await journal.clear();
+    return { status: 'recovered' };
   });
 }
 
