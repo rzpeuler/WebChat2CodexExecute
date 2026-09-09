@@ -1,0 +1,21 @@
+{
+  "name": "web-chat2codex-exe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main/app.js",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/copy-renderer-assets.mjs",
+    "start": "npm run build && electron ."
+  },
+  "dependencies": {
+    "electron": "^38.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
