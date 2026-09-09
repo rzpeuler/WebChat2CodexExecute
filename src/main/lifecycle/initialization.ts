@@ -13,6 +13,20 @@ export function createInitializationGate(
   onFailure: (diagnostic: ApplicationInitializationDiagnostic, cause: unknown) => void,
 ): InitializationGate {
   let initializationPromise: Promise<void> | null = null;
+  let initializationSettled = false;
+  let resetRequested = false;
+
+  const settleInitialization = (promise: Promise<void>): void => {
+    if (initializationPromise !== promise) {
+      return;
+    }
+    initializationSettled = true;
+    if (resetRequested) {
+      initializationPromise = null;
+      initializationSettled = false;
+      resetRequested = false;
+    }
+  };
 
   return {
     initialize: (): Promise<void> => {
@@ -31,11 +45,25 @@ export function createInitializationGate(
               // back into an unhandled rejection.
             }
           });
+        const promise = initializationPromise;
+        void promise.then(
+          () => settleInitialization(promise),
+          () => settleInitialization(promise),
+        );
       }
       return initializationPromise;
     },
     reset: (): void => {
+      if (initializationPromise === null) {
+        return;
+      }
+      if (!initializationSettled) {
+        resetRequested = true;
+        return;
+      }
       initializationPromise = null;
+      initializationSettled = false;
+      resetRequested = false;
     },
   };
 }
