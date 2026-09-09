@@ -63,14 +63,18 @@ export function isTopLevelStatus(value: string): value is TopLevelStatus {
   return (TOP_LEVEL_STATUSES as readonly string[]).includes(value);
 }
 
-export function assertTopLevelState(state: TopLevelState): void {
-  if (!isTopLevelStatus(state.status)) {
+export function assertTopLevelState(value: unknown): asserts value is TopLevelState {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('Top-level state must be a JSON object');
+  }
+  const state = value as Record<string, unknown>;
+  if (!isTopLevelStatus(String(state.status))) {
     throw new TypeError(`Unknown top-level status: ${String(state.status)}`);
   }
-  if (!Number.isSafeInteger(state.revision) || state.revision < 0) {
+  if (typeof state.revision !== 'number' || !Number.isSafeInteger(state.revision) || state.revision < 0) {
     throw new TypeError('State revision must be a non-negative safe integer');
   }
-  if (Number.isNaN(Date.parse(state.updatedAt))) {
+  if (typeof state.updatedAt !== 'string' || Number.isNaN(Date.parse(state.updatedAt))) {
     throw new TypeError('State updatedAt must be an ISO-compatible date');
   }
   if (state.activeTaskId !== null && typeof state.activeTaskId !== 'string') {
@@ -78,11 +82,18 @@ export function assertTopLevelState(state: TopLevelState): void {
   }
   if (state.lastError !== null && (
     typeof state.lastError !== 'object'
-    || typeof state.lastError.code !== 'string'
-    || typeof state.lastError.message !== 'string'
+    || state.lastError === null
+    || Array.isArray(state.lastError)
+    || typeof (state.lastError as Record<string, unknown>).code !== 'string'
+    || typeof (state.lastError as Record<string, unknown>).message !== 'string'
   )) {
     throw new TypeError('State lastError must be an error object or null');
   }
+}
+
+export function parseTopLevelState(value: unknown): TopLevelState {
+  assertTopLevelState(value);
+  return value;
 }
 
 export function transitionState(
