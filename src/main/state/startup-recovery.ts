@@ -1,5 +1,5 @@
 import { createInitialState, parseTopLevelState, type TopLevelState } from '../../shared/contracts/top-level-state.js';
-import { SnapshotFormatError, type SnapshotLoadDiagnostic, type StateSnapshotStore } from './persistence.js';
+import { SnapshotFormatError, type SnapshotLoadDiagnostic } from './persistence.js';
 
 export interface StartupDiagnostic {
   code:
@@ -24,8 +24,9 @@ export interface StartupRecoveryOptions {
   onDiagnostic?: (diagnostic: StartupDiagnostic, cause?: unknown) => void;
 }
 
-export interface SnapshotLoader extends StateSnapshotStore<TopLevelState> {
+export interface SnapshotLoader {
   load(): Promise<unknown | null>;
+  save(value: TopLevelState): Promise<void>;
   getLastLoadDiagnostic?: () => SnapshotLoadDiagnostic | null;
 }
 

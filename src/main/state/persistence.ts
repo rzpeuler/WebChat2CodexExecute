@@ -19,11 +19,13 @@ export interface EventLog<T> {
 }
 
 export type SnapshotValidator<T> = (value: unknown) => T;
+export type ChmodFile = (filePath: string, mode: number) => Promise<void>;
 
 export interface AtomicJsonFileStoreOptions<T> {
   validate?: SnapshotValidator<T>;
   lock?: FileLockOptions;
-  onDiagnostic?: (diagnostic: SnapshotLoadDiagnostic) => void;
+  onDiagnostic?: (diagnostic: PersistenceDiagnostic) => void;
+  chmod?: ChmodFile;
 }
 
 export interface FileLockOptions {
@@ -36,6 +38,19 @@ export interface SnapshotLoadDiagnostic {
   code: 'PRIMARY_SNAPSHOT_CORRUPT_USING_BACKUP';
   filePath: string;
   message: string;
+}
+
+export interface ChmodFailureDiagnostic {
+  code: 'PERSISTENCE_CHMOD_FAILED';
+  filePath: string;
+  message: string;
+}
+
+export type PersistenceDiagnostic = SnapshotLoadDiagnostic | ChmodFailureDiagnostic;
+
+export interface JsonlFileEventLogOptions extends FileLockOptions {
+  onDiagnostic?: (diagnostic: PersistenceDiagnostic) => void;
+  chmod?: ChmodFile;
 }
 
 export class SnapshotFormatError extends Error {
@@ -260,7 +275,8 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
   private readonly filePath: string;
   private readonly validate: SnapshotValidator<T> | undefined;
   private readonly lock: FileLockOptions | undefined;
-  private readonly onDiagnostic: ((diagnostic: SnapshotLoadDiagnostic) => void) | undefined;
+  private readonly onDiagnostic: ((diagnostic: PersistenceDiagnostic) => void) | undefined;
+  private readonly chmod: ChmodFile;
   private lastLoadDiagnostic: SnapshotLoadDiagnostic | null = null;
   private writeChain: Promise<void> = Promise.resolve();
 
@@ -269,6 +285,7 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
     this.validate = options.validate;
     this.lock = options.lock;
     this.onDiagnostic = options.onDiagnostic;
+    this.chmod = options.chmod ?? chmod;
   }
 
   load(): Promise<T | null> {
@@ -331,13 +348,30 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
         try {
           await writePrivateFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
           await replaceAtomically(tempPath, this.filePath);
-          await chmod(this.filePath, 0o600).catch(() => undefined);
+          await this.chmodWithDiagnostic(this.filePath);
         } finally {
           await rm(tempPath, { force: true });
         }
       },
       this.lock,
     );
+  }
+
+  private async chmodWithDiagnostic(filePath: string): Promise<void> {
+    try {
+      await this.chmod(filePath, 0o600);
+    } catch (error) {
+      const diagnostic: ChmodFailureDiagnostic = {
+        code: 'PERSISTENCE_CHMOD_FAILED',
+        filePath,
+        message: `Could not restrict permissions for persisted file ${filePath}.`,
+      };
+      try {
+        this.onDiagnostic?.(diagnostic);
+      } finally {
+        throw error;
+      }
+    }
   }
 
   clear(): Promise<void> {
@@ -359,11 +393,15 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
 export class JsonlFileEventLog<T> implements EventLog<T> {
   private readonly filePath: string;
   private readonly lock: FileLockOptions | undefined;
+  private readonly onDiagnostic: ((diagnostic: PersistenceDiagnostic) => void) | undefined;
+  private readonly chmod: ChmodFile;
   private writeChain: Promise<void> = Promise.resolve();
 
-  constructor(filePath: string, options: FileLockOptions | undefined = undefined) {
+  constructor(filePath: string, options: JsonlFileEventLogOptions | undefined = undefined) {
     this.filePath = resolve(filePath);
     this.lock = options;
+    this.onDiagnostic = options?.onDiagnostic;
+    this.chmod = options?.chmod ?? chmod;
   }
 
   append(event: T): Promise<void> {
@@ -379,13 +417,30 @@ export class JsonlFileEventLog<T> implements EventLog<T> {
           } finally {
             await handle.close();
           }
-          await chmod(this.filePath, 0o600).catch(() => undefined);
+          await this.chmodWithDiagnostic(this.filePath);
         },
         this.lock,
       ),
     );
     this.writeChain = appendOperation.catch(() => undefined);
     return appendOperation;
+  }
+
+  private async chmodWithDiagnostic(filePath: string): Promise<void> {
+    try {
+      await this.chmod(filePath, 0o600);
+    } catch (error) {
+      const diagnostic: ChmodFailureDiagnostic = {
+        code: 'PERSISTENCE_CHMOD_FAILED',
+        filePath,
+        message: `Could not restrict permissions for persisted file ${filePath}.`,
+      };
+      try {
+        this.onDiagnostic?.(diagnostic);
+      } finally {
+        throw error;
+      }
+    }
   }
 
   readAll(): Promise<T[]> {

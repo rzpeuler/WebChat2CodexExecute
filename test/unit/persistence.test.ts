@@ -9,7 +9,7 @@ import {
   FileLockTimeoutError,
   JsonlFileEventLog,
   SnapshotFormatError,
-  type SnapshotLoadDiagnostic,
+  type PersistenceDiagnostic,
 } from '../../src/main/state/persistence.js';
 import {
   createInitialState,
@@ -152,7 +152,7 @@ describe('local persistence', () => {
       status: 'PAUSED',
       revision: 2,
     };
-    const persistenceDiagnostics: SnapshotLoadDiagnostic[] = [];
+    const persistenceDiagnostics: PersistenceDiagnostic[] = [];
     const startupDiagnostics: string[] = [];
     await mkdir(join(directory, 'state'), { recursive: true });
     await writeFile(filePath, '{invalid json', 'utf8');
@@ -174,6 +174,51 @@ describe('local persistence', () => {
     expect(persistenceDiagnostics).toEqual([
       expect.objectContaining({ code: 'PRIMARY_SNAPSHOT_CORRUPT_USING_BACKUP', filePath }),
     ]);
+  });
+
+  it('reports and propagates a chmod failure after saving a snapshot', async () => {
+    const directory = await makeTemporaryDirectory();
+    const filePath = join(directory, 'state', 'snapshot.json');
+    const diagnostics: PersistenceDiagnostic[] = [];
+    const chmodError = new Error('chmod failed');
+    const store = new AtomicJsonFileStore(filePath, {
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      chmod: async () => {
+        throw chmodError;
+      },
+    });
+
+    await expect(store.save({ safe: true })).rejects.toBe(chmodError);
+    expect(diagnostics).toEqual([
+      {
+        code: 'PERSISTENCE_CHMOD_FAILED',
+        filePath,
+        message: `Could not restrict permissions for persisted file ${filePath}.`,
+      },
+    ]);
+  });
+
+  it('reports and propagates a chmod failure after appending an event', async () => {
+    const directory = await makeTemporaryDirectory();
+    const filePath = join(directory, 'events', 'events.jsonl');
+    const diagnostics: PersistenceDiagnostic[] = [];
+    const chmodError = new Error('chmod failed');
+    const log = new JsonlFileEventLog(filePath, {
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      chmod: async () => {
+        throw chmodError;
+      },
+    });
+
+    await expect(log.append({ kind: 'started' })).rejects.toBe(chmodError);
+    expect(diagnostics).toEqual([
+      {
+        code: 'PERSISTENCE_CHMOD_FAILED',
+        filePath,
+        message: `Could not restrict permissions for persisted file ${filePath}.`,
+      },
+    ]);
+    await expect(log.readAll()).resolves.toEqual([{ kind: 'started' }]);
   });
 
   it('waits for a lock held by an independent Node child process', async () => {

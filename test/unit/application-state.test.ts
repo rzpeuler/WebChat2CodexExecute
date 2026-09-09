@@ -8,10 +8,10 @@ import type { EventLog, StateSnapshotStore } from '../../src/main/state/persiste
 import type { TopLevelStateTransitionEvent } from '../../src/main/state/coordinator.js';
 
 class MemorySnapshotStore implements StateSnapshotStore<TopLevelState> {
-  constructor(private state: TopLevelState | null) {}
+  constructor(private state: unknown | null) {}
 
   async load(): Promise<TopLevelState | null> {
-    return this.state;
+    return this.state as TopLevelState | null;
   }
 
   async save(state: TopLevelState): Promise<void> {
@@ -61,6 +61,24 @@ describe('application state initialization', () => {
       status: 'IDLE',
       lastError: { code: 'STATE_SNAPSHOT_MISSING' },
     });
+    await expect(applicationState.coordinator.transition('ARMED')).resolves.toMatchObject({
+      status: 'ARMED',
+      revision: 1,
+    });
+    await expect(snapshotStore.load()).resolves.toMatchObject({ status: 'ARMED', revision: 1 });
+  });
+
+  it('persists safe IDLE after an invalid snapshot so a coordinator can transition', async () => {
+    const snapshotStore = new MemorySnapshotStore({ status: 'BROKEN' });
+    const applicationState = await initializeApplicationState(
+      snapshotStore,
+      {
+        eventLog: new MemoryEventLog(),
+        transactionLockPath: join(tmpdir(), `web-chat2codex-application-${randomUUID()}`),
+      },
+      { now: new Date('2026-09-10T01:00:00.000Z') },
+    );
+
     await expect(applicationState.coordinator.transition('ARMED')).resolves.toMatchObject({
       status: 'ARMED',
       revision: 1,

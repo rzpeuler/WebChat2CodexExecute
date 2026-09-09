@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { createInitialState, type TopLevelState } from '../../src/shared/contracts/top-level-state.js';
 import { recoverTopLevelState } from '../../src/main/state/startup-recovery.js';
 
-function loader(value: unknown | null): { load: () => Promise<unknown | null>; save: (next: TopLevelState) => Promise<void> } {
+function loader(value: unknown | null): {
+  load: () => Promise<unknown | null>;
+  save: (next: TopLevelState) => Promise<void>;
+} {
   return {
     load: async () => value,
     save: async (next) => {

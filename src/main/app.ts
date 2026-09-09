@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { acquireSingleInstanceLock, type SingleInstanceHost } from './lifecycle/single-instance.js';
 import { initializeApplicationState, type ApplicationState } from './lifecycle/application-state.js';
+import { createInitializationGate } from './lifecycle/initialization.js';
 import { registerIpcHandlers } from './security/ipc.js';
 import { SECURE_WINDOW_WEB_PREFERENCES } from './security/window-security.js';
 import { AtomicJsonFileStore, JsonlFileEventLog } from './state/persistence.js';
@@ -66,44 +67,54 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     await mainWindow.loadFile(join(appDirectory, '../renderer/index.html'));
     mainWindow.on('closed', () => {
       mainWindow = null;
+      initializationGate.reset();
     });
   };
 
-  const initializeApplication = async (): Promise<void> => {
-    if (applicationState === null) {
-      const stateStore = new AtomicJsonFileStore<TopLevelState>(
-        join(app.getPath('userData'), 'state', 'top-level.json'),
-        { validate: parseTopLevelState },
-      );
-      const eventLog = new JsonlFileEventLog<TopLevelStateTransitionEvent>(
-        join(app.getPath('userData'), 'state', 'events.jsonl'),
-      );
-      const transactionJournal = new AtomicJsonFileStore<PendingTopLevelStateTransaction>(
-        join(app.getPath('userData'), 'state', 'top-level-transaction.json'),
-        { validate: parsePendingTopLevelStateTransaction },
-      );
-      applicationState = await initializeApplicationState(
-        stateStore,
-        {
-          eventLog,
-          transactionJournal,
-          transactionLockPath: join(app.getPath('userData'), 'state', 'top-level-transaction'),
-        },
-        {
-          onDiagnostic: (diagnostic, cause) => {
-            console.warn(`[state-recovery] ${diagnostic.code}: ${diagnostic.message}`, cause);
+  const initializationGate = createInitializationGate(
+    async () => {
+      if (applicationState === null) {
+        const onPersistenceDiagnostic = (diagnostic: unknown): void => {
+          console.warn('[persistence] diagnostic', diagnostic);
+        };
+        const stateStore = new AtomicJsonFileStore<TopLevelState>(
+          join(app.getPath('userData'), 'state', 'top-level.json'),
+          { validate: parseTopLevelState, onDiagnostic: onPersistenceDiagnostic },
+        );
+        const eventLog = new JsonlFileEventLog<TopLevelStateTransitionEvent>(
+          join(app.getPath('userData'), 'state', 'events.jsonl'),
+          { onDiagnostic: onPersistenceDiagnostic },
+        );
+        const transactionJournal = new AtomicJsonFileStore<PendingTopLevelStateTransaction>(
+          join(app.getPath('userData'), 'state', 'top-level-transaction.json'),
+          { validate: parsePendingTopLevelStateTransaction, onDiagnostic: onPersistenceDiagnostic },
+        );
+        applicationState = await initializeApplicationState(
+          stateStore,
+          {
+            eventLog,
+            transactionJournal,
+            transactionLockPath: join(app.getPath('userData'), 'state', 'top-level-transaction'),
           },
-        },
-      );
-    }
-    await createWindow(applicationState);
-  };
+          {
+            onDiagnostic: (diagnostic, cause) => {
+              console.warn(`[state-recovery] ${diagnostic.code}: ${diagnostic.message}`, cause);
+            },
+          },
+        );
+      }
+      await createWindow(applicationState);
+    },
+    (diagnostic, cause) => {
+      console.error('[application] initialization failed', { diagnostic, cause });
+    },
+  );
 
-  void app.whenReady().then(initializeApplication);
+  void app.whenReady().then(() => initializationGate.initialize());
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      void initializeApplication();
+      void initializationGate.initialize();
     }
   });
 
