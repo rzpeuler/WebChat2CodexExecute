@@ -1,5 +1,9 @@
 import type { TopLevelState } from '../../shared/contracts/top-level-state.js';
-import { TopLevelStateCoordinator, type TopLevelStateCoordinatorDependencies } from '../state/coordinator.js';
+import {
+  recoverPendingTopLevelStateTransaction,
+  TopLevelStateCoordinator,
+  type TopLevelStateCoordinatorDependencies,
+} from '../state/coordinator.js';
 import {
   recoverTopLevelState,
   type SnapshotLoader,
@@ -18,6 +22,7 @@ export async function initializeApplicationState(
   dependencies: Omit<TopLevelStateCoordinatorDependencies, 'snapshotStore'>,
   options: StartupRecoveryOptions = {},
 ): Promise<ApplicationState> {
+  await recoverPendingTopLevelStateTransaction({ ...dependencies, snapshotStore });
   const recovery = await recoverTopLevelState(snapshotStore, options);
   const coordinator = new TopLevelStateCoordinator(recovery.state, {
     ...dependencies,

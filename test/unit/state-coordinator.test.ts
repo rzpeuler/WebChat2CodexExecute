@@ -4,12 +4,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createInitialState, type TopLevelState } from '../../src/shared/contracts/top-level-state.js';
-import { TopLevelStateCoordinator, type TopLevelStateTransitionEvent } from '../../src/main/state/coordinator.js';
+import {
+  parsePendingTopLevelStateTransaction,
+  PendingTopLevelStateTransactionRecoveryError,
+  recoverPendingTopLevelStateTransaction,
+  TopLevelStateCoordinator,
+  type PendingTopLevelStateTransaction,
+  type TopLevelStateTransitionEvent,
+} from '../../src/main/state/coordinator.js';
 import {
   AtomicJsonFileStore,
   JsonlFileEventLog,
   type EventLog,
   type StateSnapshotStore,
+  type TransactionJournal,
 } from '../../src/main/state/persistence.js';
 import { parseTopLevelState } from '../../src/shared/contracts/top-level-state.js';
 
@@ -44,6 +52,22 @@ class RecordingEventLog implements EventLog<TopLevelStateTransitionEvent> {
 
   async readAll(): Promise<TopLevelStateTransitionEvent[]> {
     return this.events;
+  }
+}
+
+class MemoryTransactionJournal implements TransactionJournal<PendingTopLevelStateTransaction> {
+  pending: PendingTopLevelStateTransaction | null = null;
+
+  async load(): Promise<PendingTopLevelStateTransaction | null> {
+    return this.pending;
+  }
+
+  async save(value: PendingTopLevelStateTransaction): Promise<void> {
+    this.pending = value;
+  }
+
+  async clear(): Promise<void> {
+    this.pending = null;
   }
 }
 
@@ -123,20 +147,29 @@ describe('top-level state coordinator', () => {
     temporaryDirectories.push(directory);
     const snapshotPath = join(directory, 'state', 'top-level.json');
     const eventPath = join(directory, 'state', 'events.jsonl');
+    const transactionJournalPath = join(directory, 'state', 'top-level-transaction.json');
     const sharedTransactionLockPath = join(directory, 'state', 'transaction');
     const initialState = createInitialState(new Date('2026-09-10T00:00:00.000Z'));
     const firstStore = new AtomicJsonFileStore(snapshotPath, { validate: parseTopLevelState });
     const secondStore = new AtomicJsonFileStore(snapshotPath, { validate: parseTopLevelState });
     const firstLog = new JsonlFileEventLog<TopLevelStateTransitionEvent>(eventPath);
     const secondLog = new JsonlFileEventLog<TopLevelStateTransitionEvent>(eventPath);
+    const firstJournal = new AtomicJsonFileStore<PendingTopLevelStateTransaction>(transactionJournalPath, {
+      validate: parsePendingTopLevelStateTransaction,
+    });
+    const secondJournal = new AtomicJsonFileStore<PendingTopLevelStateTransaction>(transactionJournalPath, {
+      validate: parsePendingTopLevelStateTransaction,
+    });
     const firstCoordinator = new TopLevelStateCoordinator(initialState, {
       eventLog: firstLog,
       snapshotStore: firstStore,
+      transactionJournal: firstJournal,
       transactionLockPath: sharedTransactionLockPath,
     });
     const secondCoordinator = new TopLevelStateCoordinator(initialState, {
       eventLog: secondLog,
       snapshotStore: secondStore,
+      transactionJournal: secondJournal,
       transactionLockPath: sharedTransactionLockPath,
     });
     await firstStore.save(initialState);
@@ -155,5 +188,104 @@ describe('top-level state coordinator', () => {
     expect(finalSnapshot).toEqual(events[1]?.to);
     expect(finalSnapshot?.revision).toBe(2);
     expect(['ARMED', 'NEEDS_USER_ACTION']).toContain(finalSnapshot?.status);
+  });
+
+  it('journals the event before append and leaves it pending when append fails', async () => {
+    const snapshotStore = new RecordingSnapshotStore();
+    const journal = new MemoryTransactionJournal();
+    const coordinator = new TopLevelStateCoordinator(createInitialState(), {
+      eventLog: {
+        append: async () => {
+          throw new Error('append failed');
+        },
+        readAll: async () => [],
+      },
+      snapshotStore,
+      transactionJournal: journal,
+      transactionLockPath: transactionLockPath(),
+    });
+
+    await expect(coordinator.transition('ARMED')).rejects.toThrow('append failed');
+    expect(journal.pending).toMatchObject({ version: 1, status: 'pending', event: { to: { revision: 1 } } });
+    expect(snapshotStore.saved).toBeNull();
+  });
+
+  it('recovers an appended event when snapshot save fails and then resumes safely', async () => {
+    const initialState = createInitialState();
+    const snapshotStore = new RecordingSnapshotStore();
+    const originalSave = snapshotStore.save.bind(snapshotStore);
+    let failSave = true;
+    snapshotStore.save = async (state) => {
+      if (failSave) {
+        failSave = false;
+        throw new Error('snapshot save failed');
+      }
+      await originalSave(state);
+    };
+    const eventLog = new RecordingEventLog();
+    const journal = new MemoryTransactionJournal();
+    const dependencies = {
+      eventLog,
+      snapshotStore,
+      transactionJournal: journal,
+      transactionLockPath: transactionLockPath(),
+    };
+    const coordinator = new TopLevelStateCoordinator(initialState, dependencies);
+
+    await expect(coordinator.transition('ARMED')).rejects.toThrow('snapshot save failed');
+    expect(journal.pending).not.toBeNull();
+    expect(eventLog.events).toHaveLength(1);
+
+    await expect(coordinator.transition('RUNNING')).resolves.toMatchObject({ status: 'RUNNING', revision: 2 });
+    expect(journal.pending).toBeNull();
+    expect(snapshotStore.saved).toMatchObject({ status: 'RUNNING', revision: 2 });
+    expect(eventLog.events.map((event) => event.to.revision)).toEqual([1, 2]);
+  });
+
+  it('clears a pending journal when its event was never appended', async () => {
+    const initialState = createInitialState();
+    const event: TopLevelStateTransitionEvent = {
+      type: 'top-level-state-transition',
+      transactionId: 'missing-event-transaction',
+      from: initialState,
+      to: { ...initialState, status: 'ARMED', revision: 1 },
+    };
+    const journal = new MemoryTransactionJournal();
+    await journal.save({ version: 1, status: 'pending', transactionId: event.transactionId, event });
+    const result = await recoverPendingTopLevelStateTransaction({
+      eventLog: new RecordingEventLog(),
+      snapshotStore: new RecordingSnapshotStore(),
+      transactionJournal: journal,
+      transactionLockPath: transactionLockPath(),
+    });
+
+    expect(result).toEqual({ status: 'cleared' });
+    expect(journal.pending).toBeNull();
+  });
+
+  it('pauses on an ambiguous pending transaction instead of continuing', async () => {
+    const initialState = createInitialState();
+    const event: TopLevelStateTransitionEvent = {
+      type: 'top-level-state-transition',
+      transactionId: 'ambiguous-transaction',
+      from: initialState,
+      to: { ...initialState, status: 'ARMED', revision: 1 },
+    };
+    const journal = new MemoryTransactionJournal();
+    await journal.save({ version: 1, status: 'pending', transactionId: event.transactionId, event });
+    const snapshotStore = new RecordingSnapshotStore();
+    snapshotStore.saved = { ...initialState, status: 'NEEDS_USER_ACTION', revision: 1 };
+    const eventLog = new RecordingEventLog();
+    eventLog.events.push(event);
+
+    await expect(
+      recoverPendingTopLevelStateTransaction({
+        eventLog,
+        snapshotStore,
+        transactionJournal: journal,
+        transactionLockPath: transactionLockPath(),
+      }),
+    ).rejects.toBeInstanceOf(PendingTopLevelStateTransactionRecoveryError);
+    expect(journal.pending).not.toBeNull();
   });
 });

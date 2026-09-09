@@ -45,6 +45,19 @@ describe('local persistence', () => {
     await expect(readdir(join(directory, 'state'))).resolves.toHaveLength(1);
   });
 
+  it('clears a journal primary file and backup under its own lock', async () => {
+    const directory = await makeTemporaryDirectory();
+    const filePath = join(directory, 'state', 'transaction.json');
+    const store = new AtomicJsonFileStore(filePath);
+
+    await store.save({ status: 'pending', revision: 1 });
+    await writeFile(`${filePath}.bak`, '{"stale":true}', 'utf8');
+    await store.clear();
+
+    await expect(readFile(filePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(`${filePath}.bak`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('appends complete JSONL events in order, including concurrent callers', async () => {
     const directory = await makeTemporaryDirectory();
     const filePath = join(directory, 'events', 'events.jsonl');

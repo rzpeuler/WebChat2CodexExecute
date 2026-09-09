@@ -7,6 +7,12 @@ export interface StateSnapshotStore<T> {
   save(value: T): Promise<void>;
 }
 
+export interface TransactionJournal<T> {
+  load(): Promise<T | null>;
+  save(value: T): Promise<void>;
+  clear(): Promise<void>;
+}
+
 export interface EventLog<T> {
   append(event: T): Promise<void>;
   readAll(): Promise<T[]>;
@@ -250,7 +256,7 @@ async function readJson<T>(filePath: string, validate: SnapshotValidator<T> | un
   }
 }
 
-export class AtomicJsonFileStore<T> implements StateSnapshotStore<T> {
+export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, TransactionJournal<T> {
   private readonly filePath: string;
   private readonly validate: SnapshotValidator<T> | undefined;
   private readonly lock: FileLockOptions | undefined;
@@ -332,6 +338,21 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T> {
       },
       this.lock,
     );
+  }
+
+  clear(): Promise<void> {
+    const clearOperation = this.writeChain.then(() =>
+      withFileLock(
+        this.filePath,
+        async () => {
+          await rm(this.filePath, { force: true });
+          await rm(`${this.filePath}.bak`, { force: true });
+        },
+        this.lock,
+      ),
+    );
+    this.writeChain = clearOperation.catch(() => undefined);
+    return clearOperation;
   }
 }
 

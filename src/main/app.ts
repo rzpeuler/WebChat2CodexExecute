@@ -6,7 +6,11 @@ import { initializeApplicationState, type ApplicationState } from './lifecycle/a
 import { registerIpcHandlers } from './security/ipc.js';
 import { SECURE_WINDOW_WEB_PREFERENCES } from './security/window-security.js';
 import { AtomicJsonFileStore, JsonlFileEventLog } from './state/persistence.js';
-import type { TopLevelStateTransitionEvent } from './state/coordinator.js';
+import {
+  parsePendingTopLevelStateTransaction,
+  type PendingTopLevelStateTransaction,
+  type TopLevelStateTransitionEvent,
+} from './state/coordinator.js';
 import { parseTopLevelState, type TopLevelState } from '../shared/contracts/top-level-state.js';
 
 const appDirectory = dirname(fileURLToPath(import.meta.url));
@@ -74,9 +78,17 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
       const eventLog = new JsonlFileEventLog<TopLevelStateTransitionEvent>(
         join(app.getPath('userData'), 'state', 'events.jsonl'),
       );
+      const transactionJournal = new AtomicJsonFileStore<PendingTopLevelStateTransaction>(
+        join(app.getPath('userData'), 'state', 'top-level-transaction.json'),
+        { validate: parsePendingTopLevelStateTransaction },
+      );
       applicationState = await initializeApplicationState(
         stateStore,
-        { eventLog, transactionLockPath: join(app.getPath('userData'), 'state', 'top-level-transaction') },
+        {
+          eventLog,
+          transactionJournal,
+          transactionLockPath: join(app.getPath('userData'), 'state', 'top-level-transaction'),
+        },
         {
           onDiagnostic: (diagnostic, cause) => {
             console.warn(`[state-recovery] ${diagnostic.code}: ${diagnostic.message}`, cause);
