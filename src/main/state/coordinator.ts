@@ -19,6 +19,7 @@ export interface TopLevelStateCoordinatorDependencies {
 
 export class TopLevelStateCoordinator {
   private state: TopLevelState;
+  private transitionQueue: Promise<void> = Promise.resolve();
 
   constructor(initialState: TopLevelState, dependencies: TopLevelStateCoordinatorDependencies) {
     this.state = initialState;
@@ -34,15 +35,22 @@ export class TopLevelStateCoordinator {
     };
   }
 
-  async transition(nextStatus: TopLevelStatus, metadata: StateTransitionMetadata = {}): Promise<TopLevelState> {
-    const nextState = transitionState(this.state, nextStatus, metadata);
-    await this.dependencies.eventLog.append({
-      type: 'top-level-state-transition',
-      from: this.state,
-      to: nextState,
+  transition(nextStatus: TopLevelStatus, metadata: StateTransitionMetadata = {}): Promise<TopLevelState> {
+    const operation = this.transitionQueue.then(async () => {
+      const nextState = transitionState(this.state, nextStatus, metadata);
+      await this.dependencies.eventLog.append({
+        type: 'top-level-state-transition',
+        from: this.state,
+        to: nextState,
+      });
+      await this.dependencies.snapshotStore.save(nextState);
+      this.state = nextState;
+      return this.getState();
     });
-    await this.dependencies.snapshotStore.save(nextState);
-    this.state = nextState;
-    return this.getState();
+    this.transitionQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 }

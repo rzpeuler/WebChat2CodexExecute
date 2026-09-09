@@ -66,4 +66,33 @@ describe('top-level state coordinator', () => {
     expect(snapshotStore.saved).toEqual(nextState);
     expect(coordinator.getState()).toEqual(nextState);
   });
+
+  it('serializes concurrent transitions and preserves every revision and event', async () => {
+    const snapshotStore = new RecordingSnapshotStore();
+    const eventLog = new RecordingEventLog();
+    const coordinator = new TopLevelStateCoordinator(createInitialState(), {
+      eventLog,
+      snapshotStore,
+    });
+
+    const [armedState, runningState] = await Promise.all([
+      coordinator.transition('ARMED', {
+        now: new Date('2026-09-10T00:01:00.000Z'),
+        activeTaskId: 'task-1',
+      }),
+      coordinator.transition('RUNNING', {
+        now: new Date('2026-09-10T00:02:00.000Z'),
+      }),
+    ]);
+
+    expect(armedState).toMatchObject({ status: 'ARMED', revision: 1, activeTaskId: 'task-1' });
+    expect(runningState).toMatchObject({ status: 'RUNNING', revision: 2, activeTaskId: 'task-1' });
+    expect(coordinator.getState()).toEqual(runningState);
+    expect(snapshotStore.saved).toEqual(runningState);
+    expect(eventLog.events).toHaveLength(2);
+    expect(eventLog.events.map((event) => [event.from.status, event.to.status, event.to.revision])).toEqual([
+      ['IDLE', 'ARMED', 1],
+      ['ARMED', 'RUNNING', 2],
+    ]);
+  });
 });
