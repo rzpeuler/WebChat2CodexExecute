@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdir, mkdtemp, open, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,8 +9,14 @@ import {
   FileLockTimeoutError,
   JsonlFileEventLog,
   SnapshotFormatError,
+  type SnapshotLoadDiagnostic,
 } from '../../src/main/state/persistence.js';
-import { parseTopLevelState } from '../../src/shared/contracts/top-level-state.js';
+import {
+  createInitialState,
+  parseTopLevelState,
+  type TopLevelState,
+} from '../../src/shared/contracts/top-level-state.js';
+import { recoverTopLevelState } from '../../src/main/state/startup-recovery.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -121,5 +129,70 @@ describe('local persistence', () => {
 
     const store = new AtomicJsonFileStore(filePath, { lock: { timeoutMs: 100, retryMs: 5, staleMs: 1 } });
     await expect(store.load()).resolves.toBeNull();
+  });
+
+  it('records primary corruption when recovery succeeds from the backup snapshot', async () => {
+    const directory = await makeTemporaryDirectory();
+    const filePath = join(directory, 'state', 'snapshot.json');
+    const persistedState: TopLevelState = {
+      ...createInitialState(new Date('2026-09-10T02:00:00.000Z')),
+      status: 'PAUSED',
+      revision: 2,
+    };
+    const persistenceDiagnostics: SnapshotLoadDiagnostic[] = [];
+    const startupDiagnostics: string[] = [];
+    await mkdir(join(directory, 'state'), { recursive: true });
+    await writeFile(filePath, '{invalid json', 'utf8');
+    await writeFile(`${filePath}.bak`, JSON.stringify(persistedState), 'utf8');
+    const store = new AtomicJsonFileStore(filePath, {
+      validate: parseTopLevelState,
+      onDiagnostic: (diagnostic) => persistenceDiagnostics.push(diagnostic),
+    });
+
+    const recovery = await recoverTopLevelState(store, {
+      onDiagnostic: (diagnostic) => startupDiagnostics.push(diagnostic.code),
+    });
+
+    expect(recovery.state).toEqual(persistedState);
+    expect(recovery.diagnostics).toEqual([
+      expect.objectContaining({ code: 'STATE_SNAPSHOT_PRIMARY_CORRUPT_RECOVERED' }),
+    ]);
+    expect(startupDiagnostics).toEqual(['STATE_SNAPSHOT_PRIMARY_CORRUPT_RECOVERED']);
+    expect(persistenceDiagnostics).toEqual([
+      expect.objectContaining({ code: 'PRIMARY_SNAPSHOT_CORRUPT_USING_BACKUP', filePath }),
+    ]);
+  });
+
+  it('waits for a lock held by an independent Node child process', async () => {
+    const directory = await makeTemporaryDirectory();
+    const filePath = join(directory, 'state', 'snapshot.json');
+    const lockPath = `${filePath}.lock`;
+    await mkdir(join(directory, 'state'), { recursive: true });
+    const childScript = [
+      "const fs = require('node:fs');",
+      'const lockPath = process.argv[1];',
+      "fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 'child-owner', createdAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });",
+      "process.stdout.write('ready\\n');",
+      'setTimeout(() => fs.rmSync(lockPath, { force: true }), 300);',
+    ].join('');
+    const child = spawn(process.execPath, ['-e', childScript, lockPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    try {
+      await new Promise<void>((resolveReady, rejectReady) => {
+        child.stdout?.once('data', () => resolveReady());
+        child.stderr?.once('data', (data) => rejectReady(new Error(data.toString())));
+        child.once('error', rejectReady);
+      });
+      const store = new AtomicJsonFileStore(filePath, { lock: { timeoutMs: 1_500, retryMs: 10 } });
+      await expect(store.load()).resolves.toBeNull();
+      const exitCode = child.exitCode ?? (await once(child, 'exit'))[0];
+      expect(exitCode).toBe(0);
+    } finally {
+      if (child.exitCode === null) {
+        child.kill();
+      }
+    }
   });
 });

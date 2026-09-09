@@ -17,12 +17,19 @@ export type SnapshotValidator<T> = (value: unknown) => T;
 export interface AtomicJsonFileStoreOptions<T> {
   validate?: SnapshotValidator<T>;
   lock?: FileLockOptions;
+  onDiagnostic?: (diagnostic: SnapshotLoadDiagnostic) => void;
 }
 
 export interface FileLockOptions {
   timeoutMs?: number;
   retryMs?: number;
   staleMs?: number;
+}
+
+export interface SnapshotLoadDiagnostic {
+  code: 'PRIMARY_SNAPSHOT_CORRUPT_USING_BACKUP';
+  filePath: string;
+  message: string;
 }
 
 export class SnapshotFormatError extends Error {
@@ -236,16 +243,24 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T> {
   private readonly filePath: string;
   private readonly validate: SnapshotValidator<T> | undefined;
   private readonly lock: FileLockOptions | undefined;
+  private readonly onDiagnostic: ((diagnostic: SnapshotLoadDiagnostic) => void) | undefined;
+  private lastLoadDiagnostic: SnapshotLoadDiagnostic | null = null;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(filePath: string, options: AtomicJsonFileStoreOptions<T> = {}) {
     this.filePath = resolve(filePath);
     this.validate = options.validate;
     this.lock = options.lock;
+    this.onDiagnostic = options.onDiagnostic;
   }
 
   load(): Promise<T | null> {
+    this.lastLoadDiagnostic = null;
     return withFileLock(this.filePath, () => this.loadWithoutLock(), this.lock);
+  }
+
+  getLastLoadDiagnostic(): SnapshotLoadDiagnostic | null {
+    return this.lastLoadDiagnostic;
   }
 
   private async loadWithoutLock(): Promise<T | null> {
@@ -264,7 +279,15 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T> {
       }
 
       try {
-        return await readJson<T>(`${this.filePath}.bak`, this.validate);
+        const backup = await readJson<T>(`${this.filePath}.bak`, this.validate);
+        const diagnostic: SnapshotLoadDiagnostic = {
+          code: 'PRIMARY_SNAPSHOT_CORRUPT_USING_BACKUP',
+          filePath: this.filePath,
+          message: 'The primary snapshot was invalid; state was restored from the backup snapshot.',
+        };
+        this.lastLoadDiagnostic = diagnostic;
+        this.onDiagnostic?.(diagnostic);
+        return backup;
       } catch (backupError) {
         if (isNodeError(backupError, 'ENOENT')) {
           throw error;

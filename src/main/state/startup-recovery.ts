@@ -1,8 +1,12 @@
 import { createInitialState, parseTopLevelState, type TopLevelState } from '../../shared/contracts/top-level-state.js';
-import { SnapshotFormatError, type StateSnapshotStore } from './persistence.js';
+import { SnapshotFormatError, type SnapshotLoadDiagnostic } from './persistence.js';
 
 export interface StartupDiagnostic {
-  code: 'STATE_SNAPSHOT_MISSING' | 'STATE_SNAPSHOT_INVALID' | 'STATE_SNAPSHOT_LOAD_FAILED';
+  code:
+    | 'STATE_SNAPSHOT_MISSING'
+    | 'STATE_SNAPSHOT_INVALID'
+    | 'STATE_SNAPSHOT_LOAD_FAILED'
+    | 'STATE_SNAPSHOT_PRIMARY_CORRUPT_RECOVERED';
   message: string;
 }
 
@@ -12,6 +16,7 @@ export interface StartupRecoveryResult {
   requiresUserConfirmation: boolean;
   canAutoResume: false;
   diagnostic: StartupDiagnostic | null;
+  diagnostics: readonly StartupDiagnostic[];
 }
 
 export interface StartupRecoveryOptions {
@@ -19,7 +24,10 @@ export interface StartupRecoveryOptions {
   onDiagnostic?: (diagnostic: StartupDiagnostic, cause?: unknown) => void;
 }
 
-type SnapshotLoader = Pick<StateSnapshotStore<unknown>, 'load'>;
+export interface SnapshotLoader {
+  load(): Promise<unknown | null>;
+  getLastLoadDiagnostic?: () => SnapshotLoadDiagnostic | null;
+}
 
 function stateWithDiagnostic(now: Date, diagnostic: StartupDiagnostic): TopLevelState {
   return {
@@ -46,6 +54,7 @@ function failedRecovery(
     requiresUserConfirmation: false,
     canAutoResume: false,
     diagnostic,
+    diagnostics: [diagnostic],
   };
 }
 
@@ -80,6 +89,17 @@ export async function recoverTopLevelState(
     );
   }
 
+  const diagnostics: StartupDiagnostic[] = [];
+  const loadDiagnostic = store.getLastLoadDiagnostic?.();
+  if (loadDiagnostic?.code === 'PRIMARY_SNAPSHOT_CORRUPT_USING_BACKUP') {
+    const diagnostic = {
+      code: 'STATE_SNAPSHOT_PRIMARY_CORRUPT_RECOVERED',
+      message: loadDiagnostic.message,
+    } satisfies StartupDiagnostic;
+    diagnostics.push(diagnostic);
+    emitDiagnostic(diagnostic, loadDiagnostic, options);
+  }
+
   try {
     const state = parseTopLevelState(snapshot);
     return {
@@ -88,6 +108,7 @@ export async function recoverTopLevelState(
       requiresUserConfirmation: state.status !== 'IDLE' || state.activeTaskId !== null,
       canAutoResume: false,
       diagnostic: null,
+      diagnostics,
     };
   } catch (error) {
     return failedRecovery(

@@ -2,15 +2,17 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { acquireSingleInstanceLock, type SingleInstanceHost } from './lifecycle/single-instance.js';
+import { initializeApplicationState, type ApplicationState } from './lifecycle/application-state.js';
 import { registerIpcHandlers } from './security/ipc.js';
 import { SECURE_WINDOW_WEB_PREFERENCES } from './security/window-security.js';
-import { AtomicJsonFileStore } from './state/persistence.js';
-import { recoverTopLevelState, type StartupRecoveryResult } from './state/startup-recovery.js';
+import { AtomicJsonFileStore, JsonlFileEventLog } from './state/persistence.js';
+import type { TopLevelStateTransitionEvent } from './state/coordinator.js';
 import { parseTopLevelState, type TopLevelState } from '../shared/contracts/top-level-state.js';
 
 const appDirectory = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 let ipcRegistered = false;
+let applicationState: ApplicationState | null = null;
 
 function focusMainWindow(): void {
   if (mainWindow === null) {
@@ -33,11 +35,12 @@ const singleInstanceHost: SingleInstanceHost = {
 if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
   app.quit();
 } else {
-  const createWindow = async (recovery: StartupRecoveryResult): Promise<void> => {
-    if (recovery.restored) {
-      console.info(`[state-recovery] restored ${recovery.state.status} state at revision ${recovery.state.revision}`);
+  const createWindow = async (state: ApplicationState): Promise<void> => {
+    const currentState = state.coordinator.getState();
+    if (state.recovery.restored) {
+      console.info(`[state-recovery] restored ${currentState.status} state at revision ${currentState.revision}`);
     }
-    if (recovery.requiresUserConfirmation) {
+    if (state.recovery.requiresUserConfirmation) {
       console.info(
         '[state-recovery] restored state requires explicit user confirmation; automatic execution is disabled',
       );
@@ -63,16 +66,25 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
   };
 
   const initializeApplication = async (): Promise<void> => {
-    const stateStore = new AtomicJsonFileStore<TopLevelState>(
-      join(app.getPath('userData'), 'state', 'top-level.json'),
-      { validate: parseTopLevelState },
-    );
-    const recovery = await recoverTopLevelState(stateStore, {
-      onDiagnostic: (diagnostic, cause) => {
-        console.warn(`[state-recovery] ${diagnostic.code}: ${diagnostic.message}`, cause);
-      },
-    });
-    await createWindow(recovery);
+    if (applicationState === null) {
+      const stateStore = new AtomicJsonFileStore<TopLevelState>(
+        join(app.getPath('userData'), 'state', 'top-level.json'),
+        { validate: parseTopLevelState },
+      );
+      const eventLog = new JsonlFileEventLog<TopLevelStateTransitionEvent>(
+        join(app.getPath('userData'), 'state', 'events.jsonl'),
+      );
+      applicationState = await initializeApplicationState(
+        stateStore,
+        { eventLog },
+        {
+          onDiagnostic: (diagnostic, cause) => {
+            console.warn(`[state-recovery] ${diagnostic.code}: ${diagnostic.message}`, cause);
+          },
+        },
+      );
+    }
+    await createWindow(applicationState);
   };
 
   void app.whenReady().then(initializeApplication);
