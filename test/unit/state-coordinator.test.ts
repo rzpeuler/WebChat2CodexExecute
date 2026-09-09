@@ -1,7 +1,27 @@
-import { describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { createInitialState, type TopLevelState } from '../../src/shared/contracts/top-level-state.js';
 import { TopLevelStateCoordinator, type TopLevelStateTransitionEvent } from '../../src/main/state/coordinator.js';
-import type { EventLog, StateSnapshotStore } from '../../src/main/state/persistence.js';
+import {
+  AtomicJsonFileStore,
+  JsonlFileEventLog,
+  type EventLog,
+  type StateSnapshotStore,
+} from '../../src/main/state/persistence.js';
+import { parseTopLevelState } from '../../src/shared/contracts/top-level-state.js';
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+function transactionLockPath(): string {
+  return join(tmpdir(), `web-chat2codex-coordinator-${randomUUID()}`);
+}
 
 class RecordingSnapshotStore implements StateSnapshotStore<TopLevelState> {
   saved: TopLevelState | null = null;
@@ -49,6 +69,7 @@ describe('top-level state coordinator', () => {
     const coordinator = new TopLevelStateCoordinator(createInitialState(), {
       eventLog: orderedEventLog,
       snapshotStore: orderedSnapshotStore,
+      transactionLockPath: transactionLockPath(),
     });
 
     const nextState = await coordinator.transition('ARMED', {
@@ -73,6 +94,7 @@ describe('top-level state coordinator', () => {
     const coordinator = new TopLevelStateCoordinator(createInitialState(), {
       eventLog,
       snapshotStore,
+      transactionLockPath: transactionLockPath(),
     });
 
     const [armedState, runningState] = await Promise.all([
@@ -94,5 +116,44 @@ describe('top-level state coordinator', () => {
       ['IDLE', 'ARMED', 1],
       ['ARMED', 'RUNNING', 2],
     ]);
+  });
+
+  it('serializes transitions from two independent coordinators without losing an update', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'web-chat2codex-coordinator-'));
+    temporaryDirectories.push(directory);
+    const snapshotPath = join(directory, 'state', 'top-level.json');
+    const eventPath = join(directory, 'state', 'events.jsonl');
+    const sharedTransactionLockPath = join(directory, 'state', 'transaction');
+    const initialState = createInitialState(new Date('2026-09-10T00:00:00.000Z'));
+    const firstStore = new AtomicJsonFileStore(snapshotPath, { validate: parseTopLevelState });
+    const secondStore = new AtomicJsonFileStore(snapshotPath, { validate: parseTopLevelState });
+    const firstLog = new JsonlFileEventLog<TopLevelStateTransitionEvent>(eventPath);
+    const secondLog = new JsonlFileEventLog<TopLevelStateTransitionEvent>(eventPath);
+    const firstCoordinator = new TopLevelStateCoordinator(initialState, {
+      eventLog: firstLog,
+      snapshotStore: firstStore,
+      transactionLockPath: sharedTransactionLockPath,
+    });
+    const secondCoordinator = new TopLevelStateCoordinator(initialState, {
+      eventLog: secondLog,
+      snapshotStore: secondStore,
+      transactionLockPath: sharedTransactionLockPath,
+    });
+    await firstStore.save(initialState);
+
+    const [firstResult, secondResult] = await Promise.all([
+      firstCoordinator.transition('ARMED', { activeTaskId: 'task-1' }),
+      secondCoordinator.transition('NEEDS_USER_ACTION'),
+    ]);
+    const finalSnapshot = await firstStore.load();
+    const events = await firstLog.readAll();
+
+    expect([firstResult.revision, secondResult.revision].sort()).toEqual([1, 2]);
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.to.revision)).toEqual([1, 2]);
+    expect(events[1]?.from).toEqual(events[0]?.to);
+    expect(finalSnapshot).toEqual(events[1]?.to);
+    expect(finalSnapshot?.revision).toBe(2);
+    expect(['ARMED', 'NEEDS_USER_ACTION']).toContain(finalSnapshot?.status);
   });
 });

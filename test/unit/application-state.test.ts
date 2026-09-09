@@ -1,4 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { initializeApplicationState } from '../../src/main/lifecycle/application-state.js';
 import { createInitialState, type TopLevelState } from '../../src/shared/contracts/top-level-state.js';
 import type { EventLog, StateSnapshotStore } from '../../src/main/state/persistence.js';
@@ -34,6 +37,7 @@ describe('application state initialization', () => {
     };
     const applicationState = await initializeApplicationState(new MemorySnapshotStore(persistedState), {
       eventLog: new MemoryEventLog(),
+      transactionLockPath: join(tmpdir(), `web-chat2codex-application-${randomUUID()}`),
     });
 
     expect(applicationState.recovery.state).toEqual(persistedState);
@@ -45,7 +49,10 @@ describe('application state initialization', () => {
   it('keeps a safe IDLE recovery state queryable when the snapshot is missing', async () => {
     const applicationState = await initializeApplicationState(
       new MemorySnapshotStore(null),
-      { eventLog: new MemoryEventLog() },
+      {
+        eventLog: new MemoryEventLog(),
+        transactionLockPath: join(tmpdir(), `web-chat2codex-application-${randomUUID()}`),
+      },
       { now: new Date('2026-09-10T01:00:00.000Z') },
     );
 

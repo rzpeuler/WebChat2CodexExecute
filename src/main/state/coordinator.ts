@@ -1,10 +1,11 @@
 import {
+  assertTopLevelState,
   transitionState,
   type StateTransitionMetadata,
   type TopLevelState,
   type TopLevelStatus,
 } from '../../shared/contracts/top-level-state.js';
-import type { EventLog, StateSnapshotStore } from './persistence.js';
+import { withSharedStateTransactionLock, type EventLog, type StateSnapshotStore } from './persistence.js';
 
 export interface TopLevelStateTransitionEvent {
   type: 'top-level-state-transition';
@@ -15,6 +16,7 @@ export interface TopLevelStateTransitionEvent {
 export interface TopLevelStateCoordinatorDependencies {
   eventLog: EventLog<TopLevelStateTransitionEvent>;
   snapshotStore: StateSnapshotStore<TopLevelState>;
+  transactionLockPath: string;
 }
 
 export class TopLevelStateCoordinator {
@@ -22,6 +24,7 @@ export class TopLevelStateCoordinator {
   private transitionQueue: Promise<void> = Promise.resolve();
 
   constructor(initialState: TopLevelState, dependencies: TopLevelStateCoordinatorDependencies) {
+    assertTopLevelState(initialState);
     this.state = initialState;
     this.dependencies = dependencies;
   }
@@ -37,15 +40,20 @@ export class TopLevelStateCoordinator {
 
   transition(nextStatus: TopLevelStatus, metadata: StateTransitionMetadata = {}): Promise<TopLevelState> {
     const operation = this.transitionQueue.then(async () => {
-      const nextState = transitionState(this.state, nextStatus, metadata);
-      await this.dependencies.eventLog.append({
-        type: 'top-level-state-transition',
-        from: this.state,
-        to: nextState,
+      return withSharedStateTransactionLock(this.dependencies.transactionLockPath, async () => {
+        const latestSnapshot = await this.dependencies.snapshotStore.load();
+        const currentState = latestSnapshot === null ? this.state : latestSnapshot;
+        assertTopLevelState(currentState);
+        const nextState = transitionState(currentState, nextStatus, metadata);
+        await this.dependencies.eventLog.append({
+          type: 'top-level-state-transition',
+          from: currentState,
+          to: nextState,
+        });
+        await this.dependencies.snapshotStore.save(nextState);
+        this.state = nextState;
+        return this.getState();
       });
-      await this.dependencies.snapshotStore.save(nextState);
-      this.state = nextState;
-      return this.getState();
     });
     this.transitionQueue = operation.then(
       () => undefined,

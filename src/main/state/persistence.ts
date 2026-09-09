@@ -182,6 +182,17 @@ async function withFileLock<T>(
   }
 }
 
+// Coordinators use this distinct lock path for the full state transaction.
+// The underlying snapshot and event-log operations keep their own file locks,
+// so this lock must never be the same path as either persisted file.
+export function withSharedStateTransactionLock<T>(
+  lockPath: string,
+  operation: () => Promise<T>,
+  options: FileLockOptions | undefined = undefined,
+): Promise<T> {
+  return withFileLock(resolve(lockPath), operation, options);
+}
+
 async function replaceAtomically(tempPath: string, targetPath: string): Promise<void> {
   try {
     await rename(tempPath, targetPath);

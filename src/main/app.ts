@@ -76,7 +76,7 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
       );
       applicationState = await initializeApplicationState(
         stateStore,
-        { eventLog },
+        { eventLog, transactionLockPath: join(app.getPath('userData'), 'state', 'top-level-transaction') },
         {
           onDiagnostic: (diagnostic, cause) => {
             console.warn(`[state-recovery] ${diagnostic.code}: ${diagnostic.message}`, cause);
