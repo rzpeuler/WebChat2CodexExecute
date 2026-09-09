@@ -70,14 +70,20 @@ Return actionable work only through valid WRITING_BLOCK blocks. Include no more 
 
 The following project snapshot is authoritative for this initialization:`;
 
+const SENSITIVE_KEY_PATTERN =
+  /(?:cookie|password|token|secret|credentials?|private[_-]?key|authorization|access[_-]?key|api[_-]?key|auth)/i;
+
 function sanitizeText(value: string): string {
   return value
     .replace(/([a-z][a-z\d+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@/gi, '$1[REDACTED]@')
-    .replace(/([?&](?:token|password|secret|cookie|key|auth)[^=]*=)[^&\s]+/gi, '$1[REDACTED]')
+    .replace(
+      /([?&](?:token|password|secret|cookie|key|auth|credentials?|private[_-]?key|authorization|access[_-]?key)[^=]*=)[^&\s]+/gi,
+      '$1[REDACTED]',
+    )
     .replace(/\b(?:bearer|basic)\s+[a-z0-9+/=_-]+/gi, '[REDACTED-CREDENTIAL]')
     .replace(/\b(?:ghp|github_pat|xoxb|xoxp|sk)-[a-z0-9_-]+\b/gi, '[REDACTED-CREDENTIAL]')
     .replace(
-      /\b(?:[a-z\d_-]*?(?:token|password|cookie|secret|api[_-]?key)[a-z\d_-]*)\s*[:=]\s*[^\s,;]+/gi,
+      /\b(?:[a-z\d_-]*?(?:cookie|password|token|secret|credentials?|private[_-]?key|authorization|access[_-]?key|api[_-]?key|auth)[a-z\d_-]*)\s*[:=]\s*(?!\[REDACTED(?:-CREDENTIAL)?\])[^\s,;]+/gi,
       (match) => `${match.split(/\s*[:=]\s*/)[0]}: [REDACTED]`,
     );
 }
@@ -93,10 +99,7 @@ function sanitizeValue(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value)
         .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, child]) => [
-          key,
-          /cookie|password|token|secret|api[_-]?key|auth/i.test(key) ? '[REDACTED]' : sanitizeValue(child),
-        ]),
+        .map(([key, child]) => [key, SENSITIVE_KEY_PATTERN.test(key) ? '[REDACTED]' : sanitizeValue(child)]),
     );
   }
   return value;

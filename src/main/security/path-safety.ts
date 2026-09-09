@@ -1,4 +1,4 @@
-import { realpath, stat } from 'node:fs/promises';
+import { lstat, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 export type PathSafetyErrorCode = 'PATH_OUTSIDE_PROJECT' | 'PROJECT_PATH_UNSAFE';
@@ -36,7 +36,10 @@ async function nearestExistingParent(candidatePath: string): Promise<string> {
   let current = dirname(candidatePath);
   while (true) {
     try {
-      await stat(current);
+      const stats = await lstat(current);
+      if (stats.isSymbolicLink()) {
+        throw new PathSafetyError('PATH_OUTSIDE_PROJECT', `Path component is a symlink or junction: ${current}`);
+      }
       return current;
     } catch (error) {
       if (!isNodeError(error, 'ENOENT')) {
@@ -51,6 +54,28 @@ async function nearestExistingParent(candidatePath: string): Promise<string> {
   }
 }
 
+async function assertNoSymlinkComponents(candidatePath: string): Promise<void> {
+  let current = resolve(candidatePath);
+  while (true) {
+    try {
+      const stats = await lstat(current);
+      if (stats.isSymbolicLink()) {
+        throw new PathSafetyError('PATH_OUTSIDE_PROJECT', `Path component is a symlink or junction: ${current}`);
+      }
+    } catch (error) {
+      if (!isNodeError(error, 'ENOENT')) {
+        throw error;
+      }
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return;
+    }
+    current = parent;
+  }
+}
+
 /**
  * Checks lexical containment and then resolves every existing path component.
  * For a path that will be created later, the nearest existing parent is the
@@ -61,6 +86,7 @@ export async function assertSafeProjectPath(projectRoot: string, candidatePath: 
   const lexicalCandidate = resolveProjectPath(lexicalRoot, candidatePath);
   let realRoot: string;
   try {
+    await assertNoSymlinkComponents(lexicalRoot);
     realRoot = await realpath(lexicalRoot);
     const rootStats = await stat(realRoot);
     if (!rootStats.isDirectory()) {
@@ -74,8 +100,12 @@ export async function assertSafeProjectPath(projectRoot: string, candidatePath: 
 
   let realCandidate: string;
   try {
+    await assertNoSymlinkComponents(lexicalCandidate);
     realCandidate = await realpath(lexicalCandidate);
   } catch (error) {
+    if (error instanceof PathSafetyError) {
+      throw error;
+    }
     if (!isNodeError(error, 'ENOENT')) {
       throw new PathSafetyError('PROJECT_PATH_UNSAFE', `Project path cannot be resolved safely: ${lexicalCandidate}`, {
         cause: error,
@@ -100,6 +130,7 @@ export async function assertSafeProjectPath(projectRoot: string, candidatePath: 
 export async function realProjectRoot(projectRoot: string): Promise<string> {
   const lexicalRoot = resolve(projectRoot);
   try {
+    await assertNoSymlinkComponents(lexicalRoot);
     const canonicalRoot = await realpath(lexicalRoot);
     const rootStats = await stat(canonicalRoot);
     if (!rootStats.isDirectory()) {

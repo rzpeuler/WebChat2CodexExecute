@@ -120,4 +120,49 @@ describe('Sol initialization prompt compiler', () => {
     expect(first.dynamicContext).not.toContain('ghp_hidden');
     expect(first.dynamicContext).not.toContain('do-not-leak');
   });
+
+  it('redacts expanded sensitive keys while preserving unknown extension structure', () => {
+    const prompt = compileSolInitializationPrompt({
+      project,
+      governance: {
+        version: 10,
+        extensions: {
+          credentials: 'credential-value',
+          credential: 'credential-singular-value',
+          privateKey: 'private-key-value',
+          private_key: 'private-key-underscore-value',
+          authorization: 'authorization-value',
+          accessKey: 'access-key-value',
+          access_key: 'access-key-underscore-value',
+          customExtension: {
+            keep: true,
+            credential: 'nested-credential-value',
+          },
+        },
+        documents: [],
+      },
+      recentLunaReportSummary:
+        'credentials: text-credentials privateKey=text-private authorization=text-authorization accessKey=text-access',
+    });
+
+    for (const secret of [
+      'credential-value',
+      'credential-singular-value',
+      'private-key-value',
+      'private-key-underscore-value',
+      'authorization-value',
+      'access-key-value',
+      'access-key-underscore-value',
+      'nested-credential-value',
+      'text-credentials',
+      'text-private',
+      'text-authorization',
+      'text-access',
+    ]) {
+      expect(prompt).not.toContain(secret);
+    }
+    expect(prompt).toContain('customExtension');
+    expect(prompt).toContain('"keep":true');
+    expect(prompt).toContain('[REDACTED]');
+  });
 });

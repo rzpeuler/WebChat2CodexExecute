@@ -62,7 +62,16 @@ describe('phase two project configuration', () => {
     expect(saved.localPath).toBe(await realpath(repository));
     expect(saved.headCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(saved.remoteUrl).toBe('https://example.com/team/repo.git');
-    expect(scan.governanceDocumentCandidates).toEqual([]);
+    expect(scan.governanceDocumentCandidates).toEqual([
+      {
+        id: 'discovered-governance:README.md',
+        path: 'README.md',
+        exists: true,
+        audience: [],
+        version: 1,
+        status: 'candidate',
+      },
+    ]);
     expect(await store.get(scan.projectId)).toEqual(saved);
     const persisted = await readFile(storePath, 'utf8');
     expect(persisted).not.toContain('super-secret');
@@ -89,7 +98,49 @@ describe('phase two project configuration', () => {
         status: 'active',
         type: 'internal-policy',
       },
+      {
+        id: 'discovered-governance:README.md',
+        path: 'README.md',
+        exists: true,
+        audience: [],
+        version: 1,
+        status: 'candidate',
+      },
     ]);
+  });
+
+  it('discovers only deterministic, allowlisted governance candidates without a manifest', async () => {
+    const repository = await gitRepository();
+    await writeFile(join(repository, 'AGENTS.md'), '# agents\n', 'utf8');
+    await writeFile(join(repository, 'CONTRIBUTING.md'), '# contributing\n', 'utf8');
+    await mkdir(join(repository, 'docs', 'architecture'), { recursive: true });
+    await mkdir(join(repository, 'docs', 'random'), { recursive: true });
+    await mkdir(join(repository, '.github'), { recursive: true });
+    await writeFile(join(repository, 'docs', 'architecture', 'overview.md'), '# architecture\n', 'utf8');
+    await writeFile(join(repository, 'docs', 'random', 'ignore.md'), '# ignore\n', 'utf8');
+    await writeFile(join(repository, 'docs', 'security.md'), '# security\n', 'utf8');
+    await writeFile(join(repository, '.github', 'SECURITY.md'), '# security\n', 'utf8');
+    await writeFile(join(repository, '.github', 'notes.md'), '# ignore\n', 'utf8');
+
+    const scan = await scanGitProject(repository);
+    const paths = scan.governanceDocumentCandidates.map((candidate) => candidate.path);
+    expect(paths).toEqual([...paths].sort((left, right) => left.localeCompare(right)));
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        'AGENTS.md',
+        'README.md',
+        'CONTRIBUTING.md',
+        'docs/architecture/overview.md',
+        'docs/security.md',
+        '.github/SECURITY.md',
+      ]),
+    );
+    expect(paths).not.toEqual(expect.arrayContaining(['docs/random/ignore.md', '.github/notes.md']));
+    const discovered = scan.governanceDocumentCandidates.filter((candidate) =>
+      candidate.id.startsWith('discovered-governance:'),
+    );
+    expect(discovered.length).toBeGreaterThan(0);
+    expect(discovered.every((candidate) => candidate.status === 'candidate' && candidate.exists)).toBe(true);
   });
 
   it('rejects non-repositories and report paths outside the repository', async () => {
@@ -156,6 +207,29 @@ describe('phase two project configuration', () => {
       });
     } else {
       await mkdir(join(repository, 'missing-parent'), { recursive: true });
+      await expect(service.save({ ...scan, reportDirectory: 'missing-parent/new/reports' })).resolves.toMatchObject({
+        reportDirectory: join(repository, 'missing-parent', 'new', 'reports'),
+      });
+    }
+  });
+
+  it('rejects dangling symlink path components when symlink creation is available', async () => {
+    const repository = await gitRepository();
+    const danglingLink = join(repository, 'dangling-reports');
+    let linked = true;
+    try {
+      await symlink(join(repository, 'missing-target'), danglingLink, 'file');
+    } catch {
+      linked = false;
+    }
+
+    const scan = await scanGitProject(repository);
+    const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
+    if (linked) {
+      await expect(service.save({ ...scan, reportDirectory: 'dangling-reports/new' })).rejects.toMatchObject({
+        code: 'PATH_OUTSIDE_PROJECT',
+      });
+    } else {
       await expect(service.save({ ...scan, reportDirectory: 'missing-parent/new/reports' })).resolves.toMatchObject({
         reportDirectory: join(repository, 'missing-parent', 'new', 'reports'),
       });
