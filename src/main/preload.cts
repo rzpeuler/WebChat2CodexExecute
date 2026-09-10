@@ -1,14 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { RendererApi } from '../shared/contracts/renderer-api.js';
-import {
-  PROJECT_CONFIG_LIST_CHANNEL,
-  PROJECT_CONFIG_SAVE_CHANNEL,
-  PROJECT_SCAN_CHANNEL,
-  RUNTIME_INFO_CHANNEL,
-  SOL_PROMPT_PREVIEW_CHANNEL,
-  DASHBOARD_COMMAND_CHANNEL,
-  DASHBOARD_SNAPSHOT_CHANNEL,
-} from './security/ipc.js';
+
+// Sandboxed Electron preloads can load Electron built-ins, but cannot require
+// local application modules. Keep this allowlisted channel table local to the
+// bridge so the renderer never receives arbitrary IPC access.
+const RUNTIME_INFO_CHANNEL = 'app:get-runtime-info';
+const PROJECT_SCAN_CHANNEL = 'project:scan';
+const PROJECT_CONFIG_SAVE_CHANNEL = 'project-config:save';
+const PROJECT_CONFIG_LIST_CHANNEL = 'project-config:list';
+const SOL_PROMPT_PREVIEW_CHANNEL = 'sol:prompt-preview';
+const DASHBOARD_SNAPSHOT_CHANNEL = 'dashboard:get-snapshot';
+const DASHBOARD_COMMAND_CHANNEL = 'dashboard:command';
 
 const rendererApi: RendererApi = {
   getRuntimeInfo: () => ipcRenderer.invoke(RUNTIME_INFO_CHANNEL),
