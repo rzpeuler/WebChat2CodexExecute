@@ -485,6 +485,12 @@ export class ProjectConfigService {
       throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project config must be an object');
     }
     const scan = await scanGitProject(configInput.localPath);
+    if (scan.governanceManifestStatus === 'invalid') {
+      throw new ProjectConfigError(
+        'INVALID_PROJECT_CONFIG',
+        `Governance manifest is invalid: ${scan.governanceManifestError?.message ?? 'unknown manifest error'}`,
+      );
+    }
     const suppliedBranch = typeof configInput.currentBranch === 'string' ? configInput.currentBranch.trim() : '';
     if (suppliedBranch !== '' && suppliedBranch !== scan.currentBranch) {
       throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project current branch does not match the Git scan');

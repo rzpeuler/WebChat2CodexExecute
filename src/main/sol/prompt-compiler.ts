@@ -92,22 +92,21 @@ function sanitizeText(value: string): string {
     );
 }
 
-function parseJsonObjectString(value: string): Record<string, unknown> | null {
-  if (!value.trimStart().startsWith('{')) {
-    return null;
-  }
+const NOT_JSON_CONTAINER = Symbol('not-json-container');
+
+function parseJsonContainerString(value: string): Record<string, unknown> | unknown[] | typeof NOT_JSON_CONTAINER {
   try {
     const parsed: unknown = JSON.parse(value);
-    return isRecord(parsed) ? parsed : null;
+    return isRecord(parsed) || Array.isArray(parsed) ? parsed : NOT_JSON_CONTAINER;
   } catch {
-    return null;
+    return NOT_JSON_CONTAINER;
   }
 }
 
 function sanitizeValue(value: unknown): unknown {
   if (typeof value === 'string') {
-    const parsed = parseJsonObjectString(value);
-    return parsed === null ? sanitizeText(value) : sanitizeValue(parsed);
+    const parsed = parseJsonContainerString(value);
+    return parsed === NOT_JSON_CONTAINER ? sanitizeText(value) : sanitizeValue(parsed);
   }
   if (Array.isArray(value)) {
     return value.map(sanitizeValue);
@@ -178,8 +177,8 @@ function formatArchitecture(revisions: SolArchitectureRevision[]): string {
 
 function formatFieldValue(value: unknown): string {
   if (typeof value === 'string') {
-    const parsed = parseJsonObjectString(value);
-    return parsed === null ? sanitizeText(value) : stableJson(parsed);
+    const parsed = parseJsonContainerString(value);
+    return parsed === NOT_JSON_CONTAINER ? sanitizeText(value) : stableJson(parsed);
   }
   return stableJson(value);
 }
@@ -188,7 +187,8 @@ function taskBookFields(value: Record<string, unknown> | string): Record<string,
   if (isRecord(value)) {
     return value;
   }
-  return { task_book: parseJsonObjectString(value) ?? value };
+  const parsed = parseJsonContainerString(value);
+  return { task_book: parsed === NOT_JSON_CONTAINER ? value : parsed };
 }
 
 export function compileWritingBlock(type: WritingBlockType, fields: Record<string, unknown>): string {

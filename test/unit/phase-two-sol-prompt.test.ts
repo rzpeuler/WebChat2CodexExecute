@@ -199,4 +199,34 @@ describe('Sol initialization prompt compiler', () => {
     expect(malformedPrompt).not.toContain('malformed-secret');
     expect(malformedPrompt).toContain('"authorization": "[REDACTED]"');
   });
+
+  it('parses JSON arrays and redacts nested sensitive objects deterministically', () => {
+    const recentLunaReportSummary = JSON.stringify([
+      {
+        safe: 'preserve-me',
+        credentials: 'array-credentials-secret',
+        password: 'array-password-secret',
+        nested: [{ privateKey: 'array-private-key-secret', authorization: 'array-authorization-secret' }],
+      },
+      { accessKey: 'array-access-key-secret' },
+    ]);
+    const input = { project, governance, recentLunaReportSummary };
+    const first = compileSolInitializationPrompt(input);
+    const second = compileSolInitializationPrompt(input);
+
+    expect(first).toEqual(second);
+    for (const secret of [
+      'array-password-secret',
+      'array-credentials-secret',
+      'array-private-key-secret',
+      'array-authorization-secret',
+      'array-access-key-secret',
+    ]) {
+      expect(first).not.toContain(secret);
+    }
+    expect(first).toContain('"credentials":"[REDACTED]"');
+    expect(first).toContain('"password":"[REDACTED]"');
+    expect(first).toContain('"nested":[{"authorization":"[REDACTED]","privateKey":"[REDACTED]"}]');
+    expect(first).toContain('"accessKey":"[REDACTED]"');
+  });
 });

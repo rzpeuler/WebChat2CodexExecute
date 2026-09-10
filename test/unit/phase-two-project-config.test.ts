@@ -160,6 +160,36 @@ describe('phase two project configuration', () => {
     ]);
   });
 
+  it('rejects saving when the scanned governance manifest is invalid', async () => {
+    const repository = await gitRepository();
+    const manifestDirectory = join(repository, 'docs', 'governance');
+    await mkdir(manifestDirectory, { recursive: true });
+    await writeFile(join(manifestDirectory, 'governance-manifest.yaml'), 'documents: [', 'utf8');
+    const scan = await scanGitProject(repository);
+    const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
+
+    await expect(service.save({ ...scan, reportDirectory: 'reports' })).rejects.toMatchObject({
+      code: 'INVALID_PROJECT_CONFIG',
+      message: expect.stringContaining('Governance manifest is invalid'),
+    });
+    await expect(service.loadAll()).resolves.toEqual([]);
+  });
+
+  it('allows saving without a manifest while retaining discovered governance candidates', async () => {
+    const repository = await gitRepository();
+    const scan = await scanGitProject(repository);
+    const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
+
+    const saved = await service.save({ ...scan, reportDirectory: 'reports' });
+
+    expect(scan.governanceManifestStatus).toBe('missing');
+    expect(scan.governanceDocumentCandidates).toEqual([
+      expect.objectContaining({ id: 'discovered-governance:README.md', status: 'candidate' }),
+    ]);
+    expect(saved.localPath).toBe(scan.localPath);
+    await expect(service.load(saved.projectId)).resolves.toEqual(saved);
+  });
+
   it('rejects non-repositories and report paths outside the repository', async () => {
     const directory = await temporaryDirectory();
     await expect(scanGitProject(directory)).rejects.toMatchObject({ code: 'NOT_GIT_REPOSITORY' });
