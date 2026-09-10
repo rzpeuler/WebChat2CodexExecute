@@ -38,7 +38,23 @@ export interface GitBaseline {
   remoteUrl: string;
   branch: string;
   head: string;
+  remoteTip: string | null;
   worktree: string[];
+}
+
+export interface GitPendingPush {
+  repositoryRoot: string;
+  remoteName: string;
+  remoteUrl: string;
+  branch: string;
+  baselineRemoteTip: string | null;
+  commit: string;
+}
+
+export interface GitPendingPushState {
+  read(key: string): GitPendingPush | null;
+  write(key: string, pendingPush: GitPendingPush): void;
+  clear(key: string, commit: string): void;
 }
 
 export interface GitControllerErrorDetails {
@@ -76,6 +92,7 @@ export class GitControllerError extends Error {
 export interface GitControllerOptions {
   execFile?: GitExecFile;
   logger?: (event: string, details: Record<string, unknown>) => void;
+  pendingPushState?: GitPendingPushState;
 }
 
 export interface CaptureBaselineOptions {

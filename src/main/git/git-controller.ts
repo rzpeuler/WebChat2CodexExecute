@@ -11,6 +11,8 @@ import {
   type GitCommandResult,
   type GitControllerOptions,
   type GitExecFile,
+  type GitPendingPush,
+  type GitPendingPushState,
   type GitSyncResult,
   type GovernanceSyncInput,
   type VerifyBaselineOptions,
@@ -19,8 +21,28 @@ import {
 const defaultExecFileCallback = promisify(execFileCallback);
 const DEFAULT_PROTECTED_PATHS = ['docs/superpowers', 'docs/superpowers/**'];
 
-interface GitSnapshot extends GitBaseline {
+interface GitSnapshot extends Omit<GitBaseline, 'remoteTip'> {
   worktree: string[];
+}
+
+export class InMemoryGitPendingPushState implements GitPendingPushState {
+  private readonly pendingPushes = new Map<string, GitPendingPush>();
+
+  read(key: string): GitPendingPush | null {
+    return this.pendingPushes.get(key) ?? null;
+  }
+
+  write(key: string, pendingPush: GitPendingPush): void {
+    this.pendingPushes.set(key, pendingPush);
+  }
+
+  clear(key: string, commit: string): void {
+    if (this.pendingPushes.get(key)?.commit === commit) this.pendingPushes.delete(key);
+  }
+}
+
+function pendingPushKey(baseline: Pick<GitBaseline, 'repositoryRoot' | 'remoteName' | 'branch'>): string {
+  return JSON.stringify([baseline.repositoryRoot, baseline.remoteName, baseline.branch]);
 }
 
 function normalizePath(value: string): string {
@@ -115,14 +137,17 @@ async function defaultExecFile(
 export class GitController {
   private readonly execFile: GitExecFile;
   private readonly logger: (event: string, details: Record<string, unknown>) => void;
+  private readonly pendingPushState: GitPendingPushState;
 
   constructor(options: GitControllerOptions = {}) {
     this.execFile = options.execFile ?? defaultExecFile;
     this.logger = options.logger ?? (() => undefined);
+    this.pendingPushState = options.pendingPushState ?? new InMemoryGitPendingPushState();
   }
 
   async captureBaseline(repositoryPath: string, options: CaptureBaselineOptions = {}): Promise<GitBaseline> {
     const snapshot = await this.readSnapshot(repositoryPath);
+    const remoteTip = await this.queryRemoteAfterFetch(snapshot.repositoryRoot, snapshot);
     const requireClean = options.requireClean ?? true;
     if (options.expectedBranch !== undefined && snapshot.branch !== options.expectedBranch) {
       throw new GitControllerError('BRANCH_MISMATCH', 'Repository branch does not match the expected branch', {
@@ -141,19 +166,22 @@ export class GitController {
         paths: snapshot.worktree,
       });
     }
-    this.log('baseline-captured', { ...snapshot });
-    return snapshot;
+    const baseline = { ...snapshot, remoteTip };
+    this.log('baseline-captured', { ...baseline });
+    return baseline;
   }
 
   async verifyBaseline(baseline: GitBaseline, options: VerifyBaselineOptions = {}): Promise<GitBaseline> {
     const current = await this.readSnapshot(baseline.repositoryRoot);
     this.assertIdentity(baseline, current);
+    const remoteTip = await this.queryRemoteAfterFetch(current.repositoryRoot, current);
+    this.assertRemoteBaseline(baseline, remoteTip);
     if (!(options.allowWorktreeChanges ?? false) && current.worktree.length > 0) {
       throw new GitControllerError('BASELINE_CHANGED', 'Repository worktree changed after baseline capture', {
         paths: current.worktree,
       });
     }
-    return current;
+    return { ...current, remoteTip };
   }
 
   async syncGovernance(input: GovernanceSyncInput): Promise<GitSyncResult> {
@@ -239,17 +267,67 @@ export class GitController {
     baseline: GitBaseline,
     repositoryRoot: string,
   ): Promise<GitSyncResult> {
-    let pushRetried = false;
-    let remoteCommit = await this.tryPush(repositoryRoot, baseline, commit).catch(async (error: unknown) => {
-      if (!(error instanceof GitControllerError) || error.code !== 'PUSH_FAILED' || error.details.uncertain !== true) {
-        throw error;
-      }
-      const observed = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
-      if (observed === commit) return observed;
-      pushRetried = true;
+    const key = pendingPushKey(baseline);
+    const pendingPush = this.pendingPushState.read(key);
+    const isPendingPush = pendingPush !== null && this.matchesPendingPush(pendingPush, baseline, commit);
+    const remoteTip = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
+    if (isPendingPush && remoteTip === commit) {
+      this.pendingPushState.clear(key, commit);
+      return { kind, commit, pushed: true, remoteCommit: commit, pushRetried: false };
+    }
+    this.assertRemoteBaseline(baseline, remoteTip);
+
+    const pushRetried = isPendingPush;
+    try {
       await this.pushOnce(repositoryRoot, baseline);
+      let observed: string | null;
+      try {
+        observed = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
+      } catch (error) {
+        throw new GitControllerError(
+          'PUSH_FAILED',
+          'Push completed but the remote commit could not be confirmed',
+          {
+            localCommit: commit,
+            remoteName: baseline.remoteName,
+            remoteUrl: baseline.remoteUrl,
+            uncertain: true,
+          },
+          { cause: error },
+        );
+      }
+      if (observed !== commit) {
+        throw new GitControllerError('PUSH_FAILED', 'Push completed without the expected remote commit', {
+          localCommit: commit,
+          remoteCommit: observed,
+          remoteName: baseline.remoteName,
+          remoteUrl: baseline.remoteUrl,
+        });
+      }
+      this.pendingPushState.clear(key, commit);
+      return { kind, commit, pushed: true, remoteCommit: observed, pushRetried };
+    } catch (error) {
+      if (!(error instanceof GitControllerError) || error.code !== 'PUSH_FAILED') throw error;
+      this.rememberPendingPush(key, baseline, commit);
+      if (error.details.uncertain !== true) throw error;
+
+      const observed = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
+      if (observed === commit) {
+        this.pendingPushState.clear(key, commit);
+        return { kind, commit, pushed: true, remoteCommit: observed, pushRetried };
+      }
+      this.assertRemoteBaseline(baseline, observed);
+      try {
+        await this.pushOnce(repositoryRoot, baseline);
+      } catch (retryError) {
+        if (retryError instanceof GitControllerError && retryError.code === 'PUSH_FAILED') {
+          this.rememberPendingPush(key, baseline, commit);
+        }
+        throw retryError;
+      }
       const afterRetry = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
       if (afterRetry !== commit) {
+        this.rememberPendingPush(key, baseline, commit);
         throw new GitControllerError('PUSH_FAILED', 'Push response remained unconfirmed after retry', {
           localCommit: commit,
           remoteCommit: afterRetry,
@@ -258,23 +336,31 @@ export class GitController {
           uncertain: true,
         });
       }
-      return afterRetry;
-    });
-    return { kind, commit, pushed: true, remoteCommit, pushRetried };
+      this.pendingPushState.clear(key, commit);
+      return { kind, commit, pushed: true, remoteCommit: afterRetry, pushRetried: true };
+    }
   }
 
-  private async tryPush(repositoryRoot: string, baseline: GitBaseline, commit: string): Promise<string> {
-    await this.pushOnce(repositoryRoot, baseline);
-    const observed = await this.queryRemote(repositoryRoot, baseline);
-    if (observed !== commit) {
-      throw new GitControllerError('PUSH_FAILED', 'Push completed without the expected remote commit', {
-        localCommit: commit,
-        remoteCommit: observed,
-        remoteName: baseline.remoteName,
-        remoteUrl: baseline.remoteUrl,
-      });
-    }
-    return observed;
+  private matchesPendingPush(pendingPush: GitPendingPush, baseline: GitBaseline, commit: string): boolean {
+    return (
+      pendingPush.repositoryRoot === baseline.repositoryRoot &&
+      pendingPush.remoteName === baseline.remoteName &&
+      pendingPush.remoteUrl === baseline.remoteUrl &&
+      pendingPush.branch === baseline.branch &&
+      pendingPush.baselineRemoteTip === baseline.remoteTip &&
+      pendingPush.commit === commit
+    );
+  }
+
+  private rememberPendingPush(key: string, baseline: GitBaseline, commit: string): void {
+    this.pendingPushState.write(key, {
+      repositoryRoot: baseline.repositoryRoot,
+      remoteName: baseline.remoteName,
+      remoteUrl: baseline.remoteUrl,
+      branch: baseline.branch,
+      baselineRemoteTip: baseline.remoteTip,
+      commit,
+    });
   }
 
   private async pushOnce(repositoryRoot: string, baseline: GitBaseline): Promise<void> {
@@ -293,23 +379,36 @@ export class GitController {
     }
   }
 
-  private async queryRemoteAfterFetch(repositoryRoot: string, baseline: GitBaseline): Promise<string | null> {
-    try {
-      await this.run(['fetch', '--no-tags', baseline.remoteName, baseline.branch], repositoryRoot);
-    } catch (error) {
-      this.log('remote-query-fetch-failed', { remoteName: baseline.remoteName, error: String(error) });
-    }
+  private async queryRemoteAfterFetch(
+    repositoryRoot: string,
+    baseline: Pick<GitBaseline, 'remoteName' | 'branch'>,
+  ): Promise<string | null> {
+    await this.run(['fetch', '--no-tags', baseline.remoteName, baseline.branch], repositoryRoot);
     return this.queryRemote(repositoryRoot, baseline);
   }
 
-  private async queryRemote(repositoryRoot: string, baseline: GitBaseline): Promise<string | null> {
+  private async queryRemote(
+    repositoryRoot: string,
+    baseline: Pick<GitBaseline, 'remoteName' | 'branch'>,
+  ): Promise<string | null> {
     try {
       return (
         await this.run(['rev-parse', `refs/remotes/${baseline.remoteName}/${baseline.branch}`], repositoryRoot)
       ).trim();
     } catch (error) {
       if (error instanceof GitControllerError && error.details.stderr?.includes('unknown revision')) return null;
-      return null;
+      throw error;
+    }
+  }
+
+  private assertRemoteBaseline(baseline: GitBaseline, remoteTip: string | null): void {
+    if (remoteTip !== baseline.remoteTip) {
+      throw new GitControllerError('BASELINE_CHANGED', 'Remote branch changed after baseline capture', {
+        expected: baseline.remoteTip,
+        remoteCommit: remoteTip,
+        remoteName: baseline.remoteName,
+        remoteUrl: baseline.remoteUrl,
+      });
     }
   }
 

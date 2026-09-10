@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { GitController, type GitCommandResult, type GitExecFile } from '../../src/main/git/index.js';
@@ -116,6 +116,71 @@ describe('GitController', () => {
     expect(retried.commit).toBe(localCommit);
     expect(await command(root, ['rev-list', '--count', 'HEAD'])).toBe('2');
     expect(await command(root, ['rev-parse', 'refs/remotes/origin/main'])).toBe(localCommit);
+  });
+
+  it('confirms a pending push after fetch when the remote already has the local commit', async () => {
+    const { root } = await repository();
+    const calls: string[][] = [];
+    let pushCount = 0;
+    const executor: GitExecFile = async (file, args, options) => {
+      calls.push([file, ...args]);
+      if (file === 'git' && args[0] === 'push' && pushCount++ === 0) {
+        await realExecutor()(file, args, options);
+        throw Object.assign(new Error('push response lost'), { stderr: 'remote rejected', uncertain: false });
+      }
+      return realExecutor()(file, args, options);
+    };
+    const controller = new GitController({ execFile: executor });
+    const baseline = await controller.captureBaseline(root);
+    await writeFile(join(root, 'confirmed.md'), '# Confirmed\n', 'utf8');
+    const input = { baseline, changeId: 'confirmed-1', changedPaths: ['confirmed.md'] };
+
+    await expect(controller.syncGovernance(input)).rejects.toMatchObject({ code: 'PUSH_FAILED' });
+    const callsBeforeRecovery = calls.length;
+    const result = await controller.syncGovernance(input);
+    const recoveryCalls = calls.slice(callsBeforeRecovery);
+
+    expect(result.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(result.remoteCommit).toBe(result.commit);
+    expect(result.pushRetried).toBe(false);
+    expect(pushCount).toBe(1);
+    expect(recoveryCalls.some((args) => args[1] === 'fetch')).toBe(true);
+    expect(recoveryCalls.some((args) => args[1] === 'push')).toBe(false);
+  });
+
+  it('rejects an external remote tip advance before attempting a push', async () => {
+    const { root, remote } = await repository();
+    let pushCount = 0;
+    const executor: GitExecFile = async (file, args, options) => {
+      if (file === 'git' && args[0] === 'push') pushCount += 1;
+      return realExecutor()(file, args, options);
+    };
+    const controller = new GitController({ execFile: executor });
+    const baseline = await controller.captureBaseline(root, { requireClean: true });
+
+    const external = join(dirname(root), 'external');
+    await command(root, ['clone', remote, external]);
+    await command(external, ['switch', '-c', 'main', '--track', 'origin/main']);
+    await command(external, ['config', 'user.email', 'external@example.invalid']);
+    await command(external, ['config', 'user.name', 'External User']);
+    await writeFile(join(external, 'external.md'), '# External\n', 'utf8');
+    await command(external, ['add', '--', 'external.md']);
+    await command(external, ['commit', '-m', 'external']);
+    await command(external, ['push', 'origin', 'main']);
+
+    await writeFile(join(root, 'blocked.md'), '# Blocked\n', 'utf8');
+
+    await expect(
+      controller.syncGovernance({
+        baseline,
+        changeId: 'stale-remote-1',
+        changedPaths: ['blocked.md'],
+      }),
+    ).rejects.toMatchObject({
+      code: 'BASELINE_CHANGED',
+      details: { expected: baseline.remoteTip },
+    });
+    expect(pushCount).toBe(0);
   });
 
   it('uses fetch/query before retrying an uncertain push response', async () => {
