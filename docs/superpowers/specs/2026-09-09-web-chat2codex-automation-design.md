@@ -79,54 +79,34 @@ Notifier ── Windows 通知、状态面板、人工接管
 
 ## 5. 初始化向导
 
-### 5.1 项目配置
+### 5.1 项目配置与初始化
 
-向导读取并让用户确认：
+初始化向导支持两种模式：
 
-- 项目名称；
-- 本地 Git 仓库路径；
-- 远端仓库地址；
-- 目标分支；
-- Luna 模型；
-- 任务报告目录；
-- 架构文档目录；
-- 治理文档注册表路径；
-- 自动 commit 和 push 策略；
-- 通知策略；
-- Sol Project 和会话绑定。
+- 新项目：用户选择本地父目录，输入远端仓库地址和目标目录名，软件执行 `git clone`；
+- 已有项目：用户选择 Git 仓库根目录，软件执行治理接管。
 
-本地 Git 的远端、当前分支和当前 commit 应优先读取后确认，不要求用户重复输入。
+两种模式随后执行同一套治理初始化：先备份原有 `docs/governance`，再写入标准模板，最后由软件自动 commit 和 push。远端、当前分支和当前 commit 在已有项目中优先读取；凭证仍由本机 Git Credential Manager 或 SSH 管理，不能写入配置。
 
-### 5.2 治理文档发现
+初始化向导提供“检查 Git 远程授权”按钮，以非交互方式执行远端可访问性检查，并将认证失败、网络失败和地址错误分开提示。Codex/OpenAI 登录状态不等于 GitHub 远端授权；软件不会把任一方的凭证复制或保存到项目配置。
 
-软件扫描并列出候选文档，例如：
+### 5.2 唯一治理入口
 
-- `AGENTS.md`；
-- `README.md`；
-- `CONTRIBUTING.md`；
-- `docs/`；
-- `.github/`；
-- 已存在的架构、测试、安全和仓库治理文件。
-
-用户确认哪些文件是权威来源。软件不得静默把任意文档提升为治理规则。
-
-### 5.3 治理内核
-
-项目仓库内保留可扩展的治理目录：
+软件不根据目录名或文件名推断外部治理候选。项目仓库内严格锁定：
 
 ```text
 docs/governance/
-├── governance-manifest.yaml
-├── architecture.md
-├── repository-policy.md
-├── development-policy.md
-├── decisions/
-└── extensions/
+├── README.md
+├── PROJECT_RULES.md
+├── DEVELOPMENT_WORKFLOW.md
+├── AGENT_ROLES.md
+├── GIT_POLICY.md
+└── governance-manifest.yaml
 ```
 
-文档注册表使用文档 ID、路径、受众、状态和版本描述文档。新增治理文档只需新增并注册，不需要修改软件代码。
+`docs/governance` 是唯一有效治理入口，manifest 中登记的 active 文档是当前规则。已有目录在接管前备份到 `.web-chat2codex/backups/governance/<run-id>/`；已由本工具初始化且无漂移时重复操作幂等，发生漂移则拒绝静默覆盖。
 
-软件对未知文档类型采用“可保存、可索引、可传递、不可隐式强制”的策略。
+外部 `AGENTS.md`、`CLAUDE.md`、README 和其他文档继续保留，不由初始化流程停用，也不自动成为治理规则。绑定 Edge 会话后，用户可以点击“治理一致性检查”，由 Sol 自行判断这些文件是否与 `docs/governance` 冲突。
 
 ## 6. 治理文档与 LLM 边界
 
@@ -139,6 +119,7 @@ docs/governance/
 - 创建治理同步 commit；
 - 执行路径、分支、基线和风险校验；
 - 控制是否允许提交和 push。
+- 仅对 Sol 明确输出的治理一致性替换执行备份、全文替换、commit 和 push；不负责语义筛选。
 
 ### 6.2 Sol 负责
 
@@ -199,6 +180,7 @@ Sol 输出允许包含以下类型：
 ```text
 LUNA_TASK
 GOVERNANCE_CHANGE
+GOVERNANCE_RECONCILIATION
 ARCHITECTURE_FREEZE
 BLOCKED
 ```
@@ -208,6 +190,7 @@ BLOCKED
 ```text
 0 或 1 个 LUNA_TASK
 0 或多个 GOVERNANCE_CHANGE
+0 或 1 个 GOVERNANCE_RECONCILIATION（仅由治理一致性检查入口使用）
 0 或多个 ARCHITECTURE_FREEZE
 ```
 
@@ -243,7 +226,23 @@ content
 
 支持新增文档、更新文档、增加章节、废弃文档和建立决策记录。
 
-### 8.3 ARCHITECTURE_FREEZE
+### 8.3 GOVERNANCE_RECONCILIATION
+
+该 block 只由“治理一致性检查”按钮触发的独立流程消费，不进入普通 Sol 回合，不启动 Luna：
+
+```text
+status: PASS | CHANGES_REQUIRED | BLOCKED
+baseline_commit: required when CHANGES_REQUIRED
+files[].path
+files[].action: replace
+files[].reason
+files[].sha256_before
+files[].content: complete file text
+```
+
+Sol 负责自行检查 `docs/governance` 之外可能影响治理的文件并决定是否冲突；软件只做路径、文件类型、SHA 和全文完整性校验，随后自动备份、替换、commit 和 push。
+
+### 8.4 ARCHITECTURE_FREEZE
 
 ```text
 freeze_id
@@ -257,7 +256,7 @@ luna_follow_up
 
 多个架构冻结必须全部下载和校验成功后，作为一个原子架构同步变更提交。
 
-### 8.4 协议错误
+### 8.5 协议错误
 
 以下情况拒绝启动 Luna：
 

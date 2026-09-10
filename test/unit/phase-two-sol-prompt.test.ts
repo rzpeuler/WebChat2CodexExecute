@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { indexGovernanceManifest } from '../../src/main/governance/manifest.js';
-import { compileSolInitializationPrompt, SolPromptCompiler } from '../../src/main/sol/prompt-compiler.js';
+import {
+  compileSolGovernanceReconciliationPrompt,
+  compileSolInitializationPrompt,
+  SolPromptCompiler,
+} from '../../src/main/sol/prompt-compiler.js';
 import type { ProjectConfig } from '../../src/shared/contracts/project-config.js';
 
 const project: ProjectConfig = {
@@ -228,5 +232,15 @@ describe('Sol initialization prompt compiler', () => {
     expect(first).toContain('"password":"[REDACTED]"');
     expect(first).toContain('"nested":[{"authorization":"[REDACTED]","privateKey":"[REDACTED]"}]');
     expect(first).toContain('"accessKey":"[REDACTED]"');
+  });
+
+  it('compiles a separate reconciliation prompt without the removed screening sentence', () => {
+    const prompt = compileSolGovernanceReconciliationPrompt({ project, baselineCommit: project.headCommit });
+    expect(prompt).toContain('docs/governance');
+    expect(prompt).toContain('determine which documents outside docs/governance');
+    expect(prompt).toContain('GOVERNANCE_RECONCILIATION');
+    expect(prompt).not.toContain('软件不会替你筛选候选文件');
+    expect(prompt).not.toContain('你必须自行判断哪些文件值得检查');
+    expect(prompt).not.toContain('super-secret');
   });
 });

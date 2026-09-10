@@ -1,7 +1,7 @@
-import { access, lstat, readdir } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { execFile as execFileCallback } from 'node:child_process';
-import { extname, relative, resolve, join } from 'node:path';
+import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AtomicJsonFileStore } from '../state/persistence.js';
 import {
@@ -24,41 +24,10 @@ import {
   PathSafetyError,
 } from '../security/path-safety.js';
 import { resolveProjectPath } from '../security/path-safety.js';
-import { compareCodePoints } from '../../shared/sorting.js';
 
 const execFile = promisify(execFileCallback);
 const DEFAULT_MANIFEST_RELATIVE_PATH = 'docs/governance/governance-manifest.yaml';
 const FORBIDDEN_CONFIG_KEYS = /cookie|password|token|secret|api[_-]?key/i;
-const ROOT_GOVERNANCE_DOCUMENTS = new Set(['AGENTS.md', 'README.md', 'CONTRIBUTING.md']);
-const DOCS_GOVERNANCE_DOCUMENTS = new Set([
-  'ARCHITECTURE.md',
-  'GOVERNANCE.md',
-  'SECURITY-POLICY.md',
-  'SECURITY.md',
-  'TEST-PLAN.md',
-  'TESTING.md',
-]);
-const GITHUB_GOVERNANCE_DOCUMENTS = new Set([
-  'ARCHITECTURE.md',
-  'CODE_OF_CONDUCT.md',
-  'CONTRIBUTING.md',
-  'GOVERNANCE.md',
-  'PULL_REQUEST_TEMPLATE.md',
-  'SECURITY.md',
-  'TESTING.md',
-]);
-const GOVERNANCE_DIRECTORY_NAMES = new Set([
-  'adr',
-  'architecture',
-  'governance',
-  'policies',
-  'policy',
-  'security',
-  'test',
-  'testing',
-  'tests',
-]);
-const GOVERNANCE_DOCUMENT_EXTENSIONS = new Set(['.md', '.mdx', '.rst', '.txt']);
 
 export type ProjectConfigErrorCode =
   | 'INVALID_PROJECT_PATH'
@@ -81,6 +50,10 @@ export class ProjectConfigError extends Error {
 
 function trimOutput(value: string): string {
   return value.trim();
+}
+
+function candidatePathKey(path: string): string {
+  return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -120,128 +93,6 @@ async function runGit(args: string[], cwd: string): Promise<string> {
       cause: error,
     });
   }
-}
-
-function normalizedRelativePath(projectRoot: string, filePath: string): string {
-  return relative(projectRoot, filePath).replaceAll('\\', '/');
-}
-
-function candidatePathKey(path: string): string {
-  return process.platform === 'win32' ? path.toLowerCase() : path;
-}
-
-async function listGovernanceDirectoryCandidates(
-  projectRoot: string,
-  directoryName: 'docs' | '.github',
-  rootFileNames: ReadonlySet<string>,
-): Promise<string[]> {
-  const directoryPath = join(projectRoot, directoryName);
-  const normalizedRootFileNames = new Set([...rootFileNames].map((fileName) => fileName.toUpperCase()));
-  try {
-    const directoryStats = await lstat(directoryPath);
-    if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) {
-      return [];
-    }
-  } catch (error) {
-    if (isNodeError(error, 'ENOENT')) {
-      return [];
-    }
-    throw new ProjectConfigError('GIT_COMMAND_FAILED', `Could not inspect governance directory: ${directoryPath}`, {
-      cause: error,
-    });
-  }
-  let entries;
-  try {
-    entries = await readdir(directoryPath, { withFileTypes: true });
-  } catch (error) {
-    if (isNodeError(error, 'ENOENT')) {
-      return [];
-    }
-    throw new ProjectConfigError('GIT_COMMAND_FAILED', `Could not inspect governance directory: ${directoryPath}`, {
-      cause: error,
-    });
-  }
-
-  const candidates: string[] = [];
-  for (const entry of entries.sort((left, right) => compareCodePoints(left.name, right.name))) {
-    const entryPath = join(directoryPath, entry.name);
-    if (entry.isSymbolicLink()) {
-      continue;
-    }
-    if (entry.isFile() && normalizedRootFileNames.has(entry.name.toUpperCase())) {
-      candidates.push(entryPath);
-      continue;
-    }
-    if (!entry.isDirectory() || !GOVERNANCE_DIRECTORY_NAMES.has(entry.name.toLowerCase())) {
-      continue;
-    }
-
-    const nestedEntries = await readdir(entryPath, { withFileTypes: true });
-    for (const nestedEntry of nestedEntries.sort((left, right) => compareCodePoints(left.name, right.name))) {
-      if (
-        nestedEntry.isFile() &&
-        !nestedEntry.isSymbolicLink() &&
-        GOVERNANCE_DOCUMENT_EXTENSIONS.has(extname(nestedEntry.name).toLowerCase())
-      ) {
-        candidates.push(join(entryPath, nestedEntry.name));
-      }
-    }
-  }
-  return candidates;
-}
-
-async function discoverGovernanceDocumentCandidates(
-  projectRoot: string,
-): Promise<ProjectScanResult['governanceDocumentCandidates']> {
-  const fixedRootCandidates = await Promise.all(
-    [...ROOT_GOVERNANCE_DOCUMENTS].map(async (fileName) => {
-      const filePath = join(projectRoot, fileName);
-      try {
-        const stats = await lstat(filePath);
-        return stats.isFile() && !stats.isSymbolicLink() ? filePath : null;
-      } catch (error) {
-        if (isNodeError(error, 'ENOENT')) {
-          return null;
-        }
-        throw new ProjectConfigError('GIT_COMMAND_FAILED', `Could not inspect governance document: ${filePath}`, {
-          cause: error,
-        });
-      }
-    }),
-  );
-  const scopedDirectoryCandidates = await Promise.all([
-    listGovernanceDirectoryCandidates(
-      projectRoot,
-      'docs',
-      new Set([...DOCS_GOVERNANCE_DOCUMENTS].map((name) => name.toUpperCase())),
-    ),
-    listGovernanceDirectoryCandidates(projectRoot, '.github', GITHUB_GOVERNANCE_DOCUMENTS),
-  ]);
-  const paths = [
-    ...fixedRootCandidates.filter((filePath): filePath is string => filePath !== null),
-    ...scopedDirectoryCandidates.flat(),
-  ]
-    .map((filePath) => ({ filePath, relativePath: normalizedRelativePath(projectRoot, filePath) }))
-    .sort((left, right) => compareCodePoints(left.relativePath, right.relativePath));
-
-  return paths.map(({ relativePath }) => ({
-    id: `discovered-governance:${relativePath}`,
-    path: relativePath,
-    exists: true,
-    audience: [],
-    version: 1,
-    status: 'candidate' as const,
-  }));
-}
-
-function mergeGovernanceDocumentCandidates(
-  registered: ProjectScanResult['governanceDocumentCandidates'],
-  discovered: ProjectScanResult['governanceDocumentCandidates'],
-): ProjectScanResult['governanceDocumentCandidates'] {
-  const registeredPaths = new Set(
-    registered.map((candidate) => candidatePathKey(candidate.path.replaceAll('\\', '/'))),
-  );
-  return [...registered, ...discovered.filter((candidate) => !registeredPaths.has(candidatePathKey(candidate.path)))];
 }
 
 export async function scanGitProject(localPath: string): Promise<ProjectScanResult> {
@@ -329,10 +180,10 @@ export async function scanGitProject(localPath: string): Promise<ProjectScanResu
       governanceManifestError = { code: error.code, message: error.message };
     }
   }
-  const governanceDocumentCandidates = mergeGovernanceDocumentCandidates(
-    registeredGovernanceDocumentCandidates,
-    await discoverGovernanceDocumentCandidates(repositoryRoot),
-  );
+  // External-document conflict selection is deliberately delegated to Sol.
+  // The software exposes only manifest-registered governance documents here;
+  // it must not infer semantic candidates from directory or file names.
+  const governanceDocumentCandidates = registeredGovernanceDocumentCandidates;
 
   return {
     projectId: randomUUID(),

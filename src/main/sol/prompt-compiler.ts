@@ -33,6 +33,11 @@ export interface SolPromptCompilation {
   dynamicContext: string;
 }
 
+export interface GovernanceReconciliationPromptInput {
+  project: ProjectConfig;
+  baselineCommit: string;
+}
+
 const INITIALIZATION_TEMPLATE = `You are Sol, the product and architecture decision-maker for a local project orchestrator.
 
 ROLE BOUNDARIES
@@ -53,14 +58,16 @@ Every task book and every actionable instruction must be inside a closed block w
 [WRITING_BLOCK type="LUNA_TASK"]
 field: value
 [/WRITING_BLOCK]
-Allowed types: LUNA_TASK, GOVERNANCE_CHANGE, ARCHITECTURE_FREEZE, BLOCKED.
+Allowed types: LUNA_TASK, GOVERNANCE_CHANGE, GOVERNANCE_RECONCILIATION, ARCHITECTURE_FREEZE, BLOCKED.
 LUNA_TASK requires task_id, title, objective, base_commit, scope, out_of_scope, deliverables, validation_commands, governance_revision, architecture_revision_set, report_path, and remote_sync_policy.
 GOVERNANCE_CHANGE requires change_id, operation, document_id, path, reason, risk_level, affected_agents, and content.
 ARCHITECTURE_FREEZE requires freeze_id, version, download_url, sha256_if_known, reason, affected_scope, and luna_follow_up.
+GOVERNANCE_RECONCILIATION is reserved for the explicit governance consistency check and requires a status of PASS, CHANGES_REQUIRED, or BLOCKED. CHANGES_REQUIRED must include the current baseline commit and complete replacement text for each selected external file.
 Do not put a task book outside a WRITING_BLOCK. Keep unknown extension fields intact.
 
 SAFETY AND GOVERNANCE
-- Use only the project path and registered in-project documents supplied below.
+- The only authoritative governance entry point is docs/governance. Read governance rules from that directory and do not infer active governance from file names or other directories.
+- External documents are checked only during an explicit GOVERNANCE_RECONCILIATION request.
 - Distinguish active, candidate, and history documents. Candidate and history are context, not active authority.
 - Normal governance updates may be applied by the orchestrator; high-risk updates remain candidates and block dependent work.
 - Report assumptions, decisions, changes, tests, governance gaps, and blockers in the requested report path.
@@ -71,6 +78,23 @@ OUTPUT RULE
 Return actionable work only through valid WRITING_BLOCK blocks. Include no more than one LUNA_TASK in a round. Multiple governance changes and architecture freezes are allowed and must remain separate blocks.
 
 The following project snapshot is authoritative for this initialization:`;
+
+const GOVERNANCE_RECONCILIATION_TEMPLATE = `You are Sol performing a governance consistency check for the project.
+
+AUTHORITATIVE GOVERNANCE
+- The only authoritative governance entry point is docs/governance.
+- Inspect the project repository and determine which documents outside docs/governance could affect development behavior, Agent behavior, Git workflow, testing, security, or architecture constraints.
+- Ordinary feature descriptions and business documentation that do not impose development constraints do not need changes.
+
+REQUIRED OUTPUT
+- Do not publish a Luna task.
+- Do not output GOVERNANCE_CHANGE or ARCHITECTURE_FREEZE blocks.
+- Do not modify the repository directly.
+- If there are no conflicts, return exactly one GOVERNANCE_RECONCILIATION block with status PASS.
+- If conflicts exist, return exactly one GOVERNANCE_RECONCILIATION block with status CHANGES_REQUIRED. For every file that needs an update, preserve all non-conflicting content and provide the complete replacement text, not a diff or excerpt. Include the current file SHA-256 and the current project commit.
+- If the repository cannot be inspected or the conflict cannot be safely resolved, return exactly one GOVERNANCE_RECONCILIATION block with status BLOCKED and a reason.
+
+Use only the closed WRITING_BLOCK protocol. The current project baseline is authoritative:`;
 
 const SENSITIVE_KEY_PATTERN =
   /(?:cookie|password|token|secret|credentials?|private[_-]?key|authorization|access[_-]?key|api[_-]?key|auth)/i;
@@ -238,6 +262,11 @@ export class SolPromptCompiler {
   compileRoundContext(input: SolPromptInput): string {
     return this.compile(input).dynamicContext;
   }
+
+  compileGovernanceReconciliationPrompt(input: GovernanceReconciliationPromptInput): string {
+    const remoteUrl = redactRemoteUrl(input.project.remoteUrl);
+    return `${GOVERNANCE_RECONCILIATION_TEMPLATE}\n\nPROJECT\nproject_id: ${sanitizeText(input.project.projectId)}\nremote_url: ${sanitizeText(remoteUrl ?? '[none]')}\ntarget_branch: ${sanitizeText(input.project.targetBranch)}\ncurrent_branch: ${sanitizeText(input.project.currentBranch)}\ncurrent_commit: ${sanitizeText(input.baselineCommit)}\ngovernance_root: docs/governance\n`;
+  }
 }
 
 export function compileSolInitializationPrompt(input: SolPromptInput): string {
@@ -246,6 +275,10 @@ export function compileSolInitializationPrompt(input: SolPromptInput): string {
 
 export function compileSolRoundContext(input: SolPromptInput): string {
   return new SolPromptCompiler().compileRoundContext(input);
+}
+
+export function compileSolGovernanceReconciliationPrompt(input: GovernanceReconciliationPromptInput): string {
+  return new SolPromptCompiler().compileGovernanceReconciliationPrompt(input);
 }
 
 export function hashSolPrompt(prompt: string): string {

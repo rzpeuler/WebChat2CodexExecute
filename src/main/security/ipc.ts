@@ -11,8 +11,17 @@ import {
 } from '../../shared/contracts/dashboard.js';
 import { sanitizeSafeText } from '../../shared/contracts/safe-text.js';
 import type { ProjectConfigService } from '../project/config.js';
+import type {
+  ProjectInitializationInput,
+  ProjectInitializationResult,
+  ProjectRemoteAccessCheckInput,
+  ProjectRemoteAccessCheckResult,
+} from '../../shared/contracts/project-initialization.js';
 
 export const RUNTIME_INFO_CHANNEL = 'app:get-runtime-info';
+export const PROJECT_DIRECTORY_SELECT_CHANNEL = 'project:directory-select';
+export const PROJECT_REMOTE_ACCESS_CHECK_CHANNEL = 'project:remote-access-check';
+export const PROJECT_INITIALIZE_CHANNEL = 'project:initialize';
 export const PROJECT_SCAN_CHANNEL = 'project:scan';
 export const PROJECT_CONFIG_SAVE_CHANNEL = 'project-config:save';
 export const PROJECT_CONFIG_LIST_CHANNEL = 'project-config:list';
@@ -26,11 +35,22 @@ export interface DashboardIpcOptions {
   executeCommand?: (command: DashboardCommand) => DashboardCommandResult | Promise<DashboardCommandResult>;
 }
 
+export interface ProjectInitializationIpcOptions {
+  selectDirectory?: () => Promise<string | null>;
+  checkRemoteAccess?: (
+    input: ProjectRemoteAccessCheckInput,
+  ) => ProjectRemoteAccessCheckResult | Promise<ProjectRemoteAccessCheckResult>;
+  initialize?: (
+    input: ProjectInitializationInput,
+  ) => ProjectInitializationResult | Promise<ProjectInitializationResult>;
+}
+
 export interface IpcHandlerOptions {
   trustedRendererUrl: string;
   getTrustedWindow?: () => BrowserWindow | null;
   onProjectConfigSaved?: (config: ProjectConfig) => void | Promise<void>;
   dashboard?: DashboardIpcOptions;
+  projectInitialization?: ProjectInitializationIpcOptions;
 }
 
 export class IpcSecurityError extends Error {
@@ -81,6 +101,26 @@ function assertProjectConfigInput(value: unknown): asserts value is ProjectConfi
   }
 }
 
+function assertProjectInitializationInput(value: unknown): asserts value is ProjectInitializationInput {
+  if (!isRecord(value) || (value.mode !== 'clone' && value.mode !== 'adopt')) {
+    throw new IpcSecurityError('IPC_INVALID_ARGUMENT', 'Project initialization input is invalid');
+  }
+  if (value.mode === 'clone') {
+    assertNonEmptyString(value.parentDirectory, 'parentDirectory');
+    assertNonEmptyString(value.directoryName, 'directoryName');
+    assertNonEmptyString(value.remoteUrl, 'remoteUrl');
+    if (value.targetBranch !== undefined) assertNonEmptyString(value.targetBranch, 'targetBranch');
+  } else {
+    assertNonEmptyString(value.targetDirectory, 'targetDirectory');
+  }
+}
+
+function assertProjectRemoteAccessCheckInput(value: unknown): asserts value is ProjectRemoteAccessCheckInput {
+  if (!isRecord(value)) throw new IpcSecurityError('IPC_INVALID_ARGUMENT', 'Remote access check input is invalid');
+  assertNonEmptyString(value.directory, 'directory');
+  assertNonEmptyString(value.remoteUrl, 'remoteUrl');
+}
+
 export function registerIpcHandlers(
   ipcMain: IpcMain,
   version: string,
@@ -129,6 +169,30 @@ export function registerIpcHandlers(
         message: sanitizeSafeText(error instanceof Error ? error.message : '命令执行失败', 240) || '命令执行失败',
       };
     }
+  });
+  ipcMain.handle(PROJECT_DIRECTORY_SELECT_CHANNEL, async (event): Promise<string | null> => {
+    assertTrustedSender(event, options);
+    if (options.projectInitialization?.selectDirectory === undefined) return null;
+    return options.projectInitialization.selectDirectory();
+  });
+  ipcMain.handle(
+    PROJECT_REMOTE_ACCESS_CHECK_CHANNEL,
+    async (event, value: unknown): Promise<ProjectRemoteAccessCheckResult> => {
+      assertTrustedSender(event, options);
+      assertProjectRemoteAccessCheckInput(value);
+      if (options.projectInitialization?.checkRemoteAccess === undefined) {
+        throw new IpcSecurityError('IPC_INVALID_ARGUMENT', 'Remote access check is unavailable');
+      }
+      return options.projectInitialization.checkRemoteAccess(value);
+    },
+  );
+  ipcMain.handle(PROJECT_INITIALIZE_CHANNEL, async (event, value: unknown): Promise<ProjectInitializationResult> => {
+    assertTrustedSender(event, options);
+    assertProjectInitializationInput(value);
+    if (options.projectInitialization?.initialize === undefined) {
+      throw new IpcSecurityError('IPC_INVALID_ARGUMENT', 'Project initialization is unavailable');
+    }
+    return options.projectInitialization.initialize(value);
   });
   if (projectConfigService === undefined) {
     return;

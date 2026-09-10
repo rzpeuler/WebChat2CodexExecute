@@ -12,16 +12,26 @@
   </head>
   <body>
     <main class="shell">
-      <p class="eyebrow">LOCAL ORCHESTRATOR / PHASE 2</p>
+      <p class="eyebrow">LOCAL ORCHESTRATOR / PROJECT SETUP</p>
       <h1>项目初始化</h1>
       <p id="status">正在启动安全渲染器…</p>
       <p id="version" class="muted">正在读取运行时信息…</p>
       <form id="project-form" class="panel">
-        <label>本地 Git 仓库路径<input id="local-path" required placeholder="C:\\Projects\\my-repo" /></label>
-        <label>目标分支<input id="target-branch" placeholder="保持扫描到的当前分支" /></label>
+        <label
+          >本地项目目录<input id="local-path" required placeholder="选择项目父目录或已有仓库根目录" readonly
+        /></label>
+        <div class="actions">
+          <button id="select-directory" type="button">选择本地目录</button>
+        </div>
+        <label>远程仓库地址<input id="remote-url" placeholder="https://github.com/user/repository.git" /></label>
+        <label>新项目目录名<input id="directory-name" placeholder="仅克隆新项目时填写，例如 my-repo" /></label>
+        <label>目标分支<input id="target-branch" value="main" placeholder="已有项目默认使用扫描到的当前分支" /></label>
         <label>报告目录<input id="report-directory" required value="docs/task-reports" /></label>
         <div class="actions">
           <button id="scan" type="button">扫描项目</button>
+          <button id="check-git-access" type="button">检查 Git 远程授权</button>
+          <button id="clone-initialize" type="button">克隆并初始化新项目</button>
+          <button id="adopt-initialize" type="button">接管并初始化已有项目</button>
           <button id="save" type="submit">保存配置</button>
           <button id="preview" type="button">预览 Sol 提示词</button>
         </div>
@@ -69,6 +79,7 @@
           <button type="button" data-dashboard-command="pause">暂停</button>
           <button type="button" data-dashboard-command="retry-current-stage">重试当前阶段</button>
           <button type="button" data-dashboard-command="rebind">重新绑定</button>
+          <button type="button" data-dashboard-command="governance-consistency-check">治理一致性检查</button>
           <button type="button" data-dashboard-command="open-edge">打开 Edge</button>
           <button type="button" data-dashboard-command="open-project">打开项目</button>
           <button type="button" data-dashboard-command="view-report">查看报告</button>

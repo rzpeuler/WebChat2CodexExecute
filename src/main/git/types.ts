@@ -127,6 +127,13 @@ export interface GovernanceSyncInput {
   changedPaths: string[];
 }
 
+export interface InitializationSyncInput {
+  repositoryPath: string;
+  changedPaths: string[];
+  targetBranch?: string;
+  expectedRemoteUrl?: string | null;
+}
+
 export interface CodeSyncInput {
   baseline: GitBaseline;
   taskId: string;

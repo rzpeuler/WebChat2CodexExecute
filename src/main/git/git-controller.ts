@@ -20,6 +20,7 @@ import {
   type GitPendingPushState,
   type GitSyncResult,
   type GovernanceSyncInput,
+  type InitializationSyncInput,
   type VerifyBaselineOptions,
 } from './types.js';
 
@@ -87,6 +88,22 @@ function isUncertainProcessFailure(error: unknown, stderr: string): boolean {
 
 function isValidRelativePath(path: string): boolean {
   return path !== '' && !isAbsolute(path) && path !== '..' && !path.startsWith('../') && !path.includes('\0');
+}
+
+function isValidBranchName(branch: string): boolean {
+  return (
+    branch !== '' &&
+    branch !== 'HEAD' &&
+    !branch.includes('..') &&
+    !branch.includes('~') &&
+    !branch.includes('^') &&
+    !branch.includes(':') &&
+    !branch.includes('\\') &&
+    !branch.startsWith('/') &&
+    !branch.endsWith('/') &&
+    !branch.endsWith('.') &&
+    !branch.includes('@{')
+  );
 }
 
 function matchesPath(path: string, pattern: string): boolean {
@@ -238,6 +255,122 @@ export class GitController {
     return this.pushAndReturn('governance', commit, input.baseline, current.repositoryRoot);
   }
 
+  async syncInitialization(input: InitializationSyncInput): Promise<GitSyncResult> {
+    const allowedPaths = assertSafePathList(input.changedPaths, 'Initialization paths');
+    const repositoryRoot = resolve(
+      (await this.run(['rev-parse', '--show-toplevel'], resolve(input.repositoryPath))).trim(),
+    );
+    const remoteName = 'origin';
+    const remoteUrl = redactRemoteUrl(await this.run(['remote', 'get-url', remoteName], repositoryRoot));
+    if (remoteUrl === null) throw new GitControllerError('REMOTE_MISSING', 'Git repository has no origin remote');
+    if (input.expectedRemoteUrl !== undefined && remoteUrl !== redactRemoteUrl(input.expectedRemoteUrl)) {
+      throw new GitControllerError('REMOTE_MISMATCH', 'Repository remote does not match the expected remote', {
+        remoteUrl,
+        expected: redactRemoteUrl(input.expectedRemoteUrl),
+      });
+    }
+    const branchOutput = await this.run(['branch', '--show-current'], repositoryRoot).catch(() => '');
+    const branch = (input.targetBranch ?? (branchOutput.trim() || 'master')).trim();
+    if (!isValidBranchName(branch))
+      throw new GitControllerError('BRANCH_MISMATCH', 'Initialization target branch is invalid');
+    const status = parseStatus(
+      await this.run(['status', '--porcelain=v1', '--untracked-files=all', '-z'], repositoryRoot),
+    );
+    this.assertWorktreePaths(status, allowedPaths, DEFAULT_PROTECTED_PATHS);
+    await this.loadPendingPushState();
+    const pendingKey = JSON.stringify([repositoryRoot, remoteName, branch]);
+    const pending = await this.pendingPushState.read(pendingKey);
+    const currentHead = await this.run(['rev-parse', 'HEAD'], repositoryRoot).catch(() => null);
+    const matchingPending =
+      currentHead !== null &&
+      pending !== null &&
+      pending.repositoryRoot === repositoryRoot &&
+      pending.remoteName === remoteName &&
+      pending.branch === branch &&
+      pending.commit === currentHead;
+    const remoteBefore = await this.queryRemoteBranch(repositoryRoot, remoteName, branch);
+
+    // A repeated initialization may be a retry after a failed push. If the
+    // remote already points at the local HEAD, the operation is idempotently
+    // complete. Otherwise only the exact persisted pending-push baseline may
+    // be used; never overwrite a branch that advanced independently.
+    if (currentHead !== null && remoteBefore === currentHead) {
+      await this.pendingPushState.clear(pendingKey, currentHead);
+      return { kind: 'governance', commit: currentHead, pushed: true, remoteCommit: currentHead, pushRetried: false };
+    }
+    const expectedRemoteTip = matchingPending ? pending!.baselineRemoteTip : null;
+    if (remoteBefore !== expectedRemoteTip) {
+      throw new GitControllerError('BASELINE_CHANGED', 'Initialization remote branch is not at the expected baseline', {
+        expected: expectedRemoteTip,
+        remoteCommit: remoteBefore,
+        remoteName,
+        remoteUrl,
+      });
+    }
+
+    let commit: string;
+    if (allowedPaths.length === 0) {
+      if (currentHead === null) throw new GitControllerError('NO_HEAD', 'Git repository has no readable HEAD commit');
+      if (!matchingPending) {
+        const subject = await this.run(['log', '-1', '--format=%s'], repositoryRoot);
+        if (!['chore(governance): initialize', 'chore(governance): sync initialize'].includes(subject)) {
+          throw new GitControllerError('NO_CHANGES', 'Initialization has no retryable pending commit');
+        }
+      }
+      commit = currentHead;
+    } else {
+      if (branchOutput.trim() !== branch) await this.run(['branch', '-M', branch], repositoryRoot);
+      await this.run(['add', '--', ...allowedPaths], repositoryRoot);
+      commit = await this.commit('chore(governance): initialize', repositoryRoot);
+    }
+
+    const baseline: GitBaseline = {
+      repositoryRoot,
+      remoteName,
+      remoteUrl,
+      branch,
+      head: commit,
+      remoteTip: expectedRemoteTip,
+      worktree: [],
+    };
+    const pushRetried = matchingPending;
+    try {
+      await this.run(['push', remoteName, `HEAD:refs/heads/${branch}`], repositoryRoot);
+    } catch (error) {
+      await this.rememberPendingPush(pendingKey, baseline, commit);
+      throw new GitControllerError(
+        'PUSH_FAILED',
+        'Initialization push failed; the local commit was retained for retry',
+        { remoteName, remoteUrl, localCommit: commit },
+        { cause: error },
+      );
+    }
+    let remoteCommit: string | null;
+    try {
+      remoteCommit = await this.queryRemoteBranch(repositoryRoot, remoteName, branch);
+    } catch (error) {
+      await this.rememberPendingPush(pendingKey, baseline, commit);
+      throw new GitControllerError(
+        'PUSH_FAILED',
+        'Initialization push completed but the remote commit could not be confirmed',
+        { localCommit: commit, remoteName, remoteUrl, uncertain: true },
+        { cause: error },
+      );
+    }
+    if (remoteCommit !== commit) {
+      await this.rememberPendingPush(pendingKey, baseline, commit);
+      throw new GitControllerError('PUSH_FAILED', 'Initialization push completed without the expected remote commit', {
+        localCommit: commit,
+        remoteCommit,
+        remoteName,
+        remoteUrl,
+        uncertain: true,
+      });
+    }
+    await this.pendingPushState.clear(pendingKey, commit);
+    return { kind: 'governance', commit, pushed: true, remoteCommit, pushRetried };
+  }
+
   async syncCode(input: CodeSyncInput): Promise<GitSyncResult> {
     if (!input.testsPassed) throw new GitControllerError('TESTS_NOT_PASSED', 'Code sync requires passing tests');
     const allowedPaths = assertSafePathList(input.allowedPaths, 'Code paths');
@@ -370,6 +503,12 @@ export class GitController {
       await this.pendingPushState.clear(key, commit);
       return { kind, commit, pushed: true, remoteCommit: afterRetry, pushRetried: true };
     }
+  }
+
+  private async queryRemoteBranch(repositoryRoot: string, remoteName: string, branch: string): Promise<string | null> {
+    const output = await this.run(['ls-remote', remoteName, `refs/heads/${branch}`], repositoryRoot);
+    const hash = output.trim().split(/\s+/)[0] ?? '';
+    return /^[a-f0-9]{40}$/i.test(hash) ? hash : null;
   }
 
   private matchesPendingPush(pendingPush: GitPendingPush, baseline: GitBaseline, commit: string): boolean {

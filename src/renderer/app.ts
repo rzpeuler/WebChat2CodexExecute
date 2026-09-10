@@ -5,11 +5,16 @@ const statusElement = document.querySelector<HTMLElement>('#status');
 const versionElement = document.querySelector<HTMLElement>('#version');
 const form = document.querySelector<HTMLFormElement>('#project-form');
 const localPathElement = document.querySelector<HTMLInputElement>('#local-path');
+const remoteUrlElement = document.querySelector<HTMLInputElement>('#remote-url');
+const directoryNameElement = document.querySelector<HTMLInputElement>('#directory-name');
 const targetBranchElement = document.querySelector<HTMLInputElement>('#target-branch');
 const reportDirectoryElement = document.querySelector<HTMLInputElement>('#report-directory');
 const detailsElement = document.querySelector<HTMLElement>('#project-details');
 const promptElement = document.querySelector<HTMLElement>('#prompt-preview');
 const scanButton = document.querySelector<HTMLButtonElement>('#scan');
+const selectDirectoryButton = document.querySelector<HTMLButtonElement>('#select-directory');
+const cloneInitializeButton = document.querySelector<HTMLButtonElement>('#clone-initialize');
+const adoptInitializeButton = document.querySelector<HTMLButtonElement>('#adopt-initialize');
 const previewButton = document.querySelector<HTMLButtonElement>('#preview');
 const dashboardProjectElement = document.querySelector<HTMLElement>('#dashboard-project');
 const dashboardSolElement = document.querySelector<HTMLElement>('#dashboard-sol');
@@ -46,6 +51,53 @@ function getConfigInput(): ProjectConfigInput {
     headCommit: scanResult.headCommit,
     governanceManifestPath: scanResult.governanceManifestPath,
   };
+}
+
+async function scanSelectedProject(): Promise<void> {
+  if (localPathElement === null || detailsElement === null) return;
+  if (localPathElement.value.trim() === '') throw new Error('请先选择本地项目目录');
+  scanResult = await window.desktopApi.scanProject(localPathElement.value);
+  localPathElement.value = scanResult.localPath;
+  if (remoteUrlElement !== null) remoteUrlElement.value = scanResult.remoteUrl ?? '';
+  if (targetBranchElement !== null) targetBranchElement.value = scanResult.currentBranch;
+  detailsElement.textContent = JSON.stringify(scanResult, null, 2);
+}
+
+async function initializeProject(mode: 'clone' | 'adopt'): Promise<void> {
+  if (localPathElement === null) return;
+  const selectedDirectory = localPathElement.value.trim();
+  if (selectedDirectory === '') throw new Error('请先选择本地目录');
+  const input =
+    mode === 'clone'
+      ? {
+          mode,
+          parentDirectory: selectedDirectory,
+          directoryName: directoryNameElement?.value.trim() ?? '',
+          remoteUrl: remoteUrlElement?.value.trim() ?? '',
+          ...(targetBranchElement?.value.trim() ? { targetBranch: targetBranchElement.value.trim() } : {}),
+        }
+      : { mode, targetDirectory: selectedDirectory };
+  setStatus(mode === 'clone' ? '正在克隆并初始化项目…' : '正在备份并初始化治理目录…');
+  const result = await window.desktopApi.initializeProject(input);
+  localPathElement.value = result.projectRoot;
+  await scanSelectedProject();
+  setStatus(
+    result.idempotent
+      ? '项目治理已是最新状态，未重复覆盖。'
+      : `项目初始化完成${result.remoteCommit === undefined ? '' : `，已同步 ${result.remoteCommit}`}。请保存配置。`,
+  );
+}
+
+async function checkRemoteAccess(): Promise<void> {
+  if (localPathElement === null || remoteUrlElement === null) return;
+  if (localPathElement.value.trim() === '') throw new Error('请先选择本地目录');
+  if (remoteUrlElement.value.trim() === '') throw new Error('请先输入远程仓库地址');
+  setStatus('正在检查 Git 远程授权…');
+  const result = await window.desktopApi.checkProjectRemoteAccess({
+    directory: localPathElement.value.trim(),
+    remoteUrl: remoteUrlElement.value.trim(),
+  });
+  setStatus(result.message);
 }
 
 function renderDashboard(snapshot: DashboardSnapshot): void {
@@ -88,7 +140,16 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
   const command = button.dataset.dashboardCommand;
   if (
     command === undefined ||
-    !['start', 'pause', 'retry-current-stage', 'rebind', 'open-edge', 'open-project', 'view-report'].includes(command)
+    ![
+      'start',
+      'pause',
+      'retry-current-stage',
+      'rebind',
+      'governance-consistency-check',
+      'open-edge',
+      'open-project',
+      'view-report',
+    ].includes(command)
   ) {
     return null;
   }
@@ -96,7 +157,7 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
     if (!window.confirm(`确认执行“${command}”？`)) return null;
     return { command: command as 'start' | 'pause' | 'retry-current-stage' | 'rebind', confirm: true };
   }
-  return { command: command as 'open-edge' | 'open-project' | 'view-report' };
+  return { command: command as 'governance-consistency-check' | 'open-edge' | 'open-project' | 'view-report' };
 }
 
 if (statusElement !== null && versionElement !== null) {
@@ -129,13 +190,10 @@ document.querySelectorAll<HTMLButtonElement>('[data-dashboard-command]').forEach
 });
 
 scanButton?.addEventListener('click', async () => {
-  if (localPathElement === null || detailsElement === null) return;
   setStatus('正在扫描 Git 仓库…');
   try {
-    scanResult = await window.desktopApi.scanProject(localPathElement.value);
-    localPathElement.value = scanResult.localPath;
-    if (targetBranchElement !== null) targetBranchElement.value = scanResult.currentBranch;
-    detailsElement.textContent = JSON.stringify(scanResult, null, 2);
+    await scanSelectedProject();
+    if (scanResult === null) throw new Error('扫描没有返回项目');
     setStatus(
       scanResult.governanceManifestStatus === 'invalid'
         ? `扫描完成，但 governance manifest 无效：${scanResult.governanceManifestError?.message ?? '未知错误'}`
@@ -143,6 +201,42 @@ scanButton?.addEventListener('click', async () => {
     );
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '项目扫描失败');
+  }
+});
+
+selectDirectoryButton?.addEventListener('click', async () => {
+  try {
+    const selected = await window.desktopApi.selectProjectDirectory();
+    if (selected !== null && localPathElement !== null) {
+      localPathElement.value = selected;
+      setStatus('已选择本地目录，请选择扫描、克隆或接管初始化。');
+    }
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '选择目录失败');
+  }
+});
+
+document.querySelector<HTMLButtonElement>('#check-git-access')?.addEventListener('click', async () => {
+  try {
+    await checkRemoteAccess();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : 'Git 远程授权检查失败');
+  }
+});
+
+cloneInitializeButton?.addEventListener('click', async () => {
+  try {
+    await initializeProject('clone');
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '克隆初始化失败');
+  }
+});
+
+adoptInitializeButton?.addEventListener('click', async () => {
+  try {
+    await initializeProject('adopt');
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '已有项目初始化失败');
   }
 });
 

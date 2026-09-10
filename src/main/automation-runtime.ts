@@ -19,6 +19,8 @@ import { GitController } from './git/index.js';
 import { CodexRunner } from './codex/index.js';
 import { MainOrchestrator, type OrchestratorState } from './orchestration/index.js';
 import type { NotificationService } from './notify/index.js';
+import { SolPromptCompiler } from './sol/prompt-compiler.js';
+import { createHash } from 'node:crypto';
 
 const CHATGPT_URL = 'https://chatgpt.com/';
 const DEFAULT_EDGE_PORT = 9227;
@@ -181,6 +183,24 @@ export async function createAutomationRuntime(
     join(stateDirectory, `${config.projectId}-orchestrator.json`),
     { validate: validateOrchestratorState },
   );
+  const promptCompiler = new SolPromptCompiler();
+  const waitForReconciliationOutput = async (before: EdgeSolObservation): Promise<EdgeSolObservation> => {
+    const beforeHash = before.latestAssistantHash ?? hashObservedText(before.latestAssistantText);
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, 1_000));
+      const current = await edge.observe();
+      if (current.status === 'CONTEXT_LIMIT') throw new Error('GOVERNANCE_RECONCILIATION_CONTEXT_LIMIT');
+      if (current.status === 'AUTH_REQUIRED') throw new Error('GOVERNANCE_RECONCILIATION_AUTH_REQUIRED');
+      if (current.status === 'NETWORK_ERROR' || current.status === 'SESSION_LOST') {
+        throw new Error(`GOVERNANCE_RECONCILIATION_${current.status}`);
+      }
+      const currentHash = current.latestAssistantHash ?? hashObservedText(current.latestAssistantText);
+      if (current.status === 'COMPLETED_CANDIDATE' && currentHash !== null && currentHash !== beforeHash)
+        return current;
+    }
+    throw new Error('GOVERNANCE_RECONCILIATION_TIMEOUT');
+  };
   const orchestrator = new MainOrchestrator({
     project: {
       projectId: config.projectId,
@@ -201,6 +221,41 @@ export async function createAutomationRuntime(
     notifier,
     callbacks: {
       rebind,
+      governanceConsistencyCheck: async () => {
+        const resumeLoop = orchestrator.getState().active;
+        if (resumeLoop) await orchestrator.pause();
+        try {
+          const before = await edge.observe();
+          const baseline = await git.captureBaseline(config.localPath, {
+            ...(config.targetBranch === 'HEAD' ? {} : { expectedBranch: config.targetBranch }),
+            ...(config.remoteUrl === null ? {} : { expectedRemoteUrl: config.remoteUrl }),
+          });
+          const prompt = promptCompiler.compileGovernanceReconciliationPrompt({
+            project: config,
+            baselineCommit: baseline.head,
+          });
+          await sol.sendMessage({ text: prompt, observation: before });
+          const completed = await waitForReconciliationOutput(before);
+          const result = await orchestrator.runGovernanceReconciliation({
+            solOutput: completed.latestAssistantText,
+            baseline,
+          });
+          if (result.status === 'PAUSED') {
+            throw new Error(result.message);
+          }
+          if (resumeLoop) await orchestrator.start();
+        } catch (error) {
+          notifier.notify({
+            project: config.projectId,
+            taskId: null,
+            phase: 'GOVERNANCE_RECONCILIATION',
+            suggestion: '治理一致性检查未完成，请查看状态面板后重试。',
+            error,
+            level: 'NEEDS_USER',
+          });
+          throw error;
+        }
+      },
       openEdge: async () => {
         await ensureEdge();
       },
@@ -227,4 +282,8 @@ export async function createAutomationRuntime(
     profile.close();
   };
   return { orchestrator, startPolling, stop };
+}
+
+function hashObservedText(value: string): string | null {
+  return value === '' ? null : createHash('sha256').update(value, 'utf8').digest('hex');
 }

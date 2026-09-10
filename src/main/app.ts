@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Notification } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Notification } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { acquireSingleInstanceLock, type SingleInstanceHost } from './lifecycle/single-instance.js';
@@ -17,6 +17,12 @@ import { createProjectConfigStore, defaultProjectConfigPath, ProjectConfigServic
 import { NotificationService } from './notify/index.js';
 import { createAutomationRuntime, type AutomationRuntime } from './automation-runtime.js';
 import type { ProjectConfig } from '../shared/contracts/project-config.js';
+import { ProjectInitializer } from './project/initializer.js';
+import type {
+  ProjectInitializationInput,
+  ProjectRemoteAccessCheckInput,
+} from '../shared/contracts/project-initialization.js';
+import { GitController } from './git/index.js';
 
 const appDirectory = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
@@ -64,6 +70,10 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     if (!ipcRegistered) {
       const projectConfigStore = createProjectConfigStore(defaultProjectConfigPath(app.getPath('userData')));
       const projectConfigService = new ProjectConfigService(projectConfigStore);
+      const projectInitializer = new ProjectInitializer();
+      const initializationGit = new GitController({
+        pendingPushStatePath: join(app.getPath('userData'), 'state', 'initialization-git-pending-push.json'),
+      });
       const installRuntime = async (config: ProjectConfig): Promise<void> => {
         automationRuntime?.stop();
         automationRuntime = await createAutomationRuntime(config, app.getPath('userData'), notificationService);
@@ -85,6 +95,74 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
       registerIpcHandlers(ipcMain, app.getVersion(), projectConfigService, {
         trustedRendererUrl,
         getTrustedWindow: () => mainWindow,
+        projectInitialization: {
+          selectDirectory: async () => {
+            const dialogOptions = {
+              properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>,
+              title: '选择项目目录',
+            };
+            const selected =
+              mainWindow === null
+                ? await dialog.showOpenDialog(dialogOptions)
+                : await dialog.showOpenDialog(mainWindow, dialogOptions);
+            return selected.canceled ? null : (selected.filePaths[0] ?? null);
+          },
+          checkRemoteAccess: (input: ProjectRemoteAccessCheckInput) => projectInitializer.checkRemoteAccess(input),
+          initialize: async (input: ProjectInitializationInput) => {
+            if (input.mode === 'adopt') {
+              // Refuse before touching the project when an existing repository
+              // has unapproved work or cannot be verified against its remote.
+              await initializationGit.captureBaseline(input.targetDirectory, { requireClean: true });
+            }
+            const initialized = await projectInitializer.initialize(input);
+            if (initialized.changedPaths.length === 0 && initialized.idempotent) {
+              const sync = await initializationGit.syncInitialization({
+                repositoryPath: initialized.projectRoot,
+                changedPaths: [],
+                ...(input.mode === 'clone' && input.targetBranch === undefined
+                  ? {}
+                  : input.mode === 'clone'
+                    ? { targetBranch: input.targetBranch }
+                    : {}),
+                ...(input.mode === 'clone' ? { expectedRemoteUrl: input.remoteUrl } : {}),
+              });
+              return {
+                ...initialized,
+                commit: sync.commit,
+                remoteCommit: sync.remoteCommit,
+              };
+            }
+            if (initialized.changedPaths.length === 0) return initialized;
+            let sync;
+            try {
+              const baseline = await initializationGit.captureBaseline(initialized.projectRoot, {
+                requireClean: false,
+              });
+              sync = await initializationGit.syncGovernance({
+                baseline,
+                changeId: 'initialize',
+                changedPaths: initialized.changedPaths,
+              });
+            } catch (error) {
+              if (!(error instanceof Error) || !('code' in error) || error.code !== 'NO_HEAD') throw error;
+              sync = await initializationGit.syncInitialization({
+                repositoryPath: initialized.projectRoot,
+                changedPaths: initialized.changedPaths,
+                ...(input.mode === 'clone' && input.targetBranch === undefined
+                  ? {}
+                  : input.mode === 'clone'
+                    ? { targetBranch: input.targetBranch }
+                    : {}),
+                ...(input.mode === 'clone' ? { expectedRemoteUrl: input.remoteUrl } : {}),
+              });
+            }
+            return {
+              ...initialized,
+              commit: sync.commit,
+              remoteCommit: sync.remoteCommit,
+            };
+          },
+        },
         onProjectConfigSaved: (config) =>
           installRuntime(config).catch((error) => {
             notificationService.notify({

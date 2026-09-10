@@ -4,7 +4,6 @@ import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { compareCodePoints } from '../../src/shared/sorting.js';
 import {
   ProjectConfigService,
   ProjectConfigStore,
@@ -64,16 +63,7 @@ describe('phase two project configuration', () => {
     expect(saved.headCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(saved.remoteUrl).toBe('https://example.com/team/repo.git');
     expect(scan.governanceManifestStatus).toBe('missing');
-    expect(scan.governanceDocumentCandidates).toEqual([
-      {
-        id: 'discovered-governance:README.md',
-        path: 'README.md',
-        exists: true,
-        audience: [],
-        version: 1,
-        status: 'candidate',
-      },
-    ]);
+    expect(scan.governanceDocumentCandidates).toEqual([]);
     expect(await store.get(scan.projectId)).toEqual(saved);
     const persisted = await readFile(storePath, 'utf8');
     expect(persisted).not.toContain('super-secret');
@@ -101,18 +91,10 @@ describe('phase two project configuration', () => {
         status: 'active',
         type: 'internal-policy',
       },
-      {
-        id: 'discovered-governance:README.md',
-        path: 'README.md',
-        exists: true,
-        audience: [],
-        version: 1,
-        status: 'candidate',
-      },
     ]);
   });
 
-  it('discovers only deterministic, allowlisted governance candidates without a manifest', async () => {
+  it('does not infer external governance candidates from names without a manifest', async () => {
     const repository = await gitRepository();
     await writeFile(join(repository, 'AGENTS.md'), '# agents\n', 'utf8');
     await writeFile(join(repository, 'CONTRIBUTING.md'), '# contributing\n', 'utf8');
@@ -126,27 +108,10 @@ describe('phase two project configuration', () => {
     await writeFile(join(repository, '.github', 'notes.md'), '# ignore\n', 'utf8');
 
     const scan = await scanGitProject(repository);
-    const paths = scan.governanceDocumentCandidates.map((candidate) => candidate.path);
-    expect(paths).toEqual([...paths].sort(compareCodePoints));
-    expect(paths).toEqual(
-      expect.arrayContaining([
-        'AGENTS.md',
-        'README.md',
-        'CONTRIBUTING.md',
-        'docs/architecture/overview.md',
-        'docs/security.md',
-        '.github/SECURITY.md',
-      ]),
-    );
-    expect(paths).not.toEqual(expect.arrayContaining(['docs/random/ignore.md', '.github/notes.md']));
-    const discovered = scan.governanceDocumentCandidates.filter((candidate) =>
-      candidate.id.startsWith('discovered-governance:'),
-    );
-    expect(discovered.length).toBeGreaterThan(0);
-    expect(discovered.every((candidate) => candidate.status === 'candidate' && candidate.exists)).toBe(true);
+    expect(scan.governanceDocumentCandidates).toEqual([]);
   });
 
-  it('reports a damaged manifest explicitly while retaining discovered candidates', async () => {
+  it('reports a damaged manifest without inventing external governance candidates', async () => {
     const repository = await gitRepository();
     const manifestDirectory = join(repository, 'docs', 'governance');
     await mkdir(manifestDirectory, { recursive: true });
@@ -155,9 +120,7 @@ describe('phase two project configuration', () => {
     const scan = await scanGitProject(repository);
     expect(scan.governanceManifestStatus).toBe('invalid');
     expect(scan.governanceManifestError).toMatchObject({ code: 'MANIFEST_INVALID_YAML' });
-    expect(scan.governanceDocumentCandidates).toEqual([
-      expect.objectContaining({ id: 'discovered-governance:README.md', status: 'candidate' }),
-    ]);
+    expect(scan.governanceDocumentCandidates).toEqual([]);
   });
 
   it('rejects saving when the scanned governance manifest is invalid', async () => {
@@ -175,7 +138,7 @@ describe('phase two project configuration', () => {
     await expect(service.loadAll()).resolves.toEqual([]);
   });
 
-  it('allows saving without a manifest while retaining discovered governance candidates', async () => {
+  it('allows saving without a manifest without inferring governance candidates', async () => {
     const repository = await gitRepository();
     const scan = await scanGitProject(repository);
     const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
@@ -183,9 +146,7 @@ describe('phase two project configuration', () => {
     const saved = await service.save({ ...scan, reportDirectory: 'reports' });
 
     expect(scan.governanceManifestStatus).toBe('missing');
-    expect(scan.governanceDocumentCandidates).toEqual([
-      expect.objectContaining({ id: 'discovered-governance:README.md', status: 'candidate' }),
-    ]);
+    expect(scan.governanceDocumentCandidates).toEqual([]);
     expect(saved.localPath).toBe(scan.localPath);
     await expect(service.load(saved.projectId)).resolves.toEqual(saved);
   });

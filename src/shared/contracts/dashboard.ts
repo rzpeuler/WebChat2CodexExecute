@@ -6,6 +6,7 @@ export const DASHBOARD_COMMANDS = [
   'pause',
   'retry-current-stage',
   'rebind',
+  'governance-consistency-check',
   'open-edge',
   'open-project',
   'view-report',
@@ -29,7 +30,11 @@ export interface ViewReportDashboardCommand extends DashboardCommandBase {
 }
 
 export type DashboardCommand =
-  DangerousDashboardCommand | { command: 'open-edge' } | { command: 'open-project' } | ViewReportDashboardCommand;
+  | DangerousDashboardCommand
+  | { command: 'governance-consistency-check' }
+  | { command: 'open-edge' }
+  | { command: 'open-project' }
+  | ViewReportDashboardCommand;
 
 export interface DashboardCommandResult {
   accepted: boolean;
@@ -125,6 +130,7 @@ export function validateDashboardCommand(value: unknown): DashboardCommand {
     if (value.reportPath !== undefined) assertSafeReportPath(value.reportPath);
     return value.reportPath === undefined ? { command } : { command, reportPath: value.reportPath };
   }
+  if (command === 'governance-consistency-check') return { command };
   if (Object.keys(value).length !== 1) {
     throw new DashboardCommandValidationError(`${command} does not accept parameters`);
   }

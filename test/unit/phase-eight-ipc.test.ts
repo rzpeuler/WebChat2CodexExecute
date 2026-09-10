@@ -5,6 +5,9 @@ import {
   DASHBOARD_COMMAND_CHANNEL,
   DASHBOARD_SNAPSHOT_CHANNEL,
   IpcSecurityError,
+  PROJECT_DIRECTORY_SELECT_CHANNEL,
+  PROJECT_INITIALIZE_CHANNEL,
+  PROJECT_REMOTE_ACCESS_CHECK_CHANNEL,
   registerIpcHandlers,
 } from '../../src/main/security/ipc.js';
 
@@ -71,5 +74,52 @@ describe('phase eight dashboard IPC contract', () => {
     await expect(
       Promise.resolve().then(() => handlers.get(DASHBOARD_COMMAND_CHANNEL)?.(event, { command: 'open-edge' })),
     ).rejects.toBeInstanceOf(IpcSecurityError);
+  });
+
+  it('exposes only the controlled project directory and initialization operations', async () => {
+    const handlers = new Map<string, Handler>();
+    const ipcMain = {
+      handle: (channel: string, handler: Handler) => handlers.set(channel, handler),
+    } as unknown as IpcMain;
+    const frame = { url: 'file:///trusted/renderer/index.html' };
+    const sender = { mainFrame: frame };
+    const event = { sender, senderFrame: frame } as unknown as IpcMainInvokeEvent;
+    const initialize = async (input: unknown) => ({
+      mode: (input as { mode: 'adopt' }).mode,
+      projectRoot: 'C:/Projects/demo',
+      governanceManifestPath: 'docs/governance/governance-manifest.yaml',
+      changedPaths: [],
+      backupPath: null,
+      idempotent: true,
+    });
+    registerIpcHandlers(ipcMain, '1.0.0', undefined, {
+      trustedRendererUrl: frame.url,
+      getTrustedWindow: () => ({ webContents: sender }) as never,
+      projectInitialization: {
+        selectDirectory: async () => 'C:/Projects',
+        checkRemoteAccess: async () => ({
+          accessible: true,
+          remoteUrl: 'https://github.com/example/project.git',
+          code: 'OK' as const,
+          message: 'ok',
+        }),
+        initialize,
+      },
+    });
+    await expect(handlers.get(PROJECT_DIRECTORY_SELECT_CHANNEL)?.(event)).resolves.toBe('C:/Projects');
+    await expect(
+      handlers.get(PROJECT_REMOTE_ACCESS_CHECK_CHANNEL)?.(event, {
+        directory: 'C:/Projects',
+        remoteUrl: 'https://github.com/example/project.git',
+      }),
+    ).resolves.toMatchObject({ accessible: true, code: 'OK' });
+    await expect(
+      handlers.get(PROJECT_INITIALIZE_CHANNEL)?.(event, { mode: 'adopt', targetDirectory: 'C:/Projects/demo' }),
+    ).resolves.toMatchObject({ idempotent: true });
+    await expect(
+      Promise.resolve().then(() =>
+        handlers.get(PROJECT_INITIALIZE_CHANNEL)?.(event, { mode: 'clone', parentDirectory: 'C:/Projects' }),
+      ),
+    ).rejects.toMatchObject({ code: 'IPC_INVALID_ARGUMENT' });
   });
 });

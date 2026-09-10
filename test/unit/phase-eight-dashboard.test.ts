@@ -49,6 +49,9 @@ describe('phase eight dashboard contract', () => {
       confirm: true,
     });
     expect(validateDashboardCommand({ command: 'view-report' })).toEqual({ command: 'view-report' });
+    expect(validateDashboardCommand({ command: 'governance-consistency-check' })).toEqual({
+      command: 'governance-consistency-check',
+    });
     expect(validateDashboardCommand({ command: 'view-report', reportPath: 'docs/task-reports/task-1.md' })).toEqual({
       command: 'view-report',
       reportPath: 'docs/task-reports/task-1.md',

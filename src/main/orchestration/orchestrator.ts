@@ -6,7 +6,12 @@ import {
   type DashboardCommandResult,
   type DashboardSnapshot,
 } from '../../shared/contracts/dashboard.js';
-import { parseWritingBlocks, type LunaTaskBlock } from '../../shared/protocol/writing-block.js';
+import {
+  parseWritingBlocks,
+  type GovernanceReconciliationBlock,
+  type LunaTaskBlock,
+} from '../../shared/protocol/writing-block.js';
+import { resolve } from 'node:path';
 import type { EdgeSolObservation } from '../edge/types.js';
 import type { CodexRunResult } from '../codex/types.js';
 import {
@@ -15,6 +20,8 @@ import {
   type EdgeObservationSource,
   type GitOrchestratorPort,
   type GovernanceOrchestratorPort,
+  type GovernanceReconciliationRunInput,
+  type GovernanceReconciliationRunResult,
   type Orchestrator,
   type OrchestratorOptions,
   type OrchestratorProject,
@@ -66,6 +73,7 @@ export class MainOrchestrator implements Orchestrator {
   private readonly git: GitOrchestratorPort;
   private readonly codex: OrchestratorOptions['codex'];
   private readonly governance: GovernanceOrchestratorPort | undefined;
+  private readonly reconciliation: OrchestratorOptions['reconciliation'];
   private readonly architecture: ArchitectureOrchestratorPort | undefined;
   private readonly sol: SolMessageSource | undefined;
   private readonly contextRecovery: ContextRecoverySource | undefined;
@@ -85,6 +93,7 @@ export class MainOrchestrator implements Orchestrator {
   private loadPromise: Promise<void> | null = null;
   private initialized = false;
   private roundPromise: Promise<OrchestratorResult> | null = null;
+  private reconciliationPromise: Promise<GovernanceReconciliationRunResult> | null = null;
 
   constructor(options: OrchestratorOptions) {
     this.project = options.project;
@@ -92,6 +101,7 @@ export class MainOrchestrator implements Orchestrator {
     this.git = options.git;
     this.codex = options.codex;
     this.governance = options.governance;
+    this.reconciliation = options.reconciliation;
     this.architecture = options.architecture;
     this.sol = options.sol;
     this.contextRecovery = options.contextRecovery;
@@ -198,6 +208,27 @@ export class MainOrchestrator implements Orchestrator {
     }
   }
 
+  async runGovernanceReconciliation(
+    input: GovernanceReconciliationRunInput,
+  ): Promise<GovernanceReconciliationRunResult> {
+    await this.initialize();
+    if (this.reconciliationPromise !== null) return this.reconciliationPromise;
+    this.reconciliationPromise = (async () => {
+      // A dashboard request can arrive while the polling timer has already
+      // entered a round. Let that round finish before touching governance.
+      if (this.roundPromise !== null) await this.roundPromise;
+      return this.processGovernanceReconciliation(input);
+    })().catch(async (error) => {
+      const paused = await this.pauseFor(error, '治理一致性检查已暂停，请检查协议、基线和文件状态后重试。');
+      return reconciliationResult('PAUSED', null, paused, null, [], [], null, null);
+    });
+    try {
+      return await this.reconciliationPromise;
+    } finally {
+      this.reconciliationPromise = null;
+    }
+  }
+
   async executeCommand(command: DashboardCommand): Promise<DashboardCommandResult> {
     try {
       const validated = validateDashboardCommand(command);
@@ -213,6 +244,8 @@ export class MainOrchestrator implements Orchestrator {
           return accepted('RETRY_ACCEPTED', '已接受当前阶段重试。');
         case 'rebind':
           return await this.invokeCallback('rebind', '重新绑定回调不可用。');
+        case 'governance-consistency-check':
+          return await this.invokeCallback('governanceConsistencyCheck', '治理一致性检查回调不可用。');
         case 'open-edge':
           return await this.invokeCallback('openEdge', '打开 Edge 回调不可用。');
         case 'open-project':
@@ -226,6 +259,111 @@ export class MainOrchestrator implements Orchestrator {
     } catch (error) {
       return rejected('DASHBOARD_COMMAND_FAILED', error instanceof Error ? error.message : '命令执行失败。');
     }
+  }
+
+  private async processGovernanceReconciliation(
+    input: GovernanceReconciliationRunInput,
+  ): Promise<GovernanceReconciliationRunResult> {
+    const wasActive = this.state.active;
+    const outputKey = reconciliationOutputKey(input.solOutput, input.baseline.head);
+    if (this.state.processedOutputKey === outputKey) {
+      return reconciliationResult(
+        'DUPLICATE',
+        null,
+        result('DUPLICATE', this.state, '该治理一致性检查输出已经处理过。'),
+        null,
+        [],
+        [],
+        this.state.commits.local,
+        this.state.commits.remote,
+      );
+    }
+
+    await this.setPhase('PARSING', 'RUNNING', null);
+    const parsed = parseWritingBlocks(input.solOutput);
+    if (parsed.blocks.length !== 1 || parsed.governanceReconciliation === null) {
+      throw new OrchestratorError(
+        'GOVERNANCE_RECONCILIATION_PROTOCOL_INVALID',
+        '治理一致性检查必须只包含一个 GOVERNANCE_RECONCILIATION Writing Block。',
+      );
+    }
+    const reconciliation = parsed.governanceReconciliation;
+    if (reconciliation.fields.status === 'BLOCKED') {
+      const paused = await this.pauseForCode(
+        'GOVERNANCE_RECONCILIATION_BLOCKED',
+        reconciliation.fields.reason ?? 'Sol 阻塞了治理一致性检查。',
+        true,
+        '请解决 Sol 报告的治理一致性阻塞项后重新发起检查。',
+      );
+      return reconciliationResult('PAUSED', 'BLOCKED', paused, null, [], [], null, null);
+    }
+    if (reconciliation.fields.status === 'PASS') {
+      this.state.processedOutputKey = outputKey;
+      await this.finishIndependentRound(wasActive);
+      return reconciliationResult(
+        'PASS',
+        'PASS',
+        result('NO_TASK', this.state, '治理一致性检查通过，无需修改文件。'),
+        null,
+        [],
+        [],
+        null,
+        null,
+      );
+    }
+
+    this.assertReconciliationBaseline(input, reconciliation);
+    if (this.reconciliation === undefined) {
+      throw new OrchestratorError('GOVERNANCE_RECONCILIATION_UNAVAILABLE', '治理一致性检查应用器不可用。');
+    }
+    await this.setPhase('APPLYING_UPDATES', 'RUNNING', null);
+    const applied = await this.reconciliation.apply(reconciliation);
+    await this.setPhase('SYNCING_GOVERNANCE', 'RUNNING', null);
+    const sync = await this.git.syncGovernance({
+      baseline: input.baseline,
+      changeId: `reconciliation-${safeSyncId(applied.runId)}`,
+      changedPaths: applied.changedPaths,
+    });
+    this.state.commits = { local: sync.commit, remote: sync.remoteCommit };
+    this.state.processedOutputKey = outputKey;
+    this.baseline = {
+      ...input.baseline,
+      head: sync.commit,
+      remoteTip: sync.remoteCommit ?? input.baseline.remoteTip,
+      worktree: [],
+    };
+    await this.finishIndependentRound(wasActive);
+    return reconciliationResult(
+      'COMPLETED',
+      'CHANGES_REQUIRED',
+      result('COMPLETED', this.state, '治理一致性修改已应用、提交并同步。'),
+      applied.runId,
+      applied.changedPaths,
+      applied.backupPaths,
+      sync.commit,
+      sync.remoteCommit,
+    );
+  }
+
+  private assertReconciliationBaseline(
+    input: GovernanceReconciliationRunInput,
+    reconciliation: GovernanceReconciliationBlock,
+  ): void {
+    if (reconciliation.fields.baseline_commit !== input.baseline.head) {
+      throw new OrchestratorError(
+        'BASELINE_CHANGED',
+        '治理一致性检查的 baseline_commit 与调用方提供的 Git 基线不一致。',
+      );
+    }
+    const projectRoot = resolve(this.project.localPath);
+    const baselineRoot = resolve(input.baseline.repositoryRoot);
+    if (projectRoot.toLowerCase() !== baselineRoot.toLowerCase()) {
+      throw new OrchestratorError('BASELINE_CHANGED', '治理一致性检查的 Git 基线不属于当前项目。');
+    }
+  }
+
+  private async finishIndependentRound(wasActive: boolean): Promise<void> {
+    await this.setPhase(wasActive ? 'WAITING_FOR_SOL' : 'IDLE', wasActive ? 'RUNNING' : 'IDLE', null);
   }
 
   private async processRound(): Promise<OrchestratorResult> {
@@ -262,6 +400,14 @@ export class MainOrchestrator implements Orchestrator {
       parsed = parseWritingBlocks(observation.latestAssistantText);
     } catch (error) {
       return this.pauseFor(error, 'Writing Block 协议无效，已拒绝启动 Luna。');
+    }
+    if (parsed.governanceReconciliation !== null) {
+      return this.pauseForCode(
+        'GOVERNANCE_RECONCILIATION_WRONG_ENTRYPOINT',
+        'GOVERNANCE_RECONCILIATION 只能通过治理一致性检查入口处理。',
+        true,
+        '请使用治理一致性检查按钮重新发起该检查。',
+      );
     }
     if (parsed.blocked.length > 0) {
       return this.pauseForCode('SOL_BLOCKED', parsed.blocked.map((block) => block.fields.reason).join('\n'), true);
@@ -568,7 +714,7 @@ export class MainOrchestrator implements Orchestrator {
   }
 
   private async invokeCallback(
-    name: 'rebind' | 'openEdge' | 'openProject',
+    name: 'rebind' | 'governanceConsistencyCheck' | 'openEdge' | 'openProject',
     unavailable: string,
   ): Promise<DashboardCommandResult> {
     const callback = this.callbacks[name];
@@ -598,6 +744,10 @@ function outputKeyFor(observation: EdgeSolObservation): string {
   return createHash('sha256').update(source).digest('hex');
 }
 
+function reconciliationOutputKey(solOutput: string, baselineHead: string): string {
+  return createHash('sha256').update(`governance-reconciliation\n${baselineHead}\n${solOutput}`).digest('hex');
+}
+
 function contextEventId(observation: EdgeSolObservation): string {
   return `context:${outputKeyFor(observation)}`;
 }
@@ -618,6 +768,29 @@ function safeSyncId(value: string): string {
 
 function result(status: OrchestratorResult['status'], state: OrchestratorState, message: string): OrchestratorResult {
   return { status, phase: state.phase, taskId: state.taskId, message };
+}
+
+function reconciliationResult(
+  status: GovernanceReconciliationRunResult['status'],
+  reconciliationStatus: GovernanceReconciliationRunResult['reconciliationStatus'],
+  round: OrchestratorResult,
+  runId: string | null,
+  changedPaths: string[],
+  backupPaths: string[],
+  commit: string | null,
+  remoteCommit: string | null,
+): GovernanceReconciliationRunResult {
+  return {
+    status,
+    reconciliationStatus,
+    phase: round.phase,
+    message: round.message,
+    runId,
+    changedPaths: [...changedPaths],
+    backupPaths: [...backupPaths],
+    commit,
+    remoteCommit,
+  };
 }
 
 function accepted(code: string, message: string): DashboardCommandResult {

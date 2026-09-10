@@ -204,6 +204,27 @@ describe('P0 main orchestration', () => {
     expect(options.codex.startTask).not.toHaveBeenCalled();
   });
 
+  it('requires the dedicated entry point for governance reconciliation output', async () => {
+    const reconciliation = `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
+{
+  "schema_version": 1,
+  "status": "PASS"
+}
+[/WRITING_BLOCK]`;
+    const options = baseOptions({ edge: { observe: vi.fn(async () => observation(reconciliation)) } });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    const result = await orchestrator.runRound();
+
+    expect(result.status).toBe('PAUSED');
+    expect(orchestrator.getState()).toMatchObject({
+      status: 'NEEDS_USER_ACTION',
+      recentError: { code: 'GOVERNANCE_RECONCILIATION_WRONG_ENTRYPOINT' },
+    });
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+    expect(options.git.syncGovernance).not.toHaveBeenCalled();
+  });
+
   it('recovers one context-limit event and does not create another recovery on polling', async () => {
     const recover = vi.fn(async () => ({ status: 'RECOVERED' }));
     const options = baseOptions({

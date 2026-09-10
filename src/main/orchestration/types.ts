@@ -3,6 +3,7 @@ import type { TopLevelStatus } from '../../shared/contracts/top-level-state.js';
 import type {
   ArchitectureFreezeBlock,
   GovernanceChangeBlock,
+  GovernanceReconciliationBlock,
   LunaTaskBlock,
 } from '../../shared/protocol/writing-block.js';
 import type { EdgeSolObservation } from '../edge/types.js';
@@ -15,6 +16,7 @@ import type {
   GovernanceSyncInput,
 } from '../git/types.js';
 import type { GovernanceChangeApplyResult } from '../governance/change-applier.js';
+import type { GovernanceReconciliationApplyResult } from '../governance/reconciliation-applier.js';
 import type { ArchitectureFreezeDownloadResult } from '../architecture/freeze-downloader.js';
 
 export type OrchestratorPhase =
@@ -98,6 +100,10 @@ export interface GovernanceOrchestratorPort {
   applyAll(changes: GovernanceChangeBlock[]): Promise<GovernanceChangeApplyResult[]>;
 }
 
+export interface GovernanceReconciliationOrchestratorPort {
+  apply(reconciliation: GovernanceReconciliationBlock): Promise<GovernanceReconciliationApplyResult>;
+}
+
 export interface ArchitectureOrchestratorPort {
   download(freezes: ArchitectureFreezeBlock[]): Promise<ArchitectureFreezeDownloadResult>;
 }
@@ -131,6 +137,7 @@ export interface OrchestratorNotifier {
 
 export interface OrchestratorCallbacks {
   rebind?: () => Promise<void>;
+  governanceConsistencyCheck?: () => Promise<void>;
   openEdge?: () => Promise<void>;
   openProject?: () => Promise<void>;
   viewReport?: (reportPath: string | null) => Promise<void>;
@@ -142,6 +149,7 @@ export interface OrchestratorOptions {
   git: GitOrchestratorPort;
   codex: CodexOrchestratorPort;
   governance?: GovernanceOrchestratorPort;
+  reconciliation?: GovernanceReconciliationOrchestratorPort;
   architecture?: ArchitectureOrchestratorPort;
   sol?: SolMessageSource;
   contextRecovery?: ContextRecoverySource;
@@ -164,12 +172,32 @@ export interface OrchestratorResult {
   message: string;
 }
 
+export interface GovernanceReconciliationRunInput {
+  solOutput: string;
+  baseline: GitBaseline;
+}
+
+export type GovernanceReconciliationRunStatus = 'PASS' | 'COMPLETED' | 'DUPLICATE' | 'PAUSED';
+
+export interface GovernanceReconciliationRunResult {
+  status: GovernanceReconciliationRunStatus;
+  reconciliationStatus: 'PASS' | 'CHANGES_REQUIRED' | 'BLOCKED' | null;
+  phase: OrchestratorPhase;
+  message: string;
+  runId: string | null;
+  changedPaths: string[];
+  backupPaths: string[];
+  commit: string | null;
+  remoteCommit: string | null;
+}
+
 export interface Orchestrator {
   initialize(): Promise<void>;
   start(): Promise<OrchestratorResult>;
   pause(): Promise<OrchestratorResult>;
   retryCurrentStage(): Promise<OrchestratorResult>;
   runRound(): Promise<OrchestratorResult>;
+  runGovernanceReconciliation(input: GovernanceReconciliationRunInput): Promise<GovernanceReconciliationRunResult>;
   getState(): OrchestratorState;
   getDashboardSnapshot(): DashboardSnapshot;
   executeCommand(command: DashboardCommand): Promise<DashboardCommandResult>;

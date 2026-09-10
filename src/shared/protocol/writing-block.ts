@@ -2,8 +2,20 @@ import { parse as parseYaml } from 'yaml';
 
 export const WRITING_BLOCK_SCHEMA_VERSION = 1 as const;
 
-export const WRITING_BLOCK_TYPES = ['LUNA_TASK', 'GOVERNANCE_CHANGE', 'ARCHITECTURE_FREEZE', 'BLOCKED'] as const;
+export const WRITING_BLOCK_TYPES = [
+  'LUNA_TASK',
+  'GOVERNANCE_CHANGE',
+  'GOVERNANCE_RECONCILIATION',
+  'ARCHITECTURE_FREEZE',
+  'BLOCKED',
+] as const;
 export type WritingBlockType = (typeof WRITING_BLOCK_TYPES)[number];
+
+export const GOVERNANCE_RECONCILIATION_STATUSES = ['PASS', 'CHANGES_REQUIRED', 'BLOCKED'] as const;
+export type GovernanceReconciliationStatus = (typeof GOVERNANCE_RECONCILIATION_STATUSES)[number];
+
+export const GOVERNANCE_RECONCILIATION_ACTIONS = ['replace'] as const;
+export type GovernanceReconciliationAction = (typeof GOVERNANCE_RECONCILIATION_ACTIONS)[number];
 
 export const LUNA_TASK_REQUIRED_FIELDS = [
   'task_id',
@@ -28,6 +40,16 @@ export const GOVERNANCE_CHANGE_REQUIRED_FIELDS = [
   'reason',
   'risk_level',
   'affected_agents',
+  'content',
+] as const;
+
+export const GOVERNANCE_RECONCILIATION_REQUIRED_FIELDS = ['schema_version', 'status'] as const;
+
+export const GOVERNANCE_RECONCILIATION_FILE_REQUIRED_FIELDS = [
+  'path',
+  'action',
+  'reason',
+  'sha256_before',
   'content',
 ] as const;
 
@@ -77,6 +99,24 @@ export interface GovernanceChangeFields {
   [key: string]: unknown;
 }
 
+export interface GovernanceReconciliationFile {
+  path: string;
+  action: GovernanceReconciliationAction;
+  reason: string;
+  sha256_before: string;
+  content: string;
+  [key: string]: unknown;
+}
+
+export interface GovernanceReconciliationFields {
+  schema_version: typeof WRITING_BLOCK_SCHEMA_VERSION;
+  status: GovernanceReconciliationStatus;
+  baseline_commit?: string;
+  files?: GovernanceReconciliationFile[];
+  reason?: string;
+  [key: string]: unknown;
+}
+
 export interface ArchitectureFreezeFields {
   schema_version?: typeof WRITING_BLOCK_SCHEMA_VERSION;
   freeze_id: string;
@@ -105,14 +145,20 @@ export interface WritingBlockBase<T extends WritingBlockType, F extends Record<s
 
 export type LunaTaskBlock = WritingBlockBase<'LUNA_TASK', LunaTaskFields>;
 export type GovernanceChangeBlock = WritingBlockBase<'GOVERNANCE_CHANGE', GovernanceChangeFields>;
+export type GovernanceReconciliationBlock = WritingBlockBase<
+  'GOVERNANCE_RECONCILIATION',
+  GovernanceReconciliationFields
+>;
 export type ArchitectureFreezeBlock = WritingBlockBase<'ARCHITECTURE_FREEZE', ArchitectureFreezeFields>;
 export type BlockedBlock = WritingBlockBase<'BLOCKED', BlockedFields>;
-export type WritingBlock = LunaTaskBlock | GovernanceChangeBlock | ArchitectureFreezeBlock | BlockedBlock;
+export type WritingBlock =
+  LunaTaskBlock | GovernanceChangeBlock | GovernanceReconciliationBlock | ArchitectureFreezeBlock | BlockedBlock;
 
 export interface ParsedWritingBlocks {
   blocks: WritingBlock[];
   lunaTask: LunaTaskBlock | null;
   governanceChanges: GovernanceChangeBlock[];
+  governanceReconciliation: GovernanceReconciliationBlock | null;
   architectureFreezes: ArchitectureFreezeBlock[];
   blocked: BlockedBlock[];
 }
@@ -130,7 +176,8 @@ export type WritingBlockProtocolErrorCode =
   | 'WRITING_BLOCK_UNSUPPORTED_VERSION'
   | 'WRITING_BLOCK_MISSING_FIELD'
   | 'WRITING_BLOCK_INVALID_FIELD'
-  | 'WRITING_BLOCK_DUPLICATE_LUNA_TASK';
+  | 'WRITING_BLOCK_DUPLICATE_LUNA_TASK'
+  | 'WRITING_BLOCK_DUPLICATE_GOVERNANCE_RECONCILIATION';
 
 export class WritingBlockProtocolError extends Error {
   readonly code: WritingBlockProtocolErrorCode;
@@ -190,6 +237,32 @@ export const WRITING_BLOCK_JSON_SCHEMAS = {
       content: { type: 'string' },
     },
   },
+  GOVERNANCE_RECONCILIATION: {
+    type: 'object',
+    additionalProperties: true,
+    required: [...GOVERNANCE_RECONCILIATION_REQUIRED_FIELDS],
+    properties: {
+      schema_version: { type: 'integer', const: WRITING_BLOCK_SCHEMA_VERSION },
+      status: { type: 'string', enum: [...GOVERNANCE_RECONCILIATION_STATUSES] },
+      baseline_commit: { type: 'string' },
+      files: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: [...GOVERNANCE_RECONCILIATION_FILE_REQUIRED_FIELDS],
+          additionalProperties: true,
+          properties: {
+            path: { type: 'string' },
+            action: { type: 'string', enum: [...GOVERNANCE_RECONCILIATION_ACTIONS] },
+            reason: { type: 'string' },
+            sha256_before: { type: 'string' },
+            content: { type: 'string' },
+          },
+        },
+      },
+      reason: { type: 'string' },
+    },
+  },
   ARCHITECTURE_FREEZE: {
     type: 'object',
     additionalProperties: true,
@@ -231,12 +304,17 @@ function isNonEmptyString(value: unknown): value is string {
 type JsonSchemaProperty = {
   readonly type?: string;
   readonly const?: unknown;
+  readonly enum?: readonly unknown[];
   readonly items?: JsonSchemaProperty;
   readonly oneOf?: readonly JsonSchemaProperty[];
+  readonly required?: readonly string[];
+  readonly properties?: Readonly<Record<string, JsonSchemaProperty>>;
+  readonly additionalProperties?: boolean;
 };
 
 function matchesJsonSchemaProperty(value: unknown, schema: JsonSchemaProperty): boolean {
   if (schema.const !== undefined && value !== schema.const) return false;
+  if (schema.enum !== undefined && !schema.enum.includes(value)) return false;
   if (schema.oneOf !== undefined) return schema.oneOf.some((candidate) => matchesJsonSchemaProperty(value, candidate));
   if (schema.type === undefined) return true;
   if (schema.type === 'null') return value === null;
@@ -246,7 +324,18 @@ function matchesJsonSchemaProperty(value: unknown, schema: JsonSchemaProperty): 
       (schema.items === undefined || value.every((item) => matchesJsonSchemaProperty(item, schema.items!)))
     );
   }
-  if (schema.type === 'object') return isRecord(value);
+  if (schema.type === 'object') {
+    if (!isRecord(value)) return false;
+    if (schema.required?.some((field) => !(field in value) || value[field] === undefined)) return false;
+    if (
+      schema.properties !== undefined &&
+      Object.entries(schema.properties).some(
+        ([field, property]) => value[field] !== undefined && !matchesJsonSchemaProperty(value[field], property),
+      )
+    )
+      return false;
+    return true;
+  }
   if (schema.type === 'integer') return typeof value === 'number' && Number.isInteger(value);
   if (schema.type === 'number') return typeof value === 'number' && Number.isFinite(value);
   if (schema.type === 'string') return isNonEmptyString(value);
@@ -301,6 +390,104 @@ function assertStringListField(fields: Record<string, unknown>, field: string, b
     );
   }
   return [...value];
+}
+
+function assertReconciliationPath(value: unknown, blockIndex: number, fileIndex: number): string {
+  if (!isNonEmptyString(value)) {
+    throw new WritingBlockProtocolError(
+      'WRITING_BLOCK_INVALID_FIELD',
+      `files[${fileIndex}].path must be a non-empty project-relative path`,
+      { blockIndex, field: `files[${fileIndex}].path` },
+    );
+  }
+  const path = value.trim();
+  const segments = path.split('/');
+  if (
+    path !== value ||
+    path.includes('\\') ||
+    path.includes('\0') ||
+    path.startsWith('/') ||
+    /^[a-zA-Z]:/.test(path) ||
+    segments.some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    throw new WritingBlockProtocolError(
+      'WRITING_BLOCK_INVALID_FIELD',
+      `files[${fileIndex}].path must be a normalized project-relative path`,
+      { blockIndex, field: `files[${fileIndex}].path` },
+    );
+  }
+  return path;
+}
+
+function normalizeReconciliationFiles(value: unknown, blockIndex: number): GovernanceReconciliationFile[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new WritingBlockProtocolError(
+      'WRITING_BLOCK_INVALID_FIELD',
+      'files must be a non-empty list when status is CHANGES_REQUIRED',
+      { blockIndex, field: 'files' },
+    );
+  }
+  const seenPaths = new Set<string>();
+  return value.map((item, fileIndex) => {
+    if (!isRecord(item)) {
+      throw new WritingBlockProtocolError('WRITING_BLOCK_INVALID_FIELD', `files[${fileIndex}] must be an object`, {
+        blockIndex,
+        field: `files[${fileIndex}]`,
+      });
+    }
+    for (const field of GOVERNANCE_RECONCILIATION_FILE_REQUIRED_FIELDS) {
+      if (!(field in item) || item[field] === undefined) {
+        throw new WritingBlockProtocolError('WRITING_BLOCK_MISSING_FIELD', `files[${fileIndex}].${field} is required`, {
+          blockIndex,
+          field: `files[${fileIndex}].${field}`,
+        });
+      }
+    }
+    const path = assertReconciliationPath(item.path, blockIndex, fileIndex);
+    const key = path.toLowerCase();
+    if (seenPaths.has(key)) {
+      throw new WritingBlockProtocolError('WRITING_BLOCK_INVALID_FIELD', `files contains a duplicate path: ${path}`, {
+        blockIndex,
+        field: `files[${fileIndex}].path`,
+      });
+    }
+    seenPaths.add(key);
+    if (!(GOVERNANCE_RECONCILIATION_ACTIONS as readonly unknown[]).includes(item.action)) {
+      throw new WritingBlockProtocolError('WRITING_BLOCK_INVALID_FIELD', `files[${fileIndex}].action must be replace`, {
+        blockIndex,
+        field: `files[${fileIndex}].action`,
+      });
+    }
+    if (!isNonEmptyString(item.reason)) {
+      throw new WritingBlockProtocolError(
+        'WRITING_BLOCK_INVALID_FIELD',
+        `files[${fileIndex}].reason must be a non-empty string`,
+        { blockIndex, field: `files[${fileIndex}].reason` },
+      );
+    }
+    if (typeof item.sha256_before !== 'string' || !/^[a-fA-F0-9]{64}$/.test(item.sha256_before)) {
+      throw new WritingBlockProtocolError(
+        'WRITING_BLOCK_INVALID_FIELD',
+        `files[${fileIndex}].sha256_before must be a 64-character SHA-256 digest`,
+        { blockIndex, field: `files[${fileIndex}].sha256_before` },
+      );
+    }
+    if (!isNonEmptyString(item.content)) {
+      throw new WritingBlockProtocolError(
+        'WRITING_BLOCK_INVALID_FIELD',
+        `files[${fileIndex}].content must contain the complete non-empty file text`,
+        { blockIndex, field: `files[${fileIndex}].content` },
+      );
+    }
+    return {
+      ...item,
+      path,
+      action: item.action as GovernanceReconciliationAction,
+      reason: item.reason,
+      sha256_before: item.sha256_before.toLowerCase(),
+      content: item.content,
+    };
+  });
 }
 
 function assertVersion(fields: Record<string, unknown>, blockIndex: number): void {
@@ -470,6 +657,42 @@ function buildBlock(
       normalized = normalizedChange;
       break;
     }
+    case 'GOVERNANCE_RECONCILIATION': {
+      const normalizedReconciliation: Record<string, unknown> = { ...fields };
+      assertFieldPresent(fields, 'schema_version', blockIndex);
+      const status = assertStringField(fields, 'status', blockIndex);
+      if (!(GOVERNANCE_RECONCILIATION_STATUSES as readonly string[]).includes(status)) {
+        throw new WritingBlockProtocolError(
+          'WRITING_BLOCK_INVALID_FIELD',
+          `status must be one of ${GOVERNANCE_RECONCILIATION_STATUSES.join(', ')}`,
+          { blockIndex, field: 'status' },
+        );
+      }
+      normalizedReconciliation.status = status;
+      const files = fields.files;
+      if (status === 'CHANGES_REQUIRED') {
+        normalizedReconciliation.baseline_commit = assertStringField(fields, 'baseline_commit', blockIndex);
+        normalizedReconciliation.files = normalizeReconciliationFiles(files, blockIndex);
+      } else {
+        if (files !== undefined && (!Array.isArray(files) || files.length > 0)) {
+          throw new WritingBlockProtocolError(
+            'WRITING_BLOCK_INVALID_FIELD',
+            `files must be omitted or empty when status is ${status}`,
+            { blockIndex, field: 'files' },
+          );
+        }
+        if (files !== undefined) normalizedReconciliation.files = [];
+        if (fields.baseline_commit !== undefined)
+          normalizedReconciliation.baseline_commit = assertStringField(fields, 'baseline_commit', blockIndex);
+      }
+      if (status === 'BLOCKED') {
+        normalizedReconciliation.reason = assertStringField(fields, 'reason', blockIndex);
+      } else if (fields.reason !== undefined) {
+        normalizedReconciliation.reason = assertStringField(fields, 'reason', blockIndex);
+      }
+      normalized = normalizedReconciliation;
+      break;
+    }
     case 'ARCHITECTURE_FREEZE': {
       const normalizedFreeze: Record<string, unknown> = { ...fields };
       normalizedFreeze.freeze_id = assertStringField(fields, 'freeze_id', blockIndex);
@@ -516,11 +739,18 @@ function buildBlock(
       ? LUNA_TASK_REQUIRED_FIELDS
       : type === 'GOVERNANCE_CHANGE'
         ? GOVERNANCE_CHANGE_REQUIRED_FIELDS
-        : type === 'ARCHITECTURE_FREEZE'
-          ? ARCHITECTURE_FREEZE_REQUIRED_FIELDS
-          : BLOCKED_REQUIRED_FIELDS;
+        : type === 'GOVERNANCE_RECONCILIATION'
+          ? GOVERNANCE_RECONCILIATION_REQUIRED_FIELDS
+          : type === 'ARCHITECTURE_FREEZE'
+            ? ARCHITECTURE_FREEZE_REQUIRED_FIELDS
+            : BLOCKED_REQUIRED_FIELDS;
   for (const field of requiredFields) knownFields.add(field);
   if (type === 'LUNA_TASK') knownFields.add('execution_semantics');
+  if (type === 'GOVERNANCE_RECONCILIATION') {
+    knownFields.add('baseline_commit');
+    knownFields.add('files');
+    knownFields.add('reason');
+  }
   const extensions = Object.fromEntries(Object.entries(normalized).filter(([key]) => !knownFields.has(key)));
   normalized.schema_version = fields.schema_version ?? WRITING_BLOCK_SCHEMA_VERSION;
   return { type, fields: normalized as never, extensions, rawBody } as WritingBlock;
@@ -582,6 +812,16 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
         },
       );
     }
+    if (
+      block.type === 'GOVERNANCE_RECONCILIATION' &&
+      blocks.some((item) => item.type === 'GOVERNANCE_RECONCILIATION')
+    ) {
+      throw new WritingBlockProtocolError(
+        'WRITING_BLOCK_DUPLICATE_GOVERNANCE_RECONCILIATION',
+        'A round may contain at most one GOVERNANCE_RECONCILIATION block',
+        { blockIndex },
+      );
+    }
     blocks.push(block);
     cursor = bodyEnd + CLOSE_MARKER.length;
   }
@@ -589,6 +829,9 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
     blocks,
     lunaTask: blocks.find((block): block is LunaTaskBlock => block.type === 'LUNA_TASK') ?? null,
     governanceChanges: blocks.filter((block): block is GovernanceChangeBlock => block.type === 'GOVERNANCE_CHANGE'),
+    governanceReconciliation:
+      blocks.find((block): block is GovernanceReconciliationBlock => block.type === 'GOVERNANCE_RECONCILIATION') ??
+      null,
     architectureFreezes: blocks.filter(
       (block): block is ArchitectureFreezeBlock => block.type === 'ARCHITECTURE_FREEZE',
     ),
