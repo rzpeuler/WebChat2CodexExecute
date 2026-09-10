@@ -1,4 +1,5 @@
 import type { LunaTaskBlock } from '../../shared/protocol/writing-block.js';
+import type { StateSnapshotStore } from '../state/persistence.js';
 
 export const CODEX_RUN_STATUSES = [
   'RUNNING',
@@ -7,6 +8,7 @@ export const CODEX_RUN_STATUSES = [
   'TIMEOUT',
   'REPORT_MISSING',
   'INVALID_RESULT',
+  'BASELINE_CHANGED',
 ] as const;
 export type CodexRunStatus = (typeof CODEX_RUN_STATUSES)[number];
 
@@ -15,7 +17,14 @@ export type CodexRunnerErrorCode =
   | 'CLI_VERSION_UNAVAILABLE'
   | 'CLI_AUTH_UNAVAILABLE'
   | 'CLI_MODEL_UNAVAILABLE'
-  | 'INVALID_TARGET_REPOSITORY';
+  | 'INVALID_TARGET_REPOSITORY'
+  | 'BASELINE_CHANGED'
+  | 'SESSION_ACTIVE'
+  | 'SESSION_PERSISTENCE_UNAVAILABLE'
+  | 'PROCESS_SPAWN_FAILED'
+  | 'PROCESS_OUTPUT_FAILED'
+  | 'PROCESS_WAIT_FAILED'
+  | 'PROCESS_KILL_FAILED';
 
 export class CodexRunnerError extends Error {
   readonly code: CodexRunnerErrorCode;
@@ -69,6 +78,7 @@ export type CodexProcessRunner = (
 export interface CodexSnapshots {
   governance: unknown;
   architecture: unknown;
+  git?: CodexRepositorySnapshot;
 }
 
 export interface CodexExecutionConfig {
@@ -81,6 +91,7 @@ export interface CodexCapabilities {
   executablePath: string;
   version: string;
   authenticated: true;
+  authStatus: 'AUTHENTICATED';
   model: string;
   modelAvailable: true;
   targetRepository: string;
@@ -94,6 +105,7 @@ export interface LunaTestResult {
 }
 
 export interface LunaProtocolResult {
+  identifier: 'LUNA_RESULT';
   status: 'COMPLETED' | 'BLOCKED_EXTERNAL_SETUP' | 'FAILED';
   summary: string;
   reportPath: string;
@@ -115,11 +127,14 @@ export interface CodexRunResult {
   events: Record<string, unknown>[];
   config: CodexExecutionConfig;
   diagnostics: string[];
+  error?: { code: string; message: string };
+  stdoutLogPath?: string;
+  stderrLogPath?: string;
 }
 
 export interface CodexTaskHandle {
   sessionId: string;
-  status: 'RUNNING';
+  status: 'RUNNING' | 'FAILED';
   result: Promise<CodexRunResult>;
 }
 
@@ -130,11 +145,29 @@ export interface CodexTaskInput {
   model?: string;
   executablePath?: string;
   timeoutMs?: number;
+  repositorySnapshot?: CodexRepositorySnapshot;
+  baselineSnapshot?: CodexRepositorySnapshot;
+  snapshot?: CodexRepositorySnapshot;
+}
+
+export interface CodexRepositorySnapshot {
+  repositoryRoot?: string;
+  baseCommit?: string;
+  base_commit?: string;
+  head?: string;
+  branch?: string;
+  remote?: string;
+  remoteUrl?: string;
+  remote_url?: string;
+  cleanWorktree?: boolean;
+  clean_worktree?: boolean;
+  worktree?: string[];
 }
 
 export interface GitStateCheckResult {
   valid: boolean;
   reason?: string;
+  changedPaths?: string[];
 }
 
 export interface SessionHandoff {
@@ -157,17 +190,28 @@ export interface CodexSessionRecord {
 
 export interface CodexSessionHandle {
   sessionId: string;
-  status: 'RUNNING';
+  status: 'RUNNING' | 'FAILED';
   result: Promise<CodexSessionResult>;
 }
 
 export interface CodexSessionResult {
   sessionId: string;
+  status: 'COMPLETED' | 'FAILED' | 'TIMEOUT';
   exitCode: number | null;
   stdoutSummary: string;
   stderrSummary: string;
   events: Record<string, unknown>[];
   diagnostics: string[];
+  error?: { code: string; message: string };
+  stdoutLogPath?: string;
+  stderrLogPath?: string;
+}
+
+export interface CodexSessionState {
+  chain: CodexSessionRecord[];
+  activeSessionId: string | null;
+  lastEvent: 'STARTUP' | 'CREATE_STARTED' | 'CREATE_COMPLETED' | 'TERMINAL';
+  updatedAt: string;
 }
 
 export interface CodexRunnerOptions {
@@ -176,6 +220,11 @@ export interface CodexRunnerOptions {
   repositoryValidator?: ((repositoryPath: string) => Promise<boolean>) | undefined;
   gitStateCheck?: ((repositoryPath: string, task: LunaTaskBlock) => Promise<GitStateCheckResult>) | undefined;
   persistSessionChain?: ((chain: CodexSessionRecord[]) => Promise<void>) | undefined;
+  sessionStore?: StateSnapshotStore<CodexSessionState> | undefined;
+  sessionStorePath?: string | undefined;
+  streamLogDirectory?: string | undefined;
+  maxStreamLogBytes?: number | undefined;
+  captureRepositorySnapshot?: ((repositoryPath: string) => Promise<CodexRepositorySnapshot>) | undefined;
   logger?: (event: string, details: Record<string, unknown>) => void;
   defaultModel?: string;
   defaultTimeoutMs?: number;

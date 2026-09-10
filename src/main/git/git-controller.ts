@@ -271,7 +271,7 @@ export class GitController {
     const pendingPush = this.pendingPushState.read(key);
     const isPendingPush = pendingPush !== null && this.matchesPendingPush(pendingPush, baseline, commit);
     const remoteTip = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
-    if (isPendingPush && remoteTip === commit) {
+    if (remoteTip === commit) {
       this.pendingPushState.clear(key, commit);
       return { kind, commit, pushed: true, remoteCommit: commit, pushRetried: false };
     }

@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -53,9 +53,43 @@ function fakeExecutor(codexPath: string, overrides: { auth?: boolean; model?: bo
 function input(root: string, codex: string, reportPath = 'reports/task-1.md'): CodexTaskInput {
   return {
     task: task(reportPath),
-    snapshots: { governance: { revision: 1 }, architecture: { revisions: [1] } },
+    snapshots: {
+      governance: { revision: 1 },
+      architecture: { revisions: [1] },
+      git: { baseCommit: 'BASE', branch: 'main', remote: 'origin', cleanWorktree: true },
+    },
     repositoryPath: root,
     executablePath: codex,
+    repositorySnapshot: { baseCommit: 'BASE', branch: 'main', remote: 'origin', cleanWorktree: true },
+  };
+}
+
+function runnerOptions(
+  root: string,
+  codex: string,
+): {
+  execFile: CodexExecFile;
+  repositoryValidator: () => Promise<boolean>;
+  captureRepositorySnapshot: () => Promise<{
+    baseCommit: string;
+    branch: string;
+    remote: string;
+    cleanWorktree: boolean;
+  }>;
+  sessionStorePath: string;
+  streamLogDirectory: string;
+} {
+  return {
+    execFile: fakeExecutor(codex),
+    repositoryValidator: async () => true,
+    captureRepositorySnapshot: async () => ({
+      baseCommit: 'BASE',
+      branch: 'main',
+      remote: 'origin',
+      cleanWorktree: true,
+    }),
+    sessionStorePath: join(root, 'session-chain.json'),
+    streamLogDirectory: join(root, 'stream-logs'),
   };
 }
 
@@ -101,9 +135,11 @@ describe('CodexRunner', () => {
     const { root, codex } = await targetRepository();
     let processArgs: readonly string[] = [];
     const runner = new CodexRunner({
-      execFile: fakeExecutor(codex),
-      repositoryValidator: async () => true,
-      gitStateCheck: async () => ({ valid: true }),
+      ...runnerOptions(root, codex),
+      gitStateCheck: async (_repositoryPath, currentTask) => ({
+        valid: true,
+        changedPaths: [currentTask.fields.report_path],
+      }),
       processRunner: async (_file, args) => {
         processArgs = args;
         const outputPath = args[args.indexOf('--output-last-message') + 1]!;
@@ -111,6 +147,7 @@ describe('CodexRunner', () => {
         await writeFile(
           outputPath,
           JSON.stringify({
+            identifier: 'LUNA_RESULT',
             status: 'COMPLETED',
             summary: 'done',
             report_path: 'reports/task-1.md',
@@ -141,9 +178,11 @@ describe('CodexRunner', () => {
   it.each(classifications)('classifies %s without enabling a push', async (_name, options, expected) => {
     const { root, codex } = await targetRepository();
     const runner = new CodexRunner({
-      execFile: fakeExecutor(codex),
-      repositoryValidator: async () => true,
-      gitStateCheck: async () => ({ valid: true }),
+      ...runnerOptions(root, codex),
+      gitStateCheck: async (_repositoryPath, currentTask) => ({
+        valid: true,
+        changedPaths: [currentTask.fields.report_path],
+      }),
       processRunner: async (_file, args) => {
         const outputPath = args[args.indexOf('--output-last-message') + 1]!;
         if (options.report) await writeFile(join(root, 'reports', 'task-1.md'), '# Report\n', 'utf8');
@@ -152,6 +191,7 @@ describe('CodexRunner', () => {
           options.invalid
             ? 'not a LUNA_RESULT'
             : JSON.stringify({
+                identifier: 'LUNA_RESULT',
                 status: 'COMPLETED',
                 summary: 'done',
                 report_path: 'reports/task-1.md',
@@ -170,8 +210,7 @@ describe('CodexRunner', () => {
     const { root, codex } = await targetRepository();
     let processCount = 0;
     const runner = new CodexRunner({
-      execFile: fakeExecutor(codex),
-      repositoryValidator: async () => true,
+      ...runnerOptions(root, codex),
       processRunner: async () => {
         processCount += 1;
         return {
@@ -201,6 +240,7 @@ describe('CodexRunner', () => {
         nextStep: 'continue',
       },
     });
+    await first.result;
     const second = await runner.rotateSession({
       repositoryPath: root,
       executablePath: codex,
@@ -222,5 +262,211 @@ describe('CodexRunner', () => {
       expect.objectContaining({ sessionId: first.sessionId, parentSessionId: null }),
       expect.objectContaining({ sessionId: second.sessionId, parentSessionId: first.sessionId }),
     ]);
+  });
+
+  it('returns BASELINE_CHANGED and never spawns when the captured repository differs', async () => {
+    const { root, codex } = await targetRepository();
+    let processCount = 0;
+    const runner = new CodexRunner({
+      ...runnerOptions(root, codex),
+      captureRepositorySnapshot: async () => ({
+        baseCommit: 'OTHER',
+        branch: 'main',
+        remote: 'origin',
+        cleanWorktree: true,
+      }),
+      processRunner: async () => {
+        processCount += 1;
+        return processFor('');
+      },
+    });
+
+    const result = await runner.runTask(input(root, codex));
+    expect(result.status).toBe('BASELINE_CHANGED');
+    expect(result.error?.code).toBe('BASELINE_CHANGED');
+    expect(processCount).toBe(0);
+  });
+
+  it('rejects rotation while a task is active and records terminal state before another spawn', async () => {
+    const { root, codex } = await targetRepository();
+    let processCount = 0;
+    const runner = new CodexRunner({
+      ...runnerOptions(root, codex),
+      processRunner: async () => {
+        processCount += 1;
+        return processFor('', { never: true });
+      },
+      defaultTimeoutMs: 10,
+    });
+    const first = await runner.startTask(input(root, codex, 'reports/active.md'));
+    const rejected = await runner.rotateSession({
+      repositoryPath: root,
+      executablePath: codex,
+      snapshots: { governance: {}, architecture: {} },
+      handoff: {
+        productGoal: 'goal',
+        phase: 'phase-6',
+        completedTasks: [],
+        commit: 'BASE',
+        governanceRevision: 1,
+        architectureRevisionSet: [],
+        unresolvedIssues: [],
+        nextStep: 'continue',
+      },
+    });
+    expect(rejected.status).toBe('FAILED');
+    await expect(rejected.result).resolves.toMatchObject({ status: 'FAILED', error: { code: 'SESSION_ACTIVE' } });
+    await expect(first.result).resolves.toMatchObject({ status: 'TIMEOUT' });
+    expect(processCount).toBe(1);
+  });
+
+  it('fails closed for duplicate or non-JSON LUNA_RESULT blocks', async () => {
+    const { root, codex } = await targetRepository();
+    const resultBlock = JSON.stringify({
+      identifier: 'LUNA_RESULT',
+      status: 'COMPLETED',
+      summary: 'done',
+      report_path: 'reports/task-1.md',
+      tests: [{ status: 'PASSED' }],
+    });
+    const runner = new CodexRunner({
+      ...runnerOptions(root, codex),
+      gitStateCheck: async (_repositoryPath, currentTask) => ({
+        valid: true,
+        changedPaths: [currentTask.fields.report_path],
+      }),
+      processRunner: async (_file, args) => {
+        await writeFile(join(root, 'reports', 'task-1.md'), '# Report\n', 'utf8');
+        await writeFile(args[args.indexOf('--output-last-message') + 1]!, resultBlock, 'utf8');
+        return processFor(`${resultBlock}\n`);
+      },
+    });
+    await expect(runner.runTask(input(root, codex))).resolves.toMatchObject({ status: 'INVALID_RESULT' });
+
+    const invalid = new CodexRunner({
+      ...runnerOptions(root, codex),
+      processRunner: async (_file, args) => {
+        await writeFile(args[args.indexOf('--output-last-message') + 1]!, 'LUNA_RESULT status: COMPLETED', 'utf8');
+        return processFor('');
+      },
+    });
+    await expect(invalid.runTask(input(root, codex))).resolves.toMatchObject({ status: 'INVALID_RESULT' });
+  });
+
+  it('tees bounded, recursively redacted stream chunks to JSONL', async () => {
+    const { root, codex } = await targetRepository();
+    const runner = new CodexRunner({
+      ...runnerOptions(root, codex),
+      gitStateCheck: async (_repositoryPath, currentTask) => ({
+        valid: true,
+        changedPaths: [currentTask.fields.report_path],
+      }),
+      processRunner: async (_file, args) => {
+        await writeFile(join(root, 'reports', 'task-1.md'), '# Report\n', 'utf8');
+        await writeFile(
+          args[args.indexOf('--output-last-message') + 1]!,
+          JSON.stringify({
+            identifier: 'LUNA_RESULT',
+            status: 'COMPLETED',
+            summary: 'done',
+            report_path: 'reports/task-1.md',
+            tests: [{ status: 'PASSED' }],
+          }),
+          'utf8',
+        );
+        return processFor(JSON.stringify({ type: 'progress', nested: { password: 'hidden-value' } }));
+      },
+    });
+    const result = await runner.runTask(input(root, codex));
+    expect(result.status).toBe('COMPLETED');
+    const log = await readFile(result.stdoutLogPath!, 'utf8');
+    expect(log).toContain('[REDACTED]');
+    expect(log).not.toContain('hidden-value');
+  });
+
+  it('fails closed for empty versions, ambiguous auth, and non-JSON model output', async () => {
+    const { root, codex } = await targetRepository();
+    const base = fakeExecutor(codex);
+    const withProbe =
+      (change: (args: readonly string[]) => { stdout: string; stderr: string } | null) =>
+      async (file: string, args: readonly string[], options: Parameters<CodexExecFile>[2]) => {
+        if (file === codex) {
+          const changed = change(args);
+          if (changed !== null) return changed;
+        }
+        return base(file, args, options);
+      };
+
+    await expect(
+      new CodexRunner({
+        repositoryValidator: async () => true,
+        execFile: withProbe((args) => (args[0] === '--version' ? { stdout: '', stderr: '' } : null)),
+      }).checkCapabilities({ repositoryPath: root, executablePath: codex }),
+    ).rejects.toMatchObject({ code: 'CLI_VERSION_UNAVAILABLE' });
+    await expect(
+      new CodexRunner({
+        repositoryValidator: async () => true,
+        execFile: withProbe((args) => (args[0] === 'login' ? { stdout: 'unknown', stderr: '' } : null)),
+      }).checkCapabilities({ repositoryPath: root, executablePath: codex }),
+    ).rejects.toMatchObject({ code: 'CLI_AUTH_UNAVAILABLE' });
+    await expect(
+      new CodexRunner({
+        repositoryValidator: async () => true,
+        execFile: withProbe((args) => (args[0] === 'models' ? { stdout: 'gpt-5.6-luna', stderr: '' } : null)),
+      }).checkCapabilities({ repositoryPath: root, executablePath: codex }),
+    ).rejects.toMatchObject({ code: 'CLI_MODEL_UNAVAILABLE' });
+  });
+
+  it('normalizes spawn, stream, wait, and kill failures without rejecting runTask', async () => {
+    const { root, codex } = await targetRepository();
+    const spawnFailure = new CodexRunner({
+      ...runnerOptions(root, codex),
+      processRunner: async () => {
+        throw new Error('spawn failed');
+      },
+    });
+    await expect(spawnFailure.runTask(input(root, codex))).resolves.toMatchObject({
+      status: 'FAILED',
+      error: { code: 'PROCESS_SPAWN_FAILED' },
+    });
+
+    async function* brokenOutput(): AsyncIterable<string> {
+      yield 'partial';
+      throw new Error('stream failed');
+    }
+    const streamFailure = new CodexRunner({
+      ...runnerOptions(root, codex),
+      processRunner: async () => ({ stdout: brokenOutput(), stderr: '', wait: async () => 0 }),
+    });
+    await expect(streamFailure.runTask(input(root, codex))).resolves.toMatchObject({ status: 'FAILED' });
+
+    const waitFailure = new CodexRunner({
+      ...runnerOptions(root, codex),
+      processRunner: async () => ({
+        stdout: '',
+        stderr: '',
+        wait: async () => {
+          throw new Error('wait failed');
+        },
+      }),
+    });
+    await expect(waitFailure.runTask(input(root, codex))).resolves.toMatchObject({
+      status: 'FAILED',
+      error: { code: 'PROCESS_WAIT_FAILED' },
+    });
+
+    const killFailure = new CodexRunner({
+      ...runnerOptions(root, codex),
+      defaultTimeoutMs: 5,
+      processRunner: async () => ({
+        stdout: '',
+        stderr: '',
+        wait: () => new Promise<number>(() => undefined),
+        kill: () => {
+          throw new Error('kill failed');
+        },
+      }),
+    });
+    await expect(killFailure.runTask(input(root, codex))).resolves.toMatchObject({ status: 'TIMEOUT' });
   });
 });
