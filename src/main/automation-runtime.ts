@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { shell } from 'electron';
 import type { ProjectConfig } from '../shared/contracts/project-config.js';
+import { sanitizeDashboardSnapshot } from '../shared/contracts/dashboard.js';
 import { AtomicJsonFileStore } from './state/persistence.js';
 import {
   EdgeProfileManager,
@@ -32,7 +33,12 @@ function validateOrchestratorState(value: unknown): OrchestratorState {
   if (state.version !== 1 || typeof state.revision !== 'number' || typeof state.phase !== 'string') {
     throw new TypeError('Invalid orchestrator state');
   }
-  return state;
+  // Older snapshots predate Loop Graph; malformed graph input is downgraded at
+  // the persistence boundary so a corrupted visual projection cannot revive work.
+  return {
+    ...state,
+    loopGraph: sanitizeDashboardSnapshot({ loopGraph: state.loopGraph }).loopGraph,
+  };
 }
 
 export interface AutomationRuntime {

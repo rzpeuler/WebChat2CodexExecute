@@ -145,6 +145,32 @@
           <div class="dashboard-notices" aria-live="polite">
             <p id="dashboard-suggestion" class="suggestion">建议：—</p>
           </div>
+          <section class="loop-graph-section" aria-labelledby="loop-graph-title">
+            <div class="loop-graph-heading">
+              <div>
+                <p class="eyebrow">LOOP GRAPH</p>
+                <h3 id="loop-graph-title">自动循环路径</h3>
+              </div>
+              <span class="muted loop-graph-round" id="loop-graph-round">当前轮次：—</span>
+            </div>
+            <div id="loop-graph" class="loop-graph" role="list" aria-label="自动循环节点"></div>
+            <section
+              id="loop-graph-details"
+              class="loop-graph-details"
+              aria-labelledby="loop-graph-details-title"
+              hidden
+            >
+              <div class="loop-graph-details-heading">
+                <div>
+                  <p class="eyebrow">NODE DETAILS</p>
+                  <h4 id="loop-graph-details-title">节点详情</h4>
+                </div>
+                <span id="loop-graph-details-state" class="loop-graph-details-state"></span>
+              </div>
+              <p id="loop-graph-details-summary" class="loop-graph-details-summary"></p>
+              <ul id="loop-graph-details-list" class="loop-graph-details-list"></ul>
+            </section>
+          </section>
           <div class="actions dashboard-actions" aria-label="自动循环操作">
             <button type="button" data-dashboard-command="start">启动自动循环</button>
             <button type="button" data-dashboard-command="pause">暂停</button>

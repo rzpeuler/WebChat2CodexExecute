@@ -1,12 +1,18 @@
 import { createHash } from 'node:crypto';
 import {
+  LOOP_GRAPH_NODE_DEFINITIONS,
   sanitizeDashboardSnapshot,
   validateDashboardCommand,
   type DashboardCommand,
   type DashboardCommandResult,
   type DashboardActions,
   type DashboardSnapshot,
+  type LoopGraphNodeId,
+  type LoopGraphNodeSnapshot,
+  type LoopGraphNodeState,
+  type LoopGraphSnapshot,
 } from '../../shared/contracts/dashboard.js';
+import { sanitizeSafeText } from '../../shared/contracts/safe-text.js';
 import {
   parseWritingBlocks,
   type GovernanceReconciliationBlock,
@@ -30,6 +36,7 @@ import {
   type OrchestratorSnapshots,
   type OrchestratorState,
   type OrchestratorStateStore,
+  type PendingCodeSyncState,
   type SolMessageSource,
 } from './types.js';
 
@@ -48,6 +55,8 @@ const DEFAULT_STATE: OrchestratorState = {
   luna: { status: 'NOT_STARTED', sessionId: null },
   commits: { local: null, remote: null },
   recentError: null,
+  loopGraph: createLoopGraph(null, new Date(0).toISOString()),
+  pendingCodeSync: null,
   activeSolSession: null,
 };
 
@@ -61,12 +70,7 @@ export class OrchestratorError extends Error {
   }
 }
 
-type PendingCodeSync = {
-  task: LunaTaskBlock;
-  result: CodexRunResult;
-  baseline: Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>>;
-  outputKey: string;
-};
+type PendingCodeSync = PendingCodeSyncState;
 
 export class MainOrchestrator implements Orchestrator {
   private readonly project: OrchestratorProject;
@@ -125,10 +129,15 @@ export class MainOrchestrator implements Orchestrator {
     if (this.loadPromise !== null) return this.loadPromise;
     this.loadPromise = (async () => {
       const stored = await this.stateStore?.load();
-      if (stored !== null && stored !== undefined && stored.version === 1) this.state = cloneState(stored);
+      if (stored !== null && stored !== undefined && stored.version === 1) this.state = normalizeState(stored);
+      this.pendingCodeSync = clonePendingCodeSync(this.state.pendingCodeSync);
+      const interrupted = this.state.active || this.state.status === 'RUNNING';
       this.state.active = false;
-      if (this.state.status === 'RUNNING') this.state.status = 'PAUSED';
-      if (this.state.phase === 'READING_SOL' || this.state.phase === 'PARSING') this.state.phase = 'PAUSED';
+      if (interrupted) {
+        this.state.status = 'PAUSED';
+        this.state.phase = 'PAUSED';
+        this.pauseActiveGraphNode('应用重启后未恢复正在执行的进程。');
+      }
       await this.persist();
       this.initialized = true;
     })();
@@ -162,6 +171,7 @@ export class MainOrchestrator implements Orchestrator {
       luna: this.state.luna,
       commits: this.state.commits,
       recentError: this.state.recentError,
+      loopGraph: this.state.loopGraph,
       actions: this.dashboardActions(),
     });
   }
@@ -228,6 +238,17 @@ export class MainOrchestrator implements Orchestrator {
 
   async start(): Promise<OrchestratorResult> {
     await this.initialize();
+    if (this.pendingCodeSync !== null) {
+      this.state.active = true;
+      this.state.status = 'RUNNING';
+      this.state.phase = 'SYNCING_CODE';
+      this.state.taskId = this.pendingCodeSync.taskId;
+      this.activateGraphNode('sync-code', this.pendingCodeSync.taskId);
+      this.state.recentError = null;
+      this.touchState();
+      await this.persist();
+      return result('WAITING', this.state, '已恢复代码同步，等待继续执行。');
+    }
     if (dashboardNeedsNewSol(this.state.recentError))
       return result('PAUSED', this.state, '当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。');
     this.state.active = true;
@@ -236,7 +257,9 @@ export class MainOrchestrator implements Orchestrator {
       this.state.phase === 'IDLE' || this.state.phase === 'PAUSED' || this.state.phase === 'FAILED'
         ? 'WAITING_FOR_SOL'
         : this.state.phase;
+    if (this.state.phase === 'WAITING_FOR_SOL') this.resumeWaitingGraph();
     this.state.recentError = null;
+    this.touchState();
     await this.persist();
     return result('WAITING', this.state, '编排器已启动，等待 Sol 完成输出。');
   }
@@ -246,6 +269,8 @@ export class MainOrchestrator implements Orchestrator {
     this.state.active = false;
     this.state.status = 'PAUSED';
     this.state.phase = 'PAUSED';
+    this.pauseActiveGraphNode('用户已暂停编排。');
+    this.touchState();
     await this.persist();
     return result('PAUSED', this.state, '编排器已暂停。');
   }
@@ -254,9 +279,14 @@ export class MainOrchestrator implements Orchestrator {
     await this.initialize();
     this.state.active = true;
     this.state.status = 'RUNNING';
-    if (this.pendingCodeSync !== null) this.state.phase = 'SYNCING_CODE';
-    else if (this.state.phase === 'PAUSED' || this.state.phase === 'FAILED') this.state.phase = 'WAITING_FOR_SOL';
+    if (this.pendingCodeSync !== null) {
+      this.state.phase = 'SYNCING_CODE';
+      this.state.taskId = this.pendingCodeSync.taskId;
+      this.activateGraphNode('sync-code', this.pendingCodeSync.taskId);
+    } else if (this.state.phase === 'PAUSED' || this.state.phase === 'FAILED') this.state.phase = 'WAITING_FOR_SOL';
+    if (this.state.phase === 'WAITING_FOR_SOL') this.resumeWaitingGraph();
     this.state.recentError = null;
+    this.touchState();
     await this.persist();
     return this.runRound();
   }
@@ -452,27 +482,88 @@ export class MainOrchestrator implements Orchestrator {
     if (!this.state.active) return result('IDLE', this.state, '编排器未运行。');
     if (this.pendingCodeSync !== null && this.state.phase === 'SYNCING_CODE') return this.syncPendingCode();
 
+    const waitingForNextOutput = this.state.phase === 'WAITING_FOR_SOL' && this.state.loopGraph.roundId !== null;
+    if (!waitingForNextOutput && this.state.loopGraph.roundId === null) await this.beginRound();
     let observation: EdgeSolObservation;
     try {
-      await this.setPhase('READING_SOL', 'RUNNING');
       observation = await this.edge.observe();
     } catch (error) {
       return this.pauseFor(error, '读取 Sol 状态失败，请稍后重试。');
     }
     if (!this.state.active) return result('PAUSED', this.state, '编排器已暂停。');
 
+    if (waitingForNextOutput) {
+      if (observation.status === 'CONTEXT_LIMIT') return this.recoverContext(observation);
+      if (observation.status === 'AUTH_REQUIRED')
+        return this.pauseForCode('AUTH_REQUIRED', '需要在专用 Edge profile 中完成登录。', true);
+      if (observation.status === 'NETWORK_ERROR' || observation.status === 'SESSION_LOST')
+        return this.pauseForCode(observation.status, 'Sol 页面或网络尚未恢复，请检查后重试。');
+      if (observation.status !== 'COMPLETED_CANDIDATE') {
+        const message = '等待 Sol 产生新的稳定输出。';
+        await this.enterWaiting(message);
+        return result('WAITING', this.state, message);
+      }
+      if (this.baselineOutputHash !== undefined && observation.latestAssistantHash === this.baselineOutputHash) {
+        const message = '已确认绑定时的历史消息，不执行该消息。';
+        await this.enterWaiting(message);
+        return result('WAITING', this.state, message);
+      }
+      if (this.state.processedOutputKey === outputKeyFor(observation)) {
+        const message = '等待 Sol 产生新的未处理输出。';
+        await this.enterWaiting(message);
+        return result('WAITING', this.state, message);
+      }
+      await this.beginRound();
+    } else {
+      await this.setPhase('READING_SOL', 'RUNNING');
+    }
+
+    this.updateGraphNode('read-sol', {
+      summary: '已读取 Sol 当前状态。',
+      details: compactDetails([
+        `状态：${observation.status}`,
+        observation.latestAssistantHash === null ? '' : `输出：${observation.latestAssistantHash}`,
+        `采样：${observation.sampledAt}`,
+      ]),
+    });
+
     if (observation.status === 'CONTEXT_LIMIT') return this.recoverContext(observation);
     if (observation.status === 'AUTH_REQUIRED')
       return this.pauseForCode('AUTH_REQUIRED', '需要在专用 Edge profile 中完成登录。', true);
     if (observation.status === 'NETWORK_ERROR' || observation.status === 'SESSION_LOST')
       return this.pauseForCode(observation.status, 'Sol 页面或网络尚未恢复，请检查后重试。');
-    if (observation.status !== 'COMPLETED_CANDIDATE')
+    if (observation.status !== 'COMPLETED_CANDIDATE') {
+      this.markNodesNotApplicable([
+        'parse-task',
+        'apply-updates',
+        'sync-governance',
+        'run-luna',
+        'sync-code',
+        'notify-sol',
+      ]);
+      await this.enterWaiting('Sol 尚未产生稳定的可执行完成输出。');
       return result('WAITING', this.state, 'Sol 尚未产生稳定的可执行完成输出。');
-    if (this.baselineOutputHash !== undefined && observation.latestAssistantHash === this.baselineOutputHash)
+    }
+    if (
+      !waitingForNextOutput &&
+      this.baselineOutputHash !== undefined &&
+      observation.latestAssistantHash === this.baselineOutputHash
+    )
       return this.finishWaiting(observation, '已确认绑定时的历史消息，不执行该消息。');
 
     const outputKey = outputKeyFor(observation);
-    if (this.state.processedOutputKey === outputKey) return result('DUPLICATE', this.state, '该 Sol 输出已经处理过。');
+    if (!waitingForNextOutput && this.state.processedOutputKey === outputKey) {
+      this.markNodesNotApplicable([
+        'parse-task',
+        'apply-updates',
+        'sync-governance',
+        'run-luna',
+        'sync-code',
+        'notify-sol',
+      ]);
+      await this.enterWaiting('该 Sol 输出已经处理过。');
+      return result('DUPLICATE', this.state, '该 Sol 输出已经处理过。');
+    }
     if (observation.projectFingerprint === null)
       return this.pauseForCode('SOL_PROJECT_UNKNOWN', '无法确认 Sol 输出属于绑定 Project。');
 
@@ -480,6 +571,13 @@ export class MainOrchestrator implements Orchestrator {
     try {
       await this.setPhase('PARSING', 'RUNNING');
       parsed = parseWritingBlocks(observation.latestAssistantText);
+      this.updateGraphNode('parse-task', {
+        summary: `已验证 ${writingBlockCount(parsed)} 个 Writing Block。`,
+        details: [
+          `Luna 任务：${parsed.lunaTask?.fields.task_id ?? '无'}`,
+          `治理变更：${parsed.governanceChanges.length}`,
+        ],
+      });
     } catch (error) {
       return this.pauseFor(error, 'Writing Block 协议无效，已拒绝启动 Luna。');
     }
@@ -503,6 +601,7 @@ export class MainOrchestrator implements Orchestrator {
       if (!this.state.active) return result('PAUSED', this.state, '编排器已暂停。');
       if (parsed.lunaTask === null) {
         this.state.processedOutputKey = outputKey;
+        this.markNodesNotApplicable(['run-luna', 'sync-code', 'notify-sol']);
         await this.setPhase('WAITING_FOR_SOL', 'RUNNING');
         return result(
           'NO_TASK',
@@ -540,7 +639,10 @@ export class MainOrchestrator implements Orchestrator {
     governanceChanges: Parameters<GovernanceOrchestratorPort['applyAll']>[0],
     freezes: Parameters<ArchitectureOrchestratorPort['download']>[0],
   ): Promise<boolean> {
-    if (governanceChanges.length === 0 && freezes.length === 0) return false;
+    if (governanceChanges.length === 0 && freezes.length === 0) {
+      this.markNodesNotApplicable(['apply-updates', 'sync-governance']);
+      return false;
+    }
     await this.setPhase('APPLYING_UPDATES', 'RUNNING');
     const changedPaths: string[] = [];
     const ids: string[] = [];
@@ -567,7 +669,14 @@ export class MainOrchestrator implements Orchestrator {
       ];
     }
     const uniquePaths = [...new Set(changedPaths)];
-    if (uniquePaths.length === 0) return false;
+    this.updateGraphNode('apply-updates', {
+      summary: `已应用 ${governanceChanges.length} 项治理变更和 ${freezes.length} 项架构更新。`,
+      details: compactDetails([...ids, ...uniquePaths]),
+    });
+    if (uniquePaths.length === 0) {
+      this.markNodesNotApplicable(['sync-governance']);
+      return false;
+    }
     if (this.baseline === null) throw new OrchestratorError('BASELINE_MISSING', '治理同步缺少 Git 基线。');
     await this.setPhase('SYNCING_GOVERNANCE', 'RUNNING');
     const sync = await this.git.syncGovernance({
@@ -576,6 +685,10 @@ export class MainOrchestrator implements Orchestrator {
       changedPaths: uniquePaths,
     });
     this.state.commits = { local: sync.commit, remote: sync.remoteCommit };
+    this.updateGraphNode('sync-governance', {
+      summary: '治理同步完成。',
+      details: commitDetails(sync.commit, sync.remoteCommit),
+    });
     this.baseline = {
       ...this.baseline,
       head: sync.commit,
@@ -605,10 +718,16 @@ export class MainOrchestrator implements Orchestrator {
       repositorySnapshot: this.baseline,
     });
     this.state.luna = { status: handle.status, sessionId: handle.sessionId };
+    this.updateGraphNode('run-luna', {
+      summary: `Luna 正在执行任务 ${task.fields.task_id}。`,
+      details: [`任务：${task.fields.task_id}`, `会话：${handle.sessionId}`, `报告：${task.fields.report_path}`],
+    });
     await this.persist();
     const run = await handle.result;
     if (this.state.active === false) {
-      this.pendingCodeSync = { task, result: run, baseline: this.baseline, outputKey };
+      this.setPendingCodeSync(createPendingCodeSync(task, run, this.baseline, outputKey));
+      this.touchState();
+      await this.persist();
       return result('PAUSED', this.state, 'Luna 已返回，暂停状态阻止继续同步代码。');
     }
     if (run.status !== 'COMPLETED') {
@@ -622,7 +741,13 @@ export class MainOrchestrator implements Orchestrator {
       }
       throw new OrchestratorError(run.error?.code ?? run.status, run.error?.message ?? 'Luna 未成功完成任务。');
     }
-    this.pendingCodeSync = { task, result: run, baseline: this.baseline, outputKey };
+    this.updateGraphNode('run-luna', {
+      summary: `Luna 已完成任务 ${task.fields.task_id}。`,
+      details: [`任务：${task.fields.task_id}`, `会话：${run.sessionId}`, `报告：${run.reportPath}`],
+    });
+    this.setPendingCodeSync(createPendingCodeSync(task, run, this.baseline, outputKey));
+    this.touchState();
+    await this.persist();
     return this.syncPendingCode(observation);
   }
 
@@ -630,33 +755,50 @@ export class MainOrchestrator implements Orchestrator {
     const pending = this.pendingCodeSync;
     if (pending === null) return result('FAILED', this.state, '没有可恢复的代码同步上下文。');
     if (!this.state.active) return result('PAUSED', this.state, '编排器已暂停。');
-    await this.setPhase('SYNCING_CODE', 'RUNNING', pending.task.fields.task_id);
+    this.completeGraphNode('run-luna');
+    await this.setPhase('SYNCING_CODE', 'RUNNING', pending.taskId);
     const sync = await this.git.syncCode({
       baseline: pending.baseline,
-      taskId: pending.task.fields.task_id,
-      reportPath: pending.task.fields.report_path,
-      testsPassed: pending.result.status === 'COMPLETED',
-      allowedPaths: pending.task.fields.scope,
-      protectedPaths: pending.task.fields.out_of_scope,
+      taskId: pending.taskId,
+      reportPath: pending.reportPath,
+      testsPassed: pending.testsPassed,
+      allowedPaths: pending.allowedPaths,
+      protectedPaths: pending.protectedPaths,
     });
     this.state.commits = { local: sync.commit, remote: sync.remoteCommit };
+    this.updateGraphNode('sync-code', {
+      summary: `代码同步完成：${sync.commit}。`,
+      details: [
+        `任务：${pending.taskId}`,
+        `报告：${pending.reportPath}`,
+        '测试：已通过',
+        ...commitDetails(sync.commit, sync.remoteCommit),
+      ],
+    });
     if (!this.state.active) {
       await this.persist();
       return result('PAUSED', this.state, '代码已同步，但编排器在通知 Sol 前被暂停。');
     }
-    await this.setPhase('NOTIFYING_SOL', 'RUNNING', pending.task.fields.task_id);
+    await this.setPhase('NOTIFYING_SOL', 'RUNNING', pending.taskId);
     if (this.sol !== undefined) {
       if (observation === undefined) observation = await this.edge.observe();
       await this.sol.sendMessage({
         observation,
-        text: `LUNA_RESULT task_id=${pending.task.fields.task_id}\n最新提交 ${sync.commit} 完成，可以开始验收。`,
+        text: `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。`,
       });
+      this.updateGraphNode('notify-sol', {
+        summary: '已通知 Sol 可以开始验收。',
+        details: [`任务：${pending.taskId}`, ...commitDetails(sync.commit, sync.remoteCommit)],
+      });
+    } else {
+      this.markNodesNotApplicable(['notify-sol']);
     }
     this.state.processedOutputKey = pending.outputKey;
-    this.state.luna = { status: 'COMPLETED', sessionId: pending.result.sessionId };
+    this.state.luna = { status: 'COMPLETED', sessionId: pending.sessionId };
+    this.state.pendingCodeSync = null;
     this.pendingCodeSync = null;
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
-    return result('COMPLETED', this.state, `任务 ${pending.task.fields.task_id} 已完成并同步。`);
+    return result('COMPLETED', this.state, `任务 ${pending.taskId} 已完成并同步。`);
   }
 
   private async readSnapshots(task: LunaTaskBlock): Promise<OrchestratorSnapshots> {
@@ -707,7 +849,7 @@ export class MainOrchestrator implements Orchestrator {
 
   private finishWaiting(observation: EdgeSolObservation, message: string): Promise<OrchestratorResult> {
     this.state.processedOutputKey = outputKeyFor(observation);
-    return this.setPhase('WAITING_FOR_SOL', 'RUNNING').then(() => result('WAITING', this.state, message));
+    return this.enterWaiting(message).then(() => result('WAITING', this.state, message));
   }
 
   private async setPhase(
@@ -716,11 +858,20 @@ export class MainOrchestrator implements Orchestrator {
     taskId = this.state.taskId,
   ): Promise<void> {
     const inactive = !this.state.active && status === 'RUNNING';
-    this.state.phase = inactive ? 'PAUSED' : phase;
-    this.state.status = inactive ? 'PAUSED' : status;
+    if (inactive) {
+      this.state.phase = 'PAUSED';
+      this.state.status = 'PAUSED';
+      this.pauseActiveGraphNode('编排已暂停，未写回运行状态。');
+    } else {
+      const previousNode = nodeForPhase(this.state.phase);
+      const nextNode = nodeForPhase(phase);
+      if (previousNode !== null && previousNode !== nextNode) this.completeGraphNode(previousNode);
+      this.state.phase = phase;
+      this.state.status = status;
+      if (nextNode !== null && status === 'RUNNING') this.activateGraphNode(nextNode, taskId);
+    }
     this.state.taskId = taskId;
-    this.state.revision += 1;
-    this.state.updatedAt = this.now().toISOString();
+    this.touchState();
     await this.persist();
   }
 
@@ -740,8 +891,12 @@ export class MainOrchestrator implements Orchestrator {
     this.state.status = needsUser ? 'NEEDS_USER_ACTION' : 'PAUSED';
     this.state.phase = 'PAUSED';
     this.state.recentError = { code, message };
-    this.state.revision += 1;
-    this.state.updatedAt = this.now().toISOString();
+    this.blockActiveGraphNode(
+      needsUser || dashboardNeedsNewSol({ code, message }) ? 'NEEDS_USER_ACTION' : 'RECOVERABLE_BLOCKED',
+      code,
+      message,
+    );
+    this.touchState();
     await this.persist();
     try {
       this.notifier?.notify({
@@ -765,8 +920,12 @@ export class MainOrchestrator implements Orchestrator {
     this.state.status = 'FAILED';
     this.state.phase = 'FAILED';
     this.state.recentError = { code, message };
-    this.state.revision += 1;
-    this.state.updatedAt = this.now().toISOString();
+    this.blockActiveGraphNode(
+      dashboardNeedsNewSol({ code, message }) ? 'NEEDS_USER_ACTION' : 'RECOVERABLE_BLOCKED',
+      code,
+      message,
+    );
+    this.touchState();
     await this.persist();
     try {
       this.notifier?.notify({
@@ -792,8 +951,111 @@ export class MainOrchestrator implements Orchestrator {
     await this.stateStore?.save(cloneState(this.state));
   }
 
+  private async beginRound(): Promise<void> {
+    const now = this.now().toISOString();
+    this.state.loopGraph = createLoopGraph(`round-${this.state.revision + 1}-${this.now().getTime()}`, now);
+    await this.setPhase('READING_SOL', 'RUNNING', null);
+  }
+
+  private async enterWaiting(message: string): Promise<void> {
+    await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
+    this.updateGraphNode('wait-sol', { summary: message, details: [] });
+    this.touchState();
+    await this.persist();
+  }
+
+  private setPendingCodeSync(pending: PendingCodeSync): void {
+    this.pendingCodeSync = pending;
+    this.state.pendingCodeSync = clonePendingCodeSync(pending);
+  }
+
+  private resumeWaitingGraph(): void {
+    this.activateGraphNode('wait-sol', null);
+  }
+
+  private activateGraphNode(nodeId: LoopGraphNodeId, taskId: string | null): void {
+    const now = this.now().toISOString();
+    for (const node of this.state.loopGraph.nodes) {
+      if (node.id !== nodeId && node.state === 'ACTIVE') {
+        node.state = 'COMPLETED';
+        node.completedAt = now;
+        node.updatedAt = now;
+      }
+    }
+    const node = this.graphNode(nodeId);
+    node.state = 'ACTIVE';
+    node.startedAt ??= now;
+    node.completedAt = null;
+    node.updatedAt = now;
+    node.summary = phaseSummary(nodeId, taskId, this.state);
+    this.state.loopGraph.currentNodeId = nodeId;
+  }
+
+  private completeGraphNode(nodeId: LoopGraphNodeId): void {
+    const node = this.graphNode(nodeId);
+    if (node.state !== 'ACTIVE' && node.state !== 'PAUSED') return;
+    const now = this.now().toISOString();
+    node.state = 'COMPLETED';
+    node.completedAt = now;
+    node.updatedAt = now;
+    if (this.state.loopGraph.currentNodeId === nodeId) this.state.loopGraph.currentNodeId = null;
+  }
+
+  private markNodesNotApplicable(nodeIds: LoopGraphNodeId[]): void {
+    const now = this.now().toISOString();
+    for (const nodeId of nodeIds) {
+      const node = this.graphNode(nodeId);
+      if (node.state === 'COMPLETED') continue;
+      node.state = 'NOT_APPLICABLE';
+      node.summary = '本轮无需执行。';
+      node.updatedAt = now;
+      if (this.state.loopGraph.currentNodeId === nodeId) this.state.loopGraph.currentNodeId = null;
+    }
+  }
+
+  private pauseActiveGraphNode(summary: string): void {
+    const active = this.state.loopGraph.nodes.find((node) => node.state === 'ACTIVE');
+    if (active === undefined) return;
+    active.state = 'PAUSED';
+    active.summary = summary;
+    active.updatedAt = this.now().toISOString();
+    this.state.loopGraph.currentNodeId = active.id;
+  }
+
+  private blockActiveGraphNode(
+    state: Extract<LoopGraphNodeState, 'RECOVERABLE_BLOCKED' | 'NEEDS_USER_ACTION'>,
+    code: string,
+    message: string,
+  ): void {
+    const active = this.state.loopGraph.nodes.find((node) => node.state === 'ACTIVE');
+    if (active === undefined) return;
+    active.state = state;
+    active.summary = state === 'NEEDS_USER_ACTION' ? '需要用户处理后继续。' : '可恢复错误，等待重试。';
+    active.details = compactDetails([`错误：${code}`, message]);
+    active.updatedAt = this.now().toISOString();
+    this.state.loopGraph.currentNodeId = active.id;
+  }
+
+  private updateGraphNode(nodeId: LoopGraphNodeId, update: Pick<LoopGraphNodeSnapshot, 'summary' | 'details'>): void {
+    const node = this.graphNode(nodeId);
+    node.summary = update.summary;
+    node.details = compactDetails(update.details);
+    node.updatedAt = this.now().toISOString();
+  }
+
+  private graphNode(nodeId: LoopGraphNodeId): LoopGraphNodeSnapshot {
+    const node = this.state.loopGraph.nodes.find((candidate) => candidate.id === nodeId);
+    if (node === undefined) throw new OrchestratorError('LOOP_GRAPH_INVALID', `缺少 Loop Graph 节点 ${nodeId}。`);
+    return node;
+  }
+
+  private touchState(): void {
+    this.state.revision += 1;
+    this.state.updatedAt = this.now().toISOString();
+  }
+
   private reportPath(): string | null {
-    return this.pendingCodeSync?.task.fields.report_path ?? null;
+    return this.pendingCodeSync?.reportPath ?? null;
   }
 
   private async invokeCallback(
@@ -827,14 +1089,205 @@ export function createOrchestrator(options: OrchestratorOptions): MainOrchestrat
 }
 
 function cloneState(state: OrchestratorState): OrchestratorState {
+  const sanitized = sanitizeDashboardSnapshot({ loopGraph: state.loopGraph, recentError: state.recentError });
   return {
     ...state,
     architectureRevisions: [...state.architectureRevisions],
     luna: { ...state.luna },
     commits: { ...state.commits },
-    recentError: state.recentError === null ? null : { ...state.recentError },
+    recentError: sanitized.recentError === null ? null : { ...sanitized.recentError },
+    loopGraph: sanitized.loopGraph,
+    pendingCodeSync: clonePendingCodeSync(state.pendingCodeSync),
     activeSolSession: state.activeSolSession === null ? null : { ...state.activeSolSession },
   };
+}
+
+function normalizeState(state: OrchestratorState): OrchestratorState {
+  const source = state as Partial<OrchestratorState>;
+  return {
+    ...DEFAULT_STATE,
+    ...source,
+    architectureRevisions: Array.isArray(source.architectureRevisions) ? [...source.architectureRevisions] : [],
+    luna: { ...DEFAULT_STATE.luna, ...source.luna },
+    commits: { ...DEFAULT_STATE.commits, ...source.commits },
+    recentError: source.recentError === null || source.recentError === undefined ? null : { ...source.recentError },
+    loopGraph: sanitizeDashboardSnapshot(source.loopGraph === undefined ? {} : { loopGraph: source.loopGraph })
+      .loopGraph,
+    pendingCodeSync: normalizePendingCodeSync(source.pendingCodeSync),
+    activeSolSession:
+      source.activeSolSession === null || source.activeSolSession === undefined ? null : { ...source.activeSolSession },
+  };
+}
+
+function createPendingCodeSync(
+  task: LunaTaskBlock,
+  run: CodexRunResult,
+  baseline: PendingCodeSyncState['baseline'],
+  outputKey: string,
+): PendingCodeSync {
+  return {
+    taskId: task.fields.task_id,
+    reportPath: task.fields.report_path,
+    allowedPaths: [...task.fields.scope],
+    protectedPaths: [...task.fields.out_of_scope],
+    baseline,
+    testsPassed: run.status === 'COMPLETED',
+    sessionId: run.sessionId,
+    outputKey,
+  };
+}
+
+function clonePendingCodeSync(value: unknown): PendingCodeSyncState | null {
+  const pending = normalizePendingCodeSync(value);
+  if (pending === null) return null;
+  return {
+    ...pending,
+    allowedPaths: [...pending.allowedPaths],
+    protectedPaths: [...pending.protectedPaths],
+    baseline: { ...pending.baseline, worktree: [...pending.baseline.worktree] },
+  };
+}
+
+function normalizePendingCodeSync(value: unknown): PendingCodeSyncState | null {
+  if (!isRecord(value)) return null;
+  const taskId = boundedPendingText(value.taskId, 256);
+  const reportPath = boundedPendingText(value.reportPath, 1024);
+  const sessionId = boundedPendingText(value.sessionId, 256);
+  const outputKey = boundedPendingText(value.outputKey, 128);
+  const baseline = normalizePendingBaseline(value.baseline);
+  if (taskId === null || reportPath === null || sessionId === null || outputKey === null || baseline === null)
+    return null;
+  if (typeof value.testsPassed !== 'boolean') return null;
+  return {
+    taskId,
+    reportPath,
+    allowedPaths: normalizePendingStringArray(value.allowedPaths, 512),
+    protectedPaths: normalizePendingStringArray(value.protectedPaths, 512),
+    baseline,
+    testsPassed: value.testsPassed,
+    sessionId,
+    outputKey,
+  };
+}
+
+function normalizePendingBaseline(value: unknown): PendingCodeSyncState['baseline'] | null {
+  if (!isRecord(value)) return null;
+  const repositoryRoot = boundedPendingText(value.repositoryRoot, 1024);
+  const remoteName = boundedPendingText(value.remoteName, 256);
+  const remoteUrl = boundedPendingText(value.remoteUrl, 2048);
+  const branch = boundedPendingText(value.branch, 256);
+  const head = boundedPendingText(value.head, 256);
+  if (repositoryRoot === null || remoteName === null || remoteUrl === null || branch === null || head === null)
+    return null;
+  const remoteTip =
+    value.remoteTip === undefined || value.remoteTip === null ? null : boundedPendingText(value.remoteTip, 256);
+  if (value.remoteTip !== undefined && value.remoteTip !== null && remoteTip === null) return null;
+  return {
+    repositoryRoot,
+    remoteName,
+    remoteUrl,
+    branch,
+    head,
+    remoteTip,
+    worktree: normalizePendingStringArray(value.worktree, 1024),
+  };
+}
+
+function normalizePendingStringArray(value: unknown, limit: number): string[] {
+  if (!Array.isArray(value)) return [];
+  const values: string[] = [];
+  for (let index = 0; index < Math.min(value.length, limit); index += 1) {
+    const item = boundedPendingText(value[index], 1024);
+    if (item !== null) values.push(item);
+  }
+  return values;
+}
+
+function boundedPendingText(value: unknown, maxLength: number): string | null {
+  const sanitized = sanitizeSafeText(value, maxLength);
+  return sanitized === '' ? null : sanitized;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function createLoopGraph(roundId: string | null, updatedAt: string): LoopGraphSnapshot {
+  return {
+    roundId,
+    currentNodeId: null,
+    nodes: LOOP_GRAPH_NODE_DEFINITIONS.map(({ id, label }) => ({
+      id,
+      label,
+      state: 'PENDING',
+      summary: '',
+      details: [],
+      startedAt: null,
+      completedAt: null,
+      updatedAt,
+    })),
+  };
+}
+
+function nodeForPhase(phase: OrchestratorState['phase']): LoopGraphNodeId | null {
+  switch (phase) {
+    case 'READING_SOL':
+      return 'read-sol';
+    case 'PARSING':
+      return 'parse-task';
+    case 'APPLYING_UPDATES':
+      return 'apply-updates';
+    case 'SYNCING_GOVERNANCE':
+      return 'sync-governance';
+    case 'RUNNING_LUNA':
+      return 'run-luna';
+    case 'SYNCING_CODE':
+      return 'sync-code';
+    case 'NOTIFYING_SOL':
+      return 'notify-sol';
+    case 'WAITING_FOR_SOL':
+      return 'wait-sol';
+    default:
+      return null;
+  }
+}
+
+function phaseSummary(nodeId: LoopGraphNodeId, taskId: string | null, state: OrchestratorState): string {
+  switch (nodeId) {
+    case 'read-sol':
+      return '正在读取 Sol 会话。';
+    case 'parse-task':
+      return '正在校验 Writing Block。';
+    case 'apply-updates':
+      return '正在应用治理或架构更新。';
+    case 'sync-governance':
+      return '正在创建并同步治理提交。';
+    case 'run-luna':
+      return taskId === null ? '正在启动 Luna。' : `正在执行任务 ${taskId}。`;
+    case 'sync-code':
+      return taskId === null ? '正在同步代码。' : `正在同步任务 ${taskId} 的代码。`;
+    case 'notify-sol':
+      return '正在通知 Sol。';
+    case 'wait-sol':
+      return state.recentError === null ? '等待 Sol 产生稳定输出。' : '等待用户恢复编排。';
+  }
+}
+
+function compactDetails(values: Array<string | null | undefined>): string[] {
+  return values.filter((value): value is string => typeof value === 'string' && value !== '').slice(0, 16);
+}
+
+function commitDetails(local: string | null, remote: string | null): string[] {
+  return compactDetails([local === null ? '' : `本地提交：${local}`, remote === null ? '' : `远端提交：${remote}`]);
+}
+
+function writingBlockCount(parsed: ReturnType<typeof parseWritingBlocks>): number {
+  return (
+    parsed.governanceChanges.length +
+    parsed.architectureFreezes.length +
+    (parsed.lunaTask === null ? 0 : 1) +
+    parsed.blocked.length
+  );
 }
 
 function outputKeyFor(observation: EdgeSolObservation): string {

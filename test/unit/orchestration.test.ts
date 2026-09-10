@@ -3,7 +3,11 @@ import type { EdgeSolObservation } from '../../src/main/edge/types.js';
 import type { CodexRunResult } from '../../src/main/codex/types.js';
 import type { GitBaseline } from '../../src/main/git/types.js';
 import { parseWritingBlocks, type LunaTaskBlock } from '../../src/shared/protocol/writing-block.js';
-import { MainOrchestrator, type OrchestratorOptions } from '../../src/main/orchestration/index.js';
+import {
+  MainOrchestrator,
+  type OrchestratorOptions,
+  type OrchestratorState,
+} from '../../src/main/orchestration/index.js';
 
 const baseline: GitBaseline = {
   repositoryRoot: 'C:/repo',
@@ -143,6 +147,336 @@ function baseOptions(overrides: Partial<OrchestratorOptions> = {}): Orchestrator
 }
 
 describe('P0 main orchestration', () => {
+  it('projects a completed task round onto the fixed eight-node graph', async () => {
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${taskText()}`)) },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    await orchestrator.runRound();
+
+    const graph = orchestrator.getDashboardSnapshot().loopGraph;
+    expect(graph.roundId).not.toBeNull();
+    expect(graph.currentNodeId).toBe('wait-sol');
+    expect(graph.nodes.map((node) => node.id)).toEqual([
+      'read-sol',
+      'parse-task',
+      'apply-updates',
+      'sync-governance',
+      'run-luna',
+      'sync-code',
+      'notify-sol',
+      'wait-sol',
+    ]);
+    expect(graph.nodes.map((node) => node.state)).toEqual([
+      'COMPLETED',
+      'COMPLETED',
+      'COMPLETED',
+      'COMPLETED',
+      'COMPLETED',
+      'COMPLETED',
+      'COMPLETED',
+      'ACTIVE',
+    ]);
+    expect(graph.nodes[4]).toMatchObject({
+      summary: 'Luna 已完成任务 task-1。',
+      details: expect.arrayContaining(['任务：task-1', '会话：luna-1', '报告：docs/task-reports/task-1.md']),
+      startedAt: expect.any(String),
+      completedAt: expect.any(String),
+    });
+    expect(graph.nodes.filter((node) => node.state === 'ACTIVE')).toHaveLength(1);
+  });
+
+  it('completes a paused Luna node when retrying the pending code sync', async () => {
+    let releaseLuna!: (run: CodexRunResult) => void;
+    const options = baseOptions({
+      codex: {
+        startTask: vi.fn(async () => ({
+          sessionId: 'luna-1',
+          status: 'RUNNING' as const,
+          result: new Promise<CodexRunResult>((resolve) => {
+            releaseLuna = resolve;
+          }),
+        })),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    const round = orchestrator.runRound();
+    await vi.waitFor(() => expect(options.codex.startTask).toHaveBeenCalledOnce());
+
+    await orchestrator.pause();
+    releaseLuna(completedRun(parseWritingBlocks(taskText()).lunaTask!));
+    await round;
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'run-luna')).toMatchObject({
+      state: 'PAUSED',
+    });
+
+    await orchestrator.retryCurrentStage();
+    const graph = orchestrator.getDashboardSnapshot().loopGraph;
+    expect(graph.nodes.find((node) => node.id === 'run-luna')).toMatchObject({ state: 'COMPLETED' });
+    expect(graph.nodes.find((node) => node.id === 'sync-code')).toMatchObject({ state: 'COMPLETED' });
+  });
+
+  it('persists and restores the minimal pending code sync after Luna returns during a pause', async () => {
+    let releaseLuna!: (run: CodexRunResult) => void;
+    let saved: import('../../src/main/orchestration/index.js').OrchestratorState | null = null;
+    const stateStore = {
+      load: vi.fn(async () => saved),
+      save: vi.fn(async (state) => {
+        saved = state;
+      }),
+    };
+    const options = baseOptions({
+      stateStore,
+      codex: {
+        startTask: vi.fn(async () => ({
+          sessionId: 'luna-1',
+          status: 'RUNNING' as const,
+          result: new Promise<CodexRunResult>((resolve) => {
+            releaseLuna = resolve;
+          }),
+        })),
+      },
+    });
+    const running = new MainOrchestrator(options);
+    await running.start();
+    const round = running.runRound();
+    await vi.waitFor(() => expect(options.codex.startTask).toHaveBeenCalledOnce());
+
+    await running.pause();
+    releaseLuna(completedRun(parseWritingBlocks(taskText()).lunaTask!));
+    await round;
+
+    const persisted = saved as OrchestratorState | null;
+    expect(persisted?.pendingCodeSync).toMatchObject({
+      taskId: 'task-1',
+      reportPath: 'docs/task-reports/task-1.md',
+      allowedPaths: ['src/**', 'docs/task-reports/**'],
+      protectedPaths: ['src/main/app.ts'],
+      testsPassed: true,
+      sessionId: 'luna-1',
+      outputKey: expect.any(String),
+      baseline: expect.objectContaining({ head: 'base-commit' }),
+    });
+    expect(JSON.stringify(persisted?.pendingCodeSync)).not.toContain('stdout');
+    expect(JSON.stringify(persisted?.pendingCodeSync)).not.toContain('events');
+
+    const restored = new MainOrchestrator(options);
+    await restored.initialize();
+    expect(restored.getState()).toMatchObject({
+      phase: 'PAUSED',
+      pendingCodeSync: expect.objectContaining({ taskId: 'task-1' }),
+    });
+
+    const started = await restored.start();
+    expect(started.phase).toBe('SYNCING_CODE');
+    expect(restored.getDashboardSnapshot().loopGraph.currentNodeId).toBe('sync-code');
+    await expect(restored.runRound()).resolves.toMatchObject({ status: 'COMPLETED' });
+    expect(options.git.syncCode).toHaveBeenCalledTimes(1);
+    expect(restored.getState().pendingCodeSync).toBeNull();
+  });
+
+  it('treats missing or malformed pending code sync fields as a legacy empty value', async () => {
+    const initial = new MainOrchestrator(baseOptions()).getState();
+    const stored = { ...initial, pendingCodeSync: undefined } as unknown as OrchestratorState;
+    const legacyStore = {
+      load: vi.fn(async () => stored),
+      save: vi.fn(async () => undefined),
+    };
+    const restoredLegacy = new MainOrchestrator(baseOptions({ stateStore: legacyStore }));
+    await restoredLegacy.initialize();
+    expect(restoredLegacy.getState().pendingCodeSync).toBeNull();
+
+    const malformedStored = {
+      ...initial,
+      pendingCodeSync: {
+        taskId: 'task-1',
+        reportPath: 'docs/task-reports/task-1.md',
+        allowedPaths: ['src/**', 42],
+        protectedPaths: ['x'.repeat(3000)],
+        baseline: { ...baseline },
+        testsPassed: true,
+        sessionId: 'luna-1',
+        outputKey: 'key',
+      },
+    } as never;
+    const malformedStore = {
+      load: vi.fn(async () => malformedStored),
+      save: vi.fn(async () => undefined),
+    };
+    const restoredMalformed = new MainOrchestrator(baseOptions({ stateStore: malformedStore }));
+    await restoredMalformed.initialize();
+    expect(restoredMalformed.getState().pendingCodeSync).toMatchObject({
+      allowedPaths: ['src/**'],
+      protectedPaths: [`${'x'.repeat(1023)}…`],
+      baseline: { head: 'base-commit' },
+    });
+  });
+
+  it.each(['TIMEOUT', 'REPORT_MISSING', 'TESTS_NOT_PASSED'] as const)(
+    'maps %s from failFor to a recoverable graph block',
+    async (code) => {
+      const task = parseWritingBlocks(taskText()).lunaTask!;
+      const failedRun = {
+        ...completedRun(task),
+        status: code,
+        error: { code, message: `failure-${code}` },
+      } as CodexRunResult;
+      const options = baseOptions({
+        codex: {
+          startTask: vi.fn(async () => ({
+            sessionId: 'luna-1',
+            status: 'RUNNING' as const,
+            result: Promise.resolve(failedRun),
+          })),
+        },
+      });
+      const orchestrator = new MainOrchestrator(options);
+      await orchestrator.start();
+      await orchestrator.runRound();
+
+      expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'run-luna')).toMatchObject({
+        state: 'RECOVERABLE_BLOCKED',
+        details: expect.arrayContaining([`错误：${code}`]),
+      });
+    },
+  );
+
+  it('marks omitted governance, Luna, code, and notification work as not applicable', async () => {
+    const orchestrator = new MainOrchestrator(baseOptions({ edge: { observe: vi.fn(async () => observation('')) } }));
+    await orchestrator.start();
+    await orchestrator.runRound();
+
+    const graph = orchestrator.getDashboardSnapshot().loopGraph;
+    expect(graph.currentNodeId).toBe('wait-sol');
+    expect(graph.nodes.map((node) => node.state)).toEqual([
+      'COMPLETED',
+      'COMPLETED',
+      'NOT_APPLICABLE',
+      'NOT_APPLICABLE',
+      'NOT_APPLICABLE',
+      'NOT_APPLICABLE',
+      'NOT_APPLICABLE',
+      'ACTIVE',
+    ]);
+  });
+
+  it('maps recoverable and user-action failures onto the active graph node', async () => {
+    const recoverable = new MainOrchestrator(
+      baseOptions({ edge: { observe: vi.fn(async () => observation('', 'NETWORK_ERROR')) } }),
+    );
+    await recoverable.start();
+    await recoverable.runRound();
+    expect(recoverable.getDashboardSnapshot().loopGraph.currentNodeId).toBe('read-sol');
+    expect(recoverable.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
+      state: 'RECOVERABLE_BLOCKED',
+      details: expect.arrayContaining(['错误：NETWORK_ERROR']),
+    });
+
+    const needsUser = new MainOrchestrator(
+      baseOptions({ edge: { observe: vi.fn(async () => observation('', 'AUTH_REQUIRED')) } }),
+    );
+    await needsUser.start();
+    await needsUser.runRound();
+    expect(needsUser.getDashboardSnapshot().loopGraph.currentNodeId).toBe('read-sol');
+    expect(needsUser.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
+      state: 'NEEDS_USER_ACTION',
+      details: expect.arrayContaining(['错误：AUTH_REQUIRED']),
+    });
+  });
+
+  it('persists only the interrupted graph snapshot and never resumes its process after restart', async () => {
+    let saved: import('../../src/main/orchestration/index.js').OrchestratorState | null = null;
+    let releaseObservation!: (value: EdgeSolObservation) => void;
+    const stateStore = {
+      load: vi.fn(async () => saved),
+      save: vi.fn(async (state) => {
+        saved = state;
+      }),
+    };
+    const options = baseOptions({
+      stateStore,
+      edge: {
+        observe: vi.fn(
+          () =>
+            new Promise<EdgeSolObservation>((resolve) => {
+              releaseObservation = resolve;
+            }),
+        ),
+      },
+    });
+    const running = new MainOrchestrator(options);
+    await running.start();
+    const inFlight = running.runRound();
+    await vi.waitFor(() => expect(options.edge.observe).toHaveBeenCalledOnce());
+
+    const restarted = new MainOrchestrator(options);
+    await restarted.initialize();
+    expect(restarted.getDashboardSnapshot().loopGraph.currentNodeId).toBe('read-sol');
+    expect(restarted.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
+      state: 'PAUSED',
+    });
+    expect(restarted.getState()).toMatchObject({ active: false, status: 'PAUSED', phase: 'PAUSED' });
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+
+    await restarted.start();
+    expect(restarted.getState()).toMatchObject({ active: true, status: 'RUNNING', phase: 'WAITING_FOR_SOL' });
+    expect(restarted.getDashboardSnapshot().loopGraph).toMatchObject({ currentNodeId: 'wait-sol' });
+    expect(restarted.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+      state: 'ACTIVE',
+    });
+
+    releaseObservation(observation(''));
+    await inFlight;
+  });
+
+  it('restores wait-sol after a user pause without creating a new round', async () => {
+    const orchestrator = new MainOrchestrator(baseOptions());
+    await orchestrator.start();
+    await orchestrator.runRound();
+    const roundId = orchestrator.getDashboardSnapshot().loopGraph.roundId;
+
+    await orchestrator.pause();
+    expect(orchestrator.getDashboardSnapshot().loopGraph.currentNodeId).toBe('wait-sol');
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+      state: 'PAUSED',
+    });
+
+    await orchestrator.start();
+    expect(orchestrator.getDashboardSnapshot().loopGraph).toMatchObject({
+      roundId,
+      currentNodeId: 'wait-sol',
+    });
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+      state: 'ACTIVE',
+    });
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'WAITING' });
+    expect(orchestrator.getDashboardSnapshot().loopGraph.roundId).toBe(roundId);
+  });
+
+  it('restores wait-sol before retryCurrentStage polls again', async () => {
+    const options = baseOptions({
+      edge: {
+        observe: vi.fn().mockResolvedValueOnce(observation('', 'NETWORK_ERROR')).mockResolvedValueOnce(observation('')),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    await orchestrator.runRound();
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
+      state: 'RECOVERABLE_BLOCKED',
+    });
+
+    await orchestrator.retryCurrentStage();
+    expect(orchestrator.getState()).toMatchObject({ active: true, status: 'RUNNING', phase: 'WAITING_FOR_SOL' });
+    expect(orchestrator.getDashboardSnapshot().loopGraph.currentNodeId).toBe('wait-sol');
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+      state: 'ACTIVE',
+    });
+  });
+
   it('keeps the state paused when pause races with successful context recovery', async () => {
     let releaseRecovery!: (value: { status: string }) => void;
     const options = baseOptions({
@@ -166,6 +500,10 @@ describe('P0 main orchestration', () => {
     await round;
 
     expect(orchestrator.getState()).toMatchObject({ active: false, status: 'PAUSED', phase: 'PAUSED' });
+    expect(orchestrator.getDashboardSnapshot().loopGraph.currentNodeId).toBe('read-sol');
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
+      state: 'PAUSED',
+    });
   });
 
   it('locks the whole dashboard governance operation and allows only navigation during it', async () => {
@@ -472,8 +810,90 @@ describe('P0 main orchestration', () => {
     await orchestrator.runRound();
     const duplicate = await orchestrator.runRound();
 
-    expect(duplicate.status).toBe('DUPLICATE');
+    expect(duplicate.status).toBe('WAITING');
     expect(options.codex.startTask).toHaveBeenCalledOnce();
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+      summary: '等待 Sol 产生新的未处理输出。',
+    });
+  });
+
+  it('persists the concrete wait reason when Sol has no new stable output', async () => {
+    const orchestrator = new MainOrchestrator(
+      baseOptions({ edge: { observe: vi.fn(async () => observation('', 'THINKING')) } }),
+    );
+
+    await orchestrator.start();
+    await orchestrator.runRound();
+    await orchestrator.runRound();
+
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+      state: 'ACTIVE',
+      summary: '等待 Sol 产生新的稳定输出。',
+    });
+  });
+
+  it('updates the wait node with the duplicate polling reason without starting work', async () => {
+    const saves: import('../../src/main/orchestration/index.js').OrchestratorState[] = [];
+    const options = baseOptions({
+      stateStore: {
+        load: vi.fn(async () => saves.at(-1) ?? null),
+        save: vi.fn(async (state) => {
+          saves.push(state);
+        }),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    await orchestrator.runRound();
+    const completedGraph = orchestrator.getDashboardSnapshot().loopGraph;
+    const saveCount = saves.length;
+
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'WAITING' });
+
+    expect(orchestrator.getDashboardSnapshot().loopGraph).toMatchObject({
+      roundId: completedGraph.roundId,
+      currentNodeId: 'wait-sol',
+      nodes: expect.arrayContaining([
+        expect.objectContaining({ id: 'wait-sol', summary: '等待 Sol 产生新的未处理输出。' }),
+      ]),
+    });
+    expect(saves.length).toBeGreaterThan(saveCount);
+  });
+
+  it('sanitizes graph and error diagnostics before persisting the state snapshot', async () => {
+    const saves: import('../../src/main/orchestration/index.js').OrchestratorState[] = [];
+    const options = baseOptions({
+      stateStore: {
+        load: vi.fn(async () => null),
+        save: vi.fn(async (state) => {
+          saves.push(state);
+        }),
+      },
+      edge: {
+        observe: vi.fn(async () => {
+          const error = new Error(`Authorization=Bearer super-secret ${'x'.repeat(600)}`);
+          Object.assign(error, { code: 'NETWORK_ERROR' });
+          throw error;
+        }),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    await orchestrator.runRound();
+
+    const saved = saves.at(-1);
+    expect(saved).toBeDefined();
+    const graph = saved!.loopGraph;
+    expect(graph.nodes).toHaveLength(8);
+    expect(graph.nodes.filter((node) => node.state === 'ACTIVE')).toHaveLength(0);
+    for (const node of graph.nodes) {
+      expect(node.summary.length).toBeLessThanOrEqual(240);
+      expect(node.details.length).toBeLessThanOrEqual(16);
+      expect(node.details.every((detail) => detail.length <= 240)).toBe(true);
+      expect(JSON.stringify(node)).not.toContain('super-secret');
+    }
+    expect(saved!.recentError?.message).not.toContain('super-secret');
+    expect(saved!.recentError?.message.length).toBeLessThanOrEqual(240);
   });
 
   it('pauses on malformed or multi-task output before any side effect', async () => {

@@ -23,6 +23,31 @@ describe('phase eight renderer security boundary', () => {
     expect(source).toContain('GOVERNANCE.*(?:CONFLICT|BLOCKED)');
   });
 
+  it('keeps the Loop Graph fixed, accessible, and state-colored without a DOM dependency', async () => {
+    const source = await readFile(new URL('../../src/renderer/app.ts', import.meta.url), 'utf8');
+    const markup = await readFile(new URL('../../src/renderer/index.html', import.meta.url), 'utf8');
+    const styles = await readFile(new URL('../../src/renderer/styles.css', import.meta.url), 'utf8');
+
+    expect(source).toContain('LOOP_GRAPH_NODE_DEFINITIONS');
+    expect(source).toContain("aria-controls', 'loop-graph-details'");
+    expect(source).toContain('loopGraphNodeButtons');
+    expect(source).not.toContain('loopGraphElement.replaceChildren');
+    expect(markup).toContain('id="loop-graph-details"');
+    expect(markup).toContain('role="list"');
+    for (const state of [
+      'pending',
+      'active',
+      'completed',
+      'recoverable_blocked',
+      'needs_user_action',
+      'paused',
+      'not_applicable',
+    ]) {
+      expect(styles).toContain(`.loop-node.state-${state}`);
+      expect(styles).toContain(`.loop-graph-details-state.state-${state}`);
+    }
+  });
+
   it('keeps preload exposure limited to the typed renderer API', async () => {
     const source = await readFile(new URL('../../src/main/preload.cts', import.meta.url), 'utf8');
     expect(source).toContain('contextBridge.exposeInMainWorld');

@@ -82,6 +82,57 @@ export interface DashboardErrorSnapshot {
   message: string;
 }
 
+export const LOOP_GRAPH_NODE_DEFINITIONS = [
+  { id: 'read-sol', label: '读取 Sol' },
+  { id: 'parse-task', label: '解析任务书' },
+  { id: 'apply-updates', label: '应用治理/架构更新' },
+  { id: 'sync-governance', label: '同步治理' },
+  { id: 'run-luna', label: 'Luna 执行' },
+  { id: 'sync-code', label: '同步代码' },
+  { id: 'notify-sol', label: '通知 Sol' },
+  { id: 'wait-sol', label: '等待 Sol' },
+] as const;
+export const LOOP_GRAPH_MAX_SOURCE_NODES = 64;
+export const LOOP_GRAPH_MAX_DETAILS = 16;
+
+export type LoopGraphNodeId = (typeof LOOP_GRAPH_NODE_DEFINITIONS)[number]['id'];
+export type LoopGraphNodeState =
+  'PENDING' | 'ACTIVE' | 'COMPLETED' | 'RECOVERABLE_BLOCKED' | 'NEEDS_USER_ACTION' | 'PAUSED' | 'NOT_APPLICABLE';
+
+export interface LoopGraphNodeSnapshot {
+  id: LoopGraphNodeId;
+  label: string;
+  state: LoopGraphNodeState;
+  summary: string;
+  details: string[];
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+}
+
+export interface LoopGraphSnapshot {
+  roundId: string | null;
+  currentNodeId: LoopGraphNodeId | null;
+  nodes: LoopGraphNodeSnapshot[];
+}
+
+interface LoopGraphNodeSnapshotSource {
+  id?: unknown;
+  label?: unknown;
+  state?: unknown;
+  summary?: unknown;
+  details?: unknown;
+  startedAt?: unknown;
+  completedAt?: unknown;
+  updatedAt?: unknown;
+}
+
+interface LoopGraphSnapshotSource {
+  roundId?: unknown;
+  currentNodeId?: unknown;
+  nodes?: unknown;
+}
+
 export interface DashboardSnapshot {
   revision: number;
   updatedAt: string;
@@ -98,6 +149,7 @@ export interface DashboardSnapshot {
     remote: string | null;
   };
   recentError: DashboardErrorSnapshot | null;
+  loopGraph: LoopGraphSnapshot;
   actions: DashboardActions;
 }
 
@@ -114,6 +166,7 @@ export interface DashboardSnapshotSource {
   luna?: Partial<DashboardLunaSnapshot>;
   commits?: Partial<DashboardSnapshot['commits']>;
   recentError?: unknown;
+  loopGraph?: LoopGraphSnapshotSource | null;
   actions?: Partial<Record<DashboardCommandName, Partial<DashboardActionState>>>;
 }
 
@@ -188,6 +241,7 @@ export function sanitizeDashboardSnapshot(source: DashboardSnapshotSource): Dash
       remote: sanitizeCommit(source.commits?.remote),
     },
     recentError,
+    loopGraph: sanitizeLoopGraph(source.loopGraph),
     actions: sanitizeDashboardActions(source.actions),
   };
 }
@@ -218,6 +272,118 @@ function sanitizeDashboardActions(actions: DashboardSnapshotSource['actions']): 
       ];
     }),
   ) as DashboardActions;
+}
+
+function sanitizeLoopGraph(source: LoopGraphSnapshotSource | null | undefined): LoopGraphSnapshot {
+  const sourceNodes = Array.isArray(source?.nodes) ? source.nodes : [];
+  const nodesById = new Map<LoopGraphNodeId, LoopGraphNodeSnapshotSource>();
+  const nodeLimit = Math.min(sourceNodes.length, LOOP_GRAPH_MAX_SOURCE_NODES);
+  for (let index = 0; index < nodeLimit; index += 1) {
+    const value = sourceNodes[index];
+    if (!isRecord(value) || !isLoopGraphNodeId(value.id) || nodesById.has(value.id)) continue;
+    nodesById.set(value.id, value);
+  }
+
+  let activeNodeId: LoopGraphNodeId | null = null;
+  const nodes = LOOP_GRAPH_NODE_DEFINITIONS.map((definition) => {
+    const node = nodesById.get(definition.id);
+    const requestedState = isLoopGraphNodeState(node?.state) ? node.state : 'PENDING';
+    const state =
+      requestedState === 'ACTIVE'
+        ? activeNodeId === null
+          ? ((activeNodeId = definition.id), 'ACTIVE' as const)
+          : 'PENDING'
+        : requestedState;
+    return {
+      id: definition.id,
+      label: definition.label,
+      state,
+      summary: sanitizeSafeText(node?.summary, 240),
+      details: sanitizeLoopGraphDetails(node?.details),
+      startedAt: sanitizeTimestamp(node?.startedAt),
+      completedAt: sanitizeTimestamp(node?.completedAt),
+      updatedAt: sanitizeTimestamp(node?.updatedAt) ?? new Date(0).toISOString(),
+    };
+  });
+  const requestedCurrentNodeId = isLoopGraphNodeId(source?.currentNodeId) ? source.currentNodeId : null;
+  const requestedCurrentNode =
+    requestedCurrentNodeId === null ? undefined : nodes.find((node) => node.id === requestedCurrentNodeId);
+  const currentNodeId =
+    requestedCurrentNode !== undefined &&
+    requestedCurrentNode.state !== 'PENDING' &&
+    requestedCurrentNode.state !== 'COMPLETED' &&
+    requestedCurrentNode.state !== 'NOT_APPLICABLE'
+      ? requestedCurrentNode.id
+      : activeNodeId;
+  if (
+    requestedCurrentNode !== undefined &&
+    (requestedCurrentNode.state === 'PAUSED' ||
+      requestedCurrentNode.state === 'RECOVERABLE_BLOCKED' ||
+      requestedCurrentNode.state === 'NEEDS_USER_ACTION')
+  ) {
+    for (const node of nodes) {
+      if (node.id !== requestedCurrentNode.id && node.state === 'ACTIVE') node.state = 'PENDING';
+    }
+  }
+  return {
+    roundId: sanitizeOptionalIdentifier(source?.roundId),
+    currentNodeId,
+    nodes,
+  };
+}
+
+function sanitizeLoopGraphDetails(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const details: string[] = [];
+  const detailLimit = Math.min(value.length, LOOP_GRAPH_MAX_DETAILS);
+  for (let index = 0; index < detailLimit; index += 1) {
+    const detail = value[index];
+    if (typeof detail !== 'string') continue;
+    const sanitized = sanitizeSafeText(detail, 240);
+    if (sanitized !== '') details.push(sanitized);
+  }
+  return details;
+}
+
+function sanitizeTimestamp(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const sanitized = sanitizeSafeText(value, 64);
+  const match = ISO_TIMESTAMP_PATTERN.exec(sanitized);
+  if (match === null) return null;
+  const parsed = new Date(sanitized);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const milliseconds = Number(match[7] ?? '0');
+  return parsed.getUTCFullYear() === Number(match[1]) &&
+    parsed.getUTCMonth() + 1 === Number(match[2]) &&
+    parsed.getUTCDate() === Number(match[3]) &&
+    parsed.getUTCHours() === Number(match[4]) &&
+    parsed.getUTCMinutes() === Number(match[5]) &&
+    parsed.getUTCSeconds() === Number(match[6]) &&
+    parsed.getUTCMilliseconds() === milliseconds
+    ? sanitized
+    : null;
+}
+
+function sanitizeOptionalIdentifier(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const sanitized = sanitizeIdentifier(value, '');
+  return sanitized || null;
+}
+
+function isLoopGraphNodeId(value: unknown): value is LoopGraphNodeId {
+  return LOOP_GRAPH_NODE_DEFINITIONS.some((definition) => definition.id === value);
+}
+
+function isLoopGraphNodeState(value: unknown): value is LoopGraphNodeState {
+  return (
+    value === 'PENDING' ||
+    value === 'ACTIVE' ||
+    value === 'COMPLETED' ||
+    value === 'RECOVERABLE_BLOCKED' ||
+    value === 'NEEDS_USER_ACTION' ||
+    value === 'PAUSED' ||
+    value === 'NOT_APPLICABLE'
+  );
 }
 
 function sanitizeIdentifier(value: unknown, fallback: string): string {
@@ -262,3 +428,5 @@ function isDashboardCommandName(value: string): value is DashboardCommandName {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+const ISO_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$/;

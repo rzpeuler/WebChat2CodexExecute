@@ -1,9 +1,13 @@
 import type { ProjectConfigInput, ProjectScanResult } from '../shared/contracts/project-config.js';
+import { LOOP_GRAPH_NODE_DEFINITIONS } from '../shared/contracts/dashboard.js';
 import type {
   DashboardActionState,
   DashboardCommand,
   DashboardCommandName,
   DashboardSnapshot,
+  LoopGraphNodeId,
+  LoopGraphNodeSnapshot,
+  LoopGraphNodeState,
 } from '../shared/contracts/dashboard.js';
 
 const statusElement = document.querySelector<HTMLElement>('#status');
@@ -35,6 +39,13 @@ const dashboardLunaElement = document.querySelector<HTMLElement>('#dashboard-lun
 const dashboardCommitsElement = document.querySelector<HTMLElement>('#dashboard-commits');
 const dashboardErrorElement = document.querySelector<HTMLElement>('#dashboard-error');
 const dashboardSuggestionElement = document.querySelector<HTMLElement>('#dashboard-suggestion');
+const loopGraphElement = document.querySelector<HTMLElement>('#loop-graph');
+const loopGraphRoundElement = document.querySelector<HTMLElement>('#loop-graph-round');
+const loopGraphDetailsElement = document.querySelector<HTMLElement>('#loop-graph-details');
+const loopGraphDetailsTitleElement = document.querySelector<HTMLElement>('#loop-graph-details-title');
+const loopGraphDetailsStateElement = document.querySelector<HTMLElement>('#loop-graph-details-state');
+const loopGraphDetailsSummaryElement = document.querySelector<HTMLElement>('#loop-graph-details-summary');
+const loopGraphDetailsListElement = document.querySelector<HTMLUListElement>('#loop-graph-details-list');
 const helpButton = document.querySelector<HTMLButtonElement>('#help-button');
 const helpDialog = document.querySelector<HTMLElement>('#help-dialog');
 const helpCloseButton = document.querySelector<HTMLButtonElement>('#help-close');
@@ -43,6 +54,9 @@ let scanResult: ProjectScanResult | null = null;
 let currentSnapshot: DashboardSnapshot | null = null;
 let refreshInFlight: Promise<void> | null = null;
 let helpPreviouslyFocused: HTMLElement | null = null;
+let selectedLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
+let lastCurrentLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
+const loopGraphNodeButtons = new Map<LoopGraphNodeId, LoopGraphButtonParts>();
 const pendingDashboardCommands = new Set<DashboardCommandName>();
 
 const dangerousDashboardCommands = new Set<DashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
@@ -93,6 +107,23 @@ const solLabels: Record<string, string> = {
   SESSION_LOST: '会话已丢失',
   AMBIGUOUS: '状态不明确',
 };
+const loopGraphStateLabels: Record<LoopGraphNodeState, string> = {
+  PENDING: '待处理',
+  ACTIVE: '执行中',
+  COMPLETED: '已完成',
+  RECOVERABLE_BLOCKED: '可恢复阻塞',
+  NEEDS_USER_ACTION: '需要用户处理',
+  PAUSED: '已暂停',
+  NOT_APPLICABLE: '不适用',
+};
+
+interface LoopGraphButtonParts {
+  button: HTMLButtonElement;
+  id: HTMLElement;
+  label: HTMLElement;
+  summary: HTMLElement;
+  stateLabel: HTMLElement;
+}
 
 function setStatus(message: string): void {
   if (statusElement !== null) statusElement.textContent = message;
@@ -268,6 +299,119 @@ function getDashboardSuggestion(snapshot: DashboardSnapshot): string {
   return '当前没有需要用户处理的事项。';
 }
 
+function loopGraphNode(snapshot: DashboardSnapshot, nodeId: LoopGraphNodeSnapshot['id']): LoopGraphNodeSnapshot {
+  return (
+    snapshot.loopGraph.nodes.find((node) => node.id === nodeId) ?? {
+      id: nodeId,
+      label: LOOP_GRAPH_NODE_DEFINITIONS.find((definition) => definition.id === nodeId)?.label ?? nodeId,
+      state: 'PENDING',
+      summary: '',
+      details: [],
+      startedAt: null,
+      completedAt: null,
+      updatedAt: new Date(0).toISOString(),
+    }
+  );
+}
+
+function renderLoopGraphDetails(node: LoopGraphNodeSnapshot | null): void {
+  if (
+    loopGraphDetailsElement === null ||
+    loopGraphDetailsTitleElement === null ||
+    loopGraphDetailsStateElement === null ||
+    loopGraphDetailsSummaryElement === null ||
+    loopGraphDetailsListElement === null
+  )
+    return;
+  loopGraphDetailsListElement.replaceChildren();
+  if (node === null) {
+    loopGraphDetailsElement.hidden = true;
+    loopGraphDetailsElement.setAttribute('aria-expanded', 'false');
+    return;
+  }
+  loopGraphDetailsElement.hidden = false;
+  loopGraphDetailsElement.setAttribute('aria-expanded', 'true');
+  loopGraphDetailsTitleElement.textContent = `${node.label}（${node.id}）`;
+  loopGraphDetailsStateElement.textContent = loopGraphStateLabels[node.state];
+  loopGraphDetailsStateElement.className = `loop-graph-details-state state-${node.state.toLowerCase()}`;
+  loopGraphDetailsSummaryElement.textContent = node.summary || '暂无摘要。';
+  for (const detail of node.details) {
+    const item = document.createElement('li');
+    item.textContent = detail;
+    loopGraphDetailsListElement.append(item);
+  }
+  if (node.details.length === 0) {
+    const item = document.createElement('li');
+    item.textContent = '暂无更多详情。';
+    loopGraphDetailsListElement.append(item);
+  }
+}
+
+function selectLoopGraphNode(nodeId: LoopGraphNodeSnapshot['id']): void {
+  selectedLoopGraphNodeId = nodeId;
+  if (currentSnapshot !== null) renderLoopGraphDetails(loopGraphNode(currentSnapshot, nodeId));
+  loopGraphNodeButtons.get(nodeId)?.button.focus();
+}
+
+function ensureLoopGraphButtons(): void {
+  if (loopGraphElement === null || loopGraphNodeButtons.size === LOOP_GRAPH_NODE_DEFINITIONS.length) return;
+  for (const definition of LOOP_GRAPH_NODE_DEFINITIONS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'loop-node state-pending';
+    button.dataset.loopNodeId = definition.id;
+    button.setAttribute('aria-controls', 'loop-graph-details');
+    const id = document.createElement('span');
+    id.className = 'loop-node-id';
+    const label = document.createElement('span');
+    label.className = 'loop-node-label';
+    const summary = document.createElement('span');
+    summary.className = 'loop-node-summary';
+    const state = document.createElement('span');
+    state.className = 'loop-node-state';
+    const marker = document.createElement('span');
+    marker.className = 'loop-node-state-marker';
+    marker.setAttribute('aria-hidden', 'true');
+    const stateLabel = document.createElement('span');
+    stateLabel.className = 'loop-node-state-label';
+    state.append(marker, stateLabel);
+    button.append(id, label, summary, state);
+    button.addEventListener('click', () => selectLoopGraphNode(definition.id));
+    loopGraphElement.append(button);
+    loopGraphNodeButtons.set(definition.id, { button, id, label, summary, stateLabel });
+  }
+}
+
+function renderLoopGraph(snapshot: DashboardSnapshot): void {
+  if (loopGraphElement === null) return;
+  const currentNodeId = snapshot.loopGraph.currentNodeId;
+  if (currentNodeId !== lastCurrentLoopGraphNodeId) {
+    selectedLoopGraphNodeId = currentNodeId;
+    lastCurrentLoopGraphNodeId = currentNodeId;
+  }
+  if (selectedLoopGraphNodeId !== null) {
+    selectedLoopGraphNodeId = LOOP_GRAPH_NODE_DEFINITIONS.some(({ id }) => id === selectedLoopGraphNodeId)
+      ? selectedLoopGraphNodeId
+      : currentNodeId;
+  }
+  ensureLoopGraphButtons();
+  for (const definition of LOOP_GRAPH_NODE_DEFINITIONS) {
+    const node = loopGraphNode(snapshot, definition.id);
+    const parts = loopGraphNodeButtons.get(node.id);
+    if (parts === undefined) continue;
+    parts.button.className = `loop-node state-${node.state.toLowerCase()}`;
+    parts.button.setAttribute('aria-expanded', String(selectedLoopGraphNodeId === node.id));
+    parts.button.setAttribute('aria-current', String(currentNodeId === node.id));
+    parts.id.textContent = node.id;
+    parts.label.textContent = node.label;
+    parts.summary.textContent = node.summary || '暂无摘要。';
+    parts.stateLabel.textContent = loopGraphStateLabels[node.state];
+  }
+  if (loopGraphRoundElement !== null)
+    loopGraphRoundElement.textContent = `当前轮次：${snapshot.loopGraph.roundId ?? '—'}`;
+  renderLoopGraphDetails(selectedLoopGraphNodeId === null ? null : loopGraphNode(snapshot, selectedLoopGraphNodeId));
+}
+
 function applyDashboardActionStates(snapshot: DashboardSnapshot): void {
   document.querySelectorAll<HTMLButtonElement>('[data-dashboard-command]').forEach((button) => {
     const command = button.dataset.dashboardCommand as DashboardCommandName | undefined;
@@ -348,6 +492,7 @@ function renderDashboard(snapshot: DashboardSnapshot): void {
   }
   if (dashboardSuggestionElement !== null)
     dashboardSuggestionElement.textContent = `建议：${getDashboardSuggestion(rendererSnapshot)}`;
+  renderLoopGraph(rendererSnapshot);
   applyDashboardActionStates(rendererSnapshot);
 }
 

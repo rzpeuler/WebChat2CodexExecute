@@ -1,4 +1,9 @@
-import type { DashboardCommand, DashboardCommandResult, DashboardSnapshot } from '../../shared/contracts/dashboard.js';
+import type {
+  DashboardCommand,
+  DashboardCommandResult,
+  DashboardSnapshot,
+  LoopGraphSnapshot,
+} from '../../shared/contracts/dashboard.js';
 import type { TopLevelStatus } from '../../shared/contracts/top-level-state.js';
 import type {
   ArchitectureFreezeBlock,
@@ -40,6 +45,18 @@ export interface OrchestratorSnapshots extends CodexSnapshots {
   architectureRevisionSet: Array<string | number>;
 }
 
+/** Minimal JSON-safe context required to resume a completed Luna run before code sync. */
+export interface PendingCodeSyncState {
+  taskId: string;
+  reportPath: string;
+  allowedPaths: string[];
+  protectedPaths: string[];
+  baseline: GitBaseline;
+  testsPassed: boolean;
+  sessionId: string;
+  outputKey: string;
+}
+
 export interface OrchestratorState {
   version: 1;
   revision: number;
@@ -55,6 +72,9 @@ export interface OrchestratorState {
   luna: { status: string; sessionId: string | null };
   commits: { local: string | null; remote: string | null };
   recentError: { code: string; message: string } | null;
+  /** The single persisted dashboard projection for the current orchestration round. */
+  loopGraph: LoopGraphSnapshot;
+  pendingCodeSync: PendingCodeSyncState | null;
   activeSolSession: {
     sessionId: string;
     conversationId: string | null;
