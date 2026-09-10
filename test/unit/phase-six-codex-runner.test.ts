@@ -42,9 +42,9 @@ function fakeExecutor(codexPath: string, overrides: { auth?: boolean; model?: bo
       if (overrides.auth === false) throw new Error('not logged in');
       return { stdout: 'Logged in', stderr: '' };
     }
-    if (args[0] === 'models') {
-      if (overrides.model === false) return { stdout: JSON.stringify({ models: ['gpt-5.5'] }), stderr: '' };
-      return { stdout: JSON.stringify({ models: ['gpt-5.6-luna'] }), stderr: '' };
+    if (args[0] === 'exec') {
+      if (overrides.model === false) throw new Error('requested model is unavailable');
+      return { stdout: 'Run Codex non-interactively\n  -m, --model <MODEL>', stderr: '' };
     }
     throw new Error(`unexpected probe: ${args.join(' ')}`);
   };
@@ -106,7 +106,7 @@ function processFor(output: string, options: { exitCode?: number; never?: boolea
 }
 
 describe('CodexRunner', () => {
-  it('checks version, auth, model, and repository independently', async () => {
+  it('checks version, auth, execution entrypoint, and repository independently', async () => {
     const { root, codex } = await targetRepository();
     const runner = new CodexRunner({ execFile: fakeExecutor(codex), repositoryValidator: async () => true });
     const capabilities = await runner.checkCapabilities({ repositoryPath: root, executablePath: codex });
@@ -412,7 +412,10 @@ describe('CodexRunner', () => {
     await expect(
       new CodexRunner({
         repositoryValidator: async () => true,
-        execFile: withProbe((args) => (args[0] === 'models' ? { stdout: 'gpt-5.6-luna', stderr: '' } : null)),
+        execFile: withProbe((args) => {
+          if (args[0] === 'exec') throw new Error('requested model is unavailable');
+          return null;
+        }),
       }).checkCapabilities({ repositoryPath: root, executablePath: codex }),
     ).rejects.toMatchObject({ code: 'CLI_MODEL_UNAVAILABLE' });
   });

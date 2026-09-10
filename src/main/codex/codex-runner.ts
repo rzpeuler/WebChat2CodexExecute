@@ -445,12 +445,11 @@ export class CodexRunner {
     const model = input.model?.trim() || this.defaultModel;
     if (!MODEL_ID_PATTERN.test(model))
       throw new CodexRunnerError('CLI_MODEL_UNAVAILABLE', 'Codex model id is invalid', { model });
-    const modelProbe = await this.probe(executablePath, ['models', '--json'], 'CLI_MODEL_UNAVAILABLE');
-    if (!this.modelsInclude(modelProbe.stdout, model))
-      throw new CodexRunnerError('CLI_MODEL_UNAVAILABLE', `Codex model is unavailable: ${model}`, {
-        model,
-        stdout: redact(modelProbe.stdout),
-      });
+    // Recent Codex CLI versions no longer expose `models --json`. Validate the
+    // exact non-interactive execution entrypoint instead. The `--help` probe
+    // does not start a model run or consume a task, while a real entitlement
+    // failure is still reported by the subsequent `codex exec` process.
+    await this.probe(executablePath, ['exec', '--model', model, '--help'], 'CLI_MODEL_UNAVAILABLE');
     const execution: CodexExecutionConfig = { model, sandbox: 'danger-full-access', approvalPolicy: 'never' };
     const capabilities: CodexCapabilities = {
       executablePath,
@@ -1039,20 +1038,6 @@ export class CodexRunner {
     }
     if (/not\s+logged|logged\s*out|unauthenticated|no\s+active\s+login/i.test(text)) return false;
     return /logged\s+in|authenticated|active\s+login/i.test(text);
-  }
-
-  private modelsInclude(stdout: string, requestedModel: string): boolean {
-    try {
-      const parsed: unknown = JSON.parse(stdout);
-      const models =
-        isRecord(parsed) && Array.isArray(parsed.models) ? parsed.models : Array.isArray(parsed) ? parsed : null;
-      if (models === null) return false;
-      return models.some((item) =>
-        typeof item === 'string' ? item === requestedModel : isRecord(item) && item.id === requestedModel,
-      );
-    } catch {
-      return false;
-    }
   }
 
   private assertParsedTask(task: LunaTaskBlock): void {
