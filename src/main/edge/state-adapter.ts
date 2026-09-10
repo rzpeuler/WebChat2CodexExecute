@@ -3,7 +3,7 @@ import type { CdpTransport, EdgeAdapterRules, EdgePageSnapshot, EdgeSolObservati
 import { hasKnownIdentity, isAllowedChatGptUrl } from './url-security.js';
 
 export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
-  version: 'chatgpt-dom-2026-09-09',
+  version: 'chatgpt-dom-2026-09-10',
   assistantSelectors: [
     '[data-message-author-role="assistant"]',
     'article[data-testid*="conversation-turn"] [data-message-author-role="assistant"]',
@@ -31,11 +31,18 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
   const account = document.querySelector('[data-account-id], meta[name="chatgpt-account-id"]');
   const projectValue = project?.getAttribute('data-project-id') || project?.getAttribute('content') || '';
   const accountValue = account?.getAttribute('data-account-id') || account?.getAttribute('content') || '';
+  const pathParts = location.pathname.split('/').filter(Boolean);
+  const projectFromUrl = pathParts[0] === 'g' && pathParts[1] && pathParts[2] === 'c' ? pathParts[1] : '';
+  let accountFromStorage = '';
+  try {
+    const accountKey = Object.keys(localStorage).find((key) => /(?:^|\\/)user-[a-zA-Z0-9_-]{8,}(?:\\/|$)/.test(key));
+    accountFromStorage = accountKey?.match(/(?:^|\\/)user-([a-zA-Z0-9_-]{8,})(?:\\/|$)/)?.[1] || '';
+  } catch {}
   return {
     title: document.title,
     url: location.href,
-    projectFingerprint: projectValue || null,
-    accountFingerprint: accountValue || null,
+    projectFingerprint: projectValue || projectFromUrl || null,
+    accountFingerprint: accountValue || (accountFromStorage ? 'user-' + accountFromStorage : null),
     latestAssistantText: assistant,
     statusText: status,
     errorText: errors,
@@ -72,6 +79,24 @@ export function hasIncompleteWritingBlock(text: string): boolean {
   return startCount > endCount;
 }
 
+export function projectFingerprintFromChatGptUrl(value: string): string | null {
+  if (!isAllowedChatGptUrl(value)) return null;
+  try {
+    const parts = new URL(value).pathname.split('/').filter(Boolean);
+    return parts[0] === 'g' && parts[1] !== undefined && parts[2] === 'c' ? parts[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+export function accountFingerprintFromStorageKeys(keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const match = key.match(/(?:^|\/)user-([a-zA-Z0-9_-]{8,})(?:\/|$)/);
+    if (match?.[1] !== undefined) return `user-${match[1]}`;
+  }
+  return null;
+}
+
 export class EdgeStateAdapter {
   readonly rules: EdgeAdapterRules;
   private readonly transport: CdpTransport;
@@ -93,7 +118,9 @@ export class EdgeStateAdapter {
     const statusText = typeof raw.statusText === 'string' ? raw.statusText : '';
     const combined = `${errorText}\n${statusText}`;
     const url = stringOrNull(raw.url) ?? '';
-    const projectFingerprint = isAllowedChatGptUrl(url) ? stringOrNull(raw.projectFingerprint) : null;
+    const projectFingerprint = isAllowedChatGptUrl(url)
+      ? stringOrNull(raw.projectFingerprint) ?? projectFingerprintFromChatGptUrl(url)
+      : null;
     const accountFingerprint = isAllowedChatGptUrl(url) ? stringOrNull(raw.accountFingerprint) : null;
     return {
       targetId,

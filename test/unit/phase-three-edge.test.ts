@@ -4,8 +4,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EdgeProfileManager, locateEdgeExecutable } from '../../src/main/edge/profile.js';
 import {
+  accountFingerprintFromStorageKeys,
   EdgeStateAdapter,
   hasIncompleteWritingBlock,
+  projectFingerprintFromChatGptUrl,
   selectChatGptProjectTargets,
 } from '../../src/main/edge/state-adapter.js';
 import { SolBindingError, SolSessionBindingStore } from '../../src/main/edge/session-binding.js';
@@ -186,6 +188,18 @@ describe('dedicated Edge profile and CDP state adapter', () => {
       accountFingerprint: null,
     });
     await expect(selectChatGptProjectTargets(transport, adapter)).resolves.toEqual([]);
+  });
+
+  it('derives Project identity from a safe conversation URL and account identity from storage keys', async () => {
+    expect(projectFingerprintFromChatGptUrl('https://chatgpt.com/g/g-p-project/c/conversation')).toBe('g-p-project');
+    expect(projectFingerprintFromChatGptUrl('https://chatgpt.com/g/g-p-project')).toBeNull();
+    expect(projectFingerprintFromChatGptUrl('https://chatgpt.com.evil.example/g/g-p-project/c/conversation')).toBeNull();
+    expect(
+      accountFingerprintFromStorageKeys([
+        'cache/user-arT9Q0ywHCEhyx8lT1ngq4v8/19e598c2-16a6-4232-8880-6165eb609c5d/conversation-history',
+      ]),
+    ).toBe('user-arT9Q0ywHCEhyx8lT1ngq4v8');
+    expect(accountFingerprintFromStorageKeys(['oai/apps/lastUtmCampaign'])).toBeNull();
   });
 
   it('binds the current message only as baseline and blocks identity mismatches', async () => {
