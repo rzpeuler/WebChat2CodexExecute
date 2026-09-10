@@ -155,25 +155,65 @@ export const WRITING_BLOCK_JSON_SCHEMAS = {
     type: 'object',
     additionalProperties: true,
     required: [...LUNA_TASK_REQUIRED_FIELDS],
-    properties: { schema_version: { const: WRITING_BLOCK_SCHEMA_VERSION } },
+    properties: {
+      schema_version: { type: 'integer', const: WRITING_BLOCK_SCHEMA_VERSION },
+      task_id: { type: 'string' },
+      title: { type: 'string' },
+      objective: { type: 'string' },
+      base_commit: { type: 'string' },
+      scope: { type: 'array', items: { type: 'string' } },
+      out_of_scope: { type: 'array', items: { type: 'string' } },
+      deliverables: { type: 'array', items: { type: 'string' } },
+      validation_commands: { type: 'array', items: { type: 'string' } },
+      governance_revision: { oneOf: [{ type: 'string' }, { type: 'number' }] },
+      architecture_revision_set: { type: 'array', items: {} },
+      report_path: { type: 'string' },
+      remote_sync_policy: {
+        oneOf: [{ type: 'object' }, { type: 'string' }, { type: 'boolean' }],
+      },
+      execution_semantics: { type: 'string', const: DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS },
+    },
   },
   GOVERNANCE_CHANGE: {
     type: 'object',
     additionalProperties: true,
     required: [...GOVERNANCE_CHANGE_REQUIRED_FIELDS],
-    properties: { schema_version: { const: WRITING_BLOCK_SCHEMA_VERSION } },
+    properties: {
+      schema_version: { type: 'integer', const: WRITING_BLOCK_SCHEMA_VERSION },
+      change_id: { type: 'string' },
+      operation: { type: 'string' },
+      document_id: { type: 'string' },
+      path: { type: 'string' },
+      reason: { type: 'string' },
+      risk_level: { type: 'string' },
+      affected_agents: { type: 'array', items: { type: 'string' } },
+      content: { type: 'string' },
+    },
   },
   ARCHITECTURE_FREEZE: {
     type: 'object',
     additionalProperties: true,
     required: [...ARCHITECTURE_FREEZE_REQUIRED_FIELDS],
-    properties: { schema_version: { const: WRITING_BLOCK_SCHEMA_VERSION } },
+    properties: {
+      schema_version: { type: 'integer', const: WRITING_BLOCK_SCHEMA_VERSION },
+      freeze_id: { type: 'string' },
+      version: { oneOf: [{ type: 'string' }, { type: 'number' }] },
+      download_url: { type: 'string' },
+      sha256_if_known: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+      reason: { type: 'string' },
+      affected_scope: { type: 'array', items: { type: 'string' } },
+      luna_follow_up: { type: 'string' },
+    },
   },
   BLOCKED: {
     type: 'object',
     additionalProperties: true,
     required: [...BLOCKED_REQUIRED_FIELDS],
-    properties: { schema_version: { const: WRITING_BLOCK_SCHEMA_VERSION } },
+    properties: {
+      schema_version: { type: 'integer', const: WRITING_BLOCK_SCHEMA_VERSION },
+      code: { type: 'string' },
+      reason: { type: 'string' },
+    },
   },
 } as const;
 
@@ -188,8 +228,48 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+type JsonSchemaProperty = {
+  readonly type?: string;
+  readonly const?: unknown;
+  readonly items?: JsonSchemaProperty;
+  readonly oneOf?: readonly JsonSchemaProperty[];
+};
+
+function matchesJsonSchemaProperty(value: unknown, schema: JsonSchemaProperty): boolean {
+  if (schema.const !== undefined && value !== schema.const) return false;
+  if (schema.oneOf !== undefined) return schema.oneOf.some((candidate) => matchesJsonSchemaProperty(value, candidate));
+  if (schema.type === undefined) return true;
+  if (schema.type === 'null') return value === null;
+  if (schema.type === 'array') {
+    return (
+      Array.isArray(value) &&
+      (schema.items === undefined || value.every((item) => matchesJsonSchemaProperty(item, schema.items!)))
+    );
+  }
+  if (schema.type === 'object') return isRecord(value);
+  if (schema.type === 'integer') return typeof value === 'number' && Number.isInteger(value);
+  if (schema.type === 'number') return typeof value === 'number' && Number.isFinite(value);
+  if (schema.type === 'string') return isNonEmptyString(value);
+  if (schema.type === 'boolean') return typeof value === 'boolean';
+  return false;
+}
+
+function assertSchemaContract(type: WritingBlockType, fields: Record<string, unknown>, blockIndex: number): void {
+  const schema = WRITING_BLOCK_JSON_SCHEMAS[type];
+  for (const field of schema.required) assertFieldPresent(fields, field, blockIndex);
+  for (const [field, property] of Object.entries(schema.properties) as Array<[string, JsonSchemaProperty]>) {
+    if (fields[field] !== undefined && !matchesJsonSchemaProperty(fields[field], property)) {
+      throw new WritingBlockProtocolError(
+        'WRITING_BLOCK_INVALID_FIELD',
+        `${field} does not match the writing block schema for ${type}`,
+        { blockIndex, field },
+      );
+    }
+  }
+}
+
 function assertFieldPresent(fields: Record<string, unknown>, field: string, blockIndex: number): void {
-  if (!(field in fields) || fields[field] === null || fields[field] === undefined) {
+  if (!(field in fields) || fields[field] === undefined) {
     throw new WritingBlockProtocolError(
       'WRITING_BLOCK_MISSING_FIELD',
       `${field} is required for writing block ${blockIndex}`,
@@ -328,6 +408,7 @@ function buildBlock(
   blockIndex: number,
 ): WritingBlock {
   assertVersion(fields, blockIndex);
+  assertSchemaContract(type, fields, blockIndex);
   let normalized: Record<string, unknown>;
   switch (type) {
     case 'LUNA_TASK': {

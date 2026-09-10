@@ -160,4 +160,40 @@ describe('governance change applier', () => {
     );
     expect(result.status).toBe('candidate');
   });
+
+  it('rolls back the whole batch when the second change commit fails', async () => {
+    const root = await project();
+    await seedActiveDocument(root);
+    const originalDocument = await readFile(join(root, 'docs', 'governance', 'policy.md'), 'utf8');
+    const originalManifest = await readFile(join(root, 'docs', 'governance', 'governance-manifest.yaml'), 'utf8');
+    let commitCount = 0;
+    const applier = new GovernanceChangeApplier(root, {
+      beforeCommit: async () => {
+        if (commitCount++ === 2) throw new Error('second change commit failed');
+      },
+    });
+
+    await expect(
+      applier.applyAll([
+        change({ change_id: 'update-1', operation: 'update_document', content: '# New policy' }),
+        change({
+          change_id: 'add-1',
+          document_id: 'new-policy',
+          path: 'docs/governance/new-policy.md',
+          content: '# New policy document',
+        }),
+      ]),
+    ).rejects.toMatchObject({ code: 'GOVERNANCE_CHANGE_COMMIT_FAILED' });
+
+    expect(await readFile(join(root, 'docs', 'governance', 'policy.md'), 'utf8')).toBe(originalDocument);
+    expect(await readFile(join(root, 'docs', 'governance', 'governance-manifest.yaml'), 'utf8')).toBe(originalManifest);
+    await expect(readFile(join(root, 'docs', 'governance', 'new-policy.md'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(
+      readFile(join(root, 'docs', 'governance', 'history', 'policy', 'v1-update-1.md'), 'utf8'),
+    ).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
 });

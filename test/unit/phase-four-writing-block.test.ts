@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ARCHITECTURE_FREEZE_REQUIRED_FIELDS,
   DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS,
   parseWritingBlocks,
+  WRITING_BLOCK_JSON_SCHEMAS,
   WritingBlockProtocolError,
 } from '../../src/shared/protocol/writing-block.js';
 
@@ -95,5 +97,56 @@ describe('Writing Block protocol', () => {
     expect(() => parseWritingBlocks(block('LUNA_TASK', { ...task, remote_sync_policy: null }))).toThrowError(
       WritingBlockProtocolError,
     );
+  });
+
+  it('requires sha256_if_known to be present while allowing an explicit null', () => {
+    const missing = {
+      freeze_id: 'freeze-1',
+      version: 1,
+      download_url: 'https://architecture.example/freeze.md',
+      reason: 'freeze architecture',
+      affected_scope: ['src'],
+      luna_follow_up: 'Use the frozen document.',
+    };
+    expect(() => parseWritingBlocks(block('ARCHITECTURE_FREEZE', missing))).toThrowError(
+      expect.objectContaining({ code: 'WRITING_BLOCK_MISSING_FIELD', field: 'sha256_if_known' }),
+    );
+    expect(
+      parseWritingBlocks(block('ARCHITECTURE_FREEZE', { ...missing, sha256_if_known: null })).architectureFreezes[0]
+        ?.fields,
+    ).toMatchObject({ sha256_if_known: null });
+  });
+
+  it('exports complete known-field schemas and validates their declared shapes', () => {
+    expect(WRITING_BLOCK_JSON_SCHEMAS.ARCHITECTURE_FREEZE).toMatchObject({
+      type: 'object',
+      additionalProperties: true,
+      required: [...ARCHITECTURE_FREEZE_REQUIRED_FIELDS],
+    });
+    expect(WRITING_BLOCK_JSON_SCHEMAS.ARCHITECTURE_FREEZE.properties.sha256_if_known).toEqual({
+      oneOf: [{ type: 'string' }, { type: 'null' }],
+    });
+    expect(WRITING_BLOCK_JSON_SCHEMAS.GOVERNANCE_CHANGE.properties.affected_agents).toEqual({
+      type: 'array',
+      items: { type: 'string' },
+    });
+    expect(WRITING_BLOCK_JSON_SCHEMAS.LUNA_TASK.properties.architecture_revision_set).toEqual({
+      type: 'array',
+      items: {},
+    });
+    expect(() =>
+      parseWritingBlocks(
+        block('GOVERNANCE_CHANGE', {
+          change_id: 'change-1',
+          operation: 'add_document',
+          document_id: 'policy',
+          path: 'docs/governance/policy.md',
+          reason: 'add policy',
+          risk_level: 'normal',
+          affected_agents: 'Sol',
+          content: '# Policy',
+        }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: 'WRITING_BLOCK_INVALID_FIELD', field: 'affected_agents' }));
   });
 });

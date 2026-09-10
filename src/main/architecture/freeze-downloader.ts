@@ -117,9 +117,24 @@ function isPrivateIpv6(address: string): boolean {
   );
 }
 
+function mappedIpv4(address: string): string | null {
+  const normalized = address.toLowerCase();
+  const dotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(normalized)?.[1];
+  if (dotted !== undefined && isIP(dotted) === 4) return dotted;
+
+  const hexadecimal = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(normalized);
+  if (hexadecimal === null) return null;
+  const high = Number.parseInt(hexadecimal[1]!, 16);
+  const low = Number.parseInt(hexadecimal[2]!, 16);
+  return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+}
+
 function isPrivateAddress(address: string): boolean {
   if (isIP(address) === 4) return isPrivateIpv4(address);
-  if (isIP(address) === 6) return isPrivateIpv6(address);
+  if (isIP(address) === 6) {
+    const mapped = mappedIpv4(address);
+    return mapped === null ? isPrivateIpv6(address) : isPrivateIpv4(mapped);
+  }
   return false;
 }
 
@@ -164,6 +179,10 @@ function assertSafeUrl(rawUrl: string, resolveHost: HostResolver): Promise<URL> 
       `Private architecture host is not allowed: ${hostname}`,
     );
   }
+  // The resolver check blocks known private answers, but a plain fetch may
+  // resolve again later. Without a custom connector bound to the checked IP,
+  // DNS rebinding cannot be completely prevented; keep this as a diagnostic
+  // limitation of the fetch boundary rather than claiming a full guarantee.
   return resolveHost(hostname)
     .then((addresses) => {
       if (addresses.some(isPrivateAddress)) {
@@ -406,6 +425,7 @@ export class ArchitectureFreezeDownloader {
           await rename(resolve(stageDirectory, `${safeFreezeSegment(item.freeze.fields.freeze_id)}.md`), targetPath);
           addedPaths.push(targetRelativePath);
           addedRecords.push({
+            ...item.freeze.extensions,
             freeze_id: item.freeze.fields.freeze_id,
             version: item.freeze.fields.version,
             url: item.freeze.fields.download_url,
@@ -415,7 +435,6 @@ export class ArchitectureFreezeDownloader {
             reason: item.freeze.fields.reason,
             affected_scope: [...item.freeze.fields.affected_scope],
             luna_follow_up: item.freeze.fields.luna_follow_up,
-            ...item.freeze.extensions,
           });
         }
         const nextIndex: ArchitectureIndex = {

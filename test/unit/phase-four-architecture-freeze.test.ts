@@ -134,6 +134,8 @@ describe('architecture freeze downloader', () => {
     ['data:text/plain,secret', 'ARCHITECTURE_FREEZE_URL_INVALID'],
     ['http://localhost/freeze.md', 'ARCHITECTURE_FREEZE_PRIVATE_HOST'],
     ['http://127.0.0.1/freeze.md', 'ARCHITECTURE_FREEZE_PRIVATE_HOST'],
+    ['http://[::ffff:127.0.0.1]/freeze.md', 'ARCHITECTURE_FREEZE_PRIVATE_HOST'],
+    ['http://[::ffff:7f00:1]/freeze.md', 'ARCHITECTURE_FREEZE_PRIVATE_HOST'],
   ])('rejects malicious URL %s', async (url, code) => {
     const root = await project();
     const fetch = vi.fn(async () => response('# not reached'));
@@ -143,6 +145,50 @@ describe('architecture freeze downloader', () => {
       ]),
     ).rejects.toMatchObject({ code });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('reuses IPv4 private-range checks for mapped addresses returned by DNS', async () => {
+    const root = await project();
+    const fetch = vi.fn(async () => response('# not reached'));
+    await expect(
+      new ArchitectureFreezeDownloader(root, {
+        fetch,
+        resolveHost: async () => ['::ffff:192.168.1.10'],
+      }).download([freeze({})]),
+    ).rejects.toMatchObject({ code: 'ARCHITECTURE_FREEZE_PRIVATE_HOST' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not allow extensions to override canonical architecture index fields', async () => {
+    const root = await project();
+    const item = freeze({ freeze_id: 'canonical-id', version: 8 });
+    item.extensions = {
+      freeze_id: 'forged-id',
+      version: 999,
+      url: 'https://forged.example/freeze.md',
+      sha256: 'forged-hash',
+      source: 'forged-source',
+      path: 'forged/path.md',
+      reason: 'forged-reason',
+      affected_scope: ['forged'],
+      luna_follow_up: 'forged-follow-up',
+    };
+    const result = await new ArchitectureFreezeDownloader(root, {
+      fetch: async () => response('# Canonical'),
+      resolveHost: publicResolver,
+    }).download([item]);
+
+    expect(result.added[0]).toMatchObject({
+      freeze_id: 'canonical-id',
+      version: 8,
+      url: 'https://architecture.example/freeze.md',
+      source: 'Sol Writing Block',
+      path: 'docs/governance/architecture/versions/8/canonical-id.md',
+      reason: 'freeze architecture',
+      affected_scope: ['src'],
+      luna_follow_up: 'Use the frozen document.',
+    });
+    expect(result.added[0]?.sha256).not.toBe('forged-hash');
   });
 
   it('rejects redirects, unsupported content, and oversized responses', async () => {
