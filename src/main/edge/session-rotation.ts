@@ -6,6 +6,7 @@ import type {
   SolConversationIdentity,
   SolSessionHandoff,
 } from './types.js';
+import { hasKnownIdentity, isAllowedChatGptUrl } from './url-security.js';
 
 export type SessionRecoveryStatus = 'RECOVERED' | 'ALREADY_ATTEMPTED' | 'PAUSED';
 
@@ -18,7 +19,12 @@ export interface SessionRecoveryResult {
 }
 
 export class SolSessionRecoveryError extends Error {
-  readonly code: 'RECOVERY_INPUT_MISSING' | 'RECOVERY_FAILED' | 'RECOVERY_IDENTITY_MISMATCH' | 'RECOVERY_PAUSED';
+  readonly code:
+    | 'RECOVERY_INPUT_MISSING'
+    | 'RECOVERY_INPUT_MISMATCH'
+    | 'RECOVERY_FAILED'
+    | 'RECOVERY_IDENTITY_MISMATCH'
+    | 'RECOVERY_PAUSED';
 
   constructor(code: SolSessionRecoveryError['code'], message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -49,6 +55,19 @@ export class ContextRecoveryManager {
     const state = await this.bindingStore.load();
     if (state === null) throw new SolSessionRecoveryError('RECOVERY_FAILED', 'No Sol conversation is bound.');
     if (state.lastContextRecoveryEventId === input.eventId) {
+      if (input.rawInput !== undefined) {
+        const savedHash = state.lastContextRecoveryInputHash ?? state.lastRawInputHash;
+        if (savedHash === null || hashRawInput(input.rawInput) !== savedHash) {
+          return {
+            status: 'PAUSED',
+            eventId: input.eventId,
+            error: {
+              code: 'RECOVERY_INPUT_MISMATCH',
+              message: 'The retry input does not match the persisted Sol input hash.',
+            },
+          };
+        }
+      }
       return { status: 'ALREADY_ATTEMPTED', eventId: input.eventId };
     }
     if (state.paused) {
@@ -80,16 +99,24 @@ export class ContextRecoveryManager {
         );
       }
       if (
-        state.accountFingerprint !== null &&
-        input.observation.accountFingerprint !== null &&
-        state.accountFingerprint !== input.observation.accountFingerprint
+        !isAllowedChatGptUrl(input.observation.url) ||
+        !hasKnownIdentity(input.observation.projectFingerprint) ||
+        !hasKnownIdentity(input.observation.accountFingerprint) ||
+        !hasKnownIdentity(state.accountFingerprint) ||
+        input.observation.accountFingerprint !== state.accountFingerprint
       ) {
         throw new SolSessionRecoveryError(
           'RECOVERY_IDENTITY_MISMATCH',
-          'The CONTEXT_LIMIT observation is from another account.',
+          'The CONTEXT_LIMIT observation does not expose the bound Project and account.',
         );
       }
-      await this.bindingStore.recordRawInput(rawInput);
+      if (state.lastRawInputHash !== null && hashRawInput(rawInput) !== state.lastRawInputHash) {
+        throw new SolSessionRecoveryError(
+          'RECOVERY_INPUT_MISMATCH',
+          'The Sol input does not match the persisted input hash.',
+        );
+      }
+      await this.bindingStore.prepareContextRecoveryAttempt(input.eventId, attempts, rawInput);
       const conversation = await this.conversations.createConversation({
         projectFingerprint: state.projectFingerprint,
         accountFingerprint: state.accountFingerprint,
@@ -117,17 +144,19 @@ export class ContextRecoveryManager {
     accountFingerprint: string | null,
     conversation: SolConversationIdentity,
   ): void {
-    if (conversation.projectFingerprint !== projectFingerprint) {
+    if (
+      !isAllowedChatGptUrl(conversation.url) ||
+      !hasKnownIdentity(projectFingerprint) ||
+      !hasKnownIdentity(accountFingerprint) ||
+      !hasKnownIdentity(conversation.projectFingerprint) ||
+      conversation.projectFingerprint !== projectFingerprint
+    ) {
       throw new SolSessionRecoveryError(
         'RECOVERY_IDENTITY_MISMATCH',
-        'The new conversation is not in the bound Project.',
+        'The new conversation does not expose the bound Project and account.',
       );
     }
-    if (
-      accountFingerprint !== null &&
-      conversation.accountFingerprint !== null &&
-      accountFingerprint !== conversation.accountFingerprint
-    ) {
+    if (!hasKnownIdentity(conversation.accountFingerprint) || accountFingerprint !== conversation.accountFingerprint) {
       throw new SolSessionRecoveryError(
         'RECOVERY_IDENTITY_MISMATCH',
         'The new conversation is not in the bound account.',
@@ -193,8 +222,7 @@ export class ActiveSessionRotationManager {
     const state = await this.bindingStore.load();
     if (state === null) throw new SolSessionRecoveryError('RECOVERY_FAILED', 'No Sol conversation is bound.');
     const rotationKey = `${input.phase}:${input.completedTaskCount}:${input.phaseCompleted === true ? 'complete' : 'threshold'}`;
-    if (!this.shouldRotate(input) || state.lastActiveRotationKey === rotationKey)
-      return { status: 'SKIPPED', rotationKey };
+    if (!this.shouldRotate(input)) return { status: 'SKIPPED', rotationKey };
 
     const handoff: SolSessionHandoff = {
       version: 1,
@@ -211,35 +239,60 @@ export class ActiveSessionRotationManager {
       nextStep: input.nextStep,
       createdAt: this.now().toISOString(),
     };
+    const handoffInputHash = hashRawInput(
+      JSON.stringify({
+        version: handoff.version,
+        projectFingerprint: handoff.projectFingerprint,
+        accountFingerprint: handoff.accountFingerprint,
+        phase: handoff.phase,
+        productGoal: handoff.productGoal,
+        completedTaskCount: handoff.completedTaskCount,
+        completedTaskIds: handoff.completedTaskIds,
+        commit: handoff.commit,
+        governanceRevision: handoff.governanceRevision,
+        architectureRevisionSet: handoff.architectureRevisionSet,
+        unresolvedIssues: handoff.unresolvedIssues,
+        nextStep: handoff.nextStep,
+      }),
+    );
+    if (state.lastActiveRotationKey === rotationKey) {
+      if (
+        state.lastActiveRotationInputHash !== null &&
+        state.lastActiveRotationInputHash !== undefined &&
+        state.lastActiveRotationInputHash !== handoffInputHash
+      ) {
+        return {
+          status: 'PAUSED',
+          rotationKey,
+          handoff,
+          error: {
+            code: 'RECOVERY_INPUT_MISMATCH',
+            message: 'The rotation retry does not match the persisted handoff hash.',
+          },
+        };
+      }
+      return { status: 'SKIPPED', rotationKey };
+    }
     try {
+      if (!hasKnownIdentity(state.projectFingerprint) || !hasKnownIdentity(state.accountFingerprint)) {
+        throw new SolSessionRecoveryError(
+          'RECOVERY_IDENTITY_MISMATCH',
+          'A known bound Project and account are required for rotation.',
+        );
+      }
+      await this.bindingStore.markActiveRotation(rotationKey, handoffInputHash);
       const conversation = await this.conversations.createConversation({
         projectFingerprint: state.projectFingerprint,
         accountFingerprint: state.accountFingerprint,
         reason: 'ACTIVE_ROTATION',
       });
-      if (conversation.projectFingerprint !== state.projectFingerprint) {
-        throw new SolSessionRecoveryError(
-          'RECOVERY_IDENTITY_MISMATCH',
-          'The rotated conversation is not in the bound Project.',
-        );
-      }
-      if (
-        state.accountFingerprint !== null &&
-        conversation.accountFingerprint !== null &&
-        state.accountFingerprint !== conversation.accountFingerprint
-      ) {
-        throw new SolSessionRecoveryError(
-          'RECOVERY_IDENTITY_MISMATCH',
-          'The rotated conversation is not in the bound account.',
-        );
-      }
+      assertConversationIdentity(state.projectFingerprint, state.accountFingerprint, conversation);
       await this.conversations.sendMessage({ conversation, text: serializeSessionHandoff(handoff) });
       const codex =
         this.codexRotator === undefined
           ? null
           : await this.codexRotator.rotate({ projectFingerprint: state.projectFingerprint, handoff });
       await this.bindingStore.setActiveConversation(conversation, 'ACTIVE_ROTATION');
-      await this.bindingStore.markActiveRotation(rotationKey);
       return {
         status: 'ROTATED',
         rotationKey,
@@ -250,6 +303,27 @@ export class ActiveSessionRotationManager {
     } catch (error) {
       return { status: 'PAUSED', rotationKey, handoff, error: normalizeError(error) };
     }
+  }
+}
+
+function assertConversationIdentity(
+  projectFingerprint: string,
+  accountFingerprint: string | null,
+  conversation: SolConversationIdentity,
+): void {
+  if (
+    !isAllowedChatGptUrl(conversation.url) ||
+    !hasKnownIdentity(projectFingerprint) ||
+    !hasKnownIdentity(accountFingerprint) ||
+    !hasKnownIdentity(conversation.projectFingerprint) ||
+    conversation.projectFingerprint !== projectFingerprint ||
+    !hasKnownIdentity(conversation.accountFingerprint) ||
+    conversation.accountFingerprint !== accountFingerprint
+  ) {
+    throw new SolSessionRecoveryError(
+      'RECOVERY_IDENTITY_MISMATCH',
+      'The rotated conversation does not expose the bound Project and account.',
+    );
   }
 }
 

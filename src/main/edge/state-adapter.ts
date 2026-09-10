@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { CdpTransport, EdgeAdapterRules, EdgePageSnapshot, EdgeSolObservation, CdpTarget } from './types.js';
+import { hasKnownIdentity, isAllowedChatGptUrl } from './url-security.js';
 
 export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
   version: 'chatgpt-dom-2026-09-09',
@@ -91,13 +92,15 @@ export class EdgeStateAdapter {
     const errorText = typeof raw.errorText === 'string' ? raw.errorText : '';
     const statusText = typeof raw.statusText === 'string' ? raw.statusText : '';
     const combined = `${errorText}\n${statusText}`;
-    const projectFingerprint = stringOrNull(raw.projectFingerprint) ?? projectFromUrl(stringOrNull(raw.url));
+    const url = stringOrNull(raw.url) ?? '';
+    const projectFingerprint = isAllowedChatGptUrl(url) ? stringOrNull(raw.projectFingerprint) : null;
+    const accountFingerprint = isAllowedChatGptUrl(url) ? stringOrNull(raw.accountFingerprint) : null;
     return {
       targetId,
       title: stringOrNull(raw.title) ?? '',
-      url: stringOrNull(raw.url) ?? '',
+      url,
       projectFingerprint,
-      accountFingerprint: stringOrNull(raw.accountFingerprint),
+      accountFingerprint,
       latestAssistantText: text,
       latestAssistantHash: hashMessage(text),
       statusText,
@@ -152,9 +155,11 @@ export async function selectChatGptProjectTargets(
   const targets = await transport.listTargets();
   const selected: Array<{ target: CdpTarget; observation: EdgeSolObservation }> = [];
   for (const target of targets) {
-    if (target.type !== 'page' || !/chatgpt\.com|chat\.openai\.com/i.test(target.url)) continue;
+    if (target.type !== 'page' || !isAllowedChatGptUrl(target.url)) continue;
     const observation = await adapter.sample(target.id);
-    if (observation.projectFingerprint !== null) selected.push({ target, observation });
+    if (hasKnownIdentity(observation.projectFingerprint) && hasKnownIdentity(observation.accountFingerprint)) {
+      selected.push({ target, observation });
+    }
   }
   return selected;
 }
@@ -169,16 +174,4 @@ function booleanOrFalse(value: unknown): boolean {
 
 function matchesAny(value: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(value));
-}
-
-function projectFromUrl(url: string | null): string | null {
-  if (url === null) return null;
-  try {
-    const parsed = new URL(url);
-    const parts = parsed.pathname.split('/').filter(Boolean);
-    const marker = parts.findIndex((part) => part === 'project' || part === 'g');
-    return marker >= 0 && parts[marker + 1] !== undefined ? `url:${parts[marker + 1]}` : null;
-  } catch {
-    return null;
-  }
 }

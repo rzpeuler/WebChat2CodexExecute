@@ -1,0 +1,176 @@
+import type { DashboardCommand, DashboardCommandResult, DashboardSnapshot } from '../../shared/contracts/dashboard.js';
+import type { TopLevelStatus } from '../../shared/contracts/top-level-state.js';
+import type {
+  ArchitectureFreezeBlock,
+  GovernanceChangeBlock,
+  LunaTaskBlock,
+} from '../../shared/protocol/writing-block.js';
+import type { EdgeSolObservation } from '../edge/types.js';
+import type { CodexSnapshots, CodexTaskHandle } from '../codex/types.js';
+import type {
+  CaptureBaselineOptions,
+  CodeSyncInput,
+  GitBaseline,
+  GitSyncResult,
+  GovernanceSyncInput,
+} from '../git/types.js';
+import type { GovernanceChangeApplyResult } from '../governance/change-applier.js';
+import type { ArchitectureFreezeDownloadResult } from '../architecture/freeze-downloader.js';
+
+export type OrchestratorPhase =
+  | 'IDLE'
+  | 'READING_SOL'
+  | 'PARSING'
+  | 'APPLYING_UPDATES'
+  | 'SYNCING_GOVERNANCE'
+  | 'RUNNING_LUNA'
+  | 'SYNCING_CODE'
+  | 'NOTIFYING_SOL'
+  | 'WAITING_FOR_SOL'
+  | 'PAUSED'
+  | 'FAILED';
+
+export type OrchestrationRoundStatus =
+  'IDLE' | 'WAITING' | 'DUPLICATE' | 'NO_TASK' | 'RECOVERED' | 'COMPLETED' | 'PAUSED' | 'FAILED';
+
+export interface OrchestratorSnapshots extends CodexSnapshots {
+  governanceRevision: string | number | null;
+  architectureRevisionSet: Array<string | number>;
+}
+
+export interface OrchestratorState {
+  version: 1;
+  revision: number;
+  updatedAt: string;
+  active: boolean;
+  status: TopLevelStatus;
+  phase: OrchestratorPhase;
+  taskId: string | null;
+  processedOutputKey: string | null;
+  lastContextRecoveryEventId: string | null;
+  governanceRevision: string | number | null;
+  architectureRevisions: Array<string | number>;
+  luna: { status: string; sessionId: string | null };
+  commits: { local: string | null; remote: string | null };
+  recentError: { code: string; message: string } | null;
+  activeSolSession: {
+    sessionId: string;
+    conversationId: string | null;
+    status: string;
+  } | null;
+}
+
+export interface OrchestratorStateStore {
+  load(): Promise<OrchestratorState | null>;
+  save(state: OrchestratorState): Promise<void>;
+}
+
+export interface OrchestratorProject {
+  projectId: string;
+  name: string;
+  localPath: string;
+  remoteUrl?: string | null;
+}
+
+export interface EdgeObservationSource {
+  observe(): Promise<EdgeSolObservation>;
+}
+
+export interface SolMessageSource {
+  sendMessage(input: { text: string; observation: EdgeSolObservation }): Promise<void>;
+}
+
+export interface ContextRecoverySource {
+  recover(input: {
+    eventId: string;
+    observation: EdgeSolObservation;
+    rawInput?: string;
+  }): Promise<{ status: string; error?: { code: string; message: string } }>;
+}
+
+export interface GitOrchestratorPort {
+  captureBaseline(repositoryPath: string, options?: CaptureBaselineOptions): Promise<GitBaseline>;
+  syncGovernance(input: GovernanceSyncInput): Promise<GitSyncResult>;
+  syncCode(input: CodeSyncInput): Promise<GitSyncResult>;
+}
+
+export interface GovernanceOrchestratorPort {
+  applyAll(changes: GovernanceChangeBlock[]): Promise<GovernanceChangeApplyResult[]>;
+}
+
+export interface ArchitectureOrchestratorPort {
+  download(freezes: ArchitectureFreezeBlock[]): Promise<ArchitectureFreezeDownloadResult>;
+}
+
+export interface CodexOrchestratorPort {
+  startTask(input: {
+    task: LunaTaskBlock;
+    snapshots: CodexSnapshots;
+    repositoryPath: string;
+    model?: string;
+    executablePath?: string;
+    baselineSnapshot?: unknown;
+    repositorySnapshot?: unknown;
+  }): Promise<CodexTaskHandle>;
+}
+
+export interface SnapshotSource {
+  read(): Promise<OrchestratorSnapshots>;
+}
+
+export interface OrchestratorNotifier {
+  notify(input: {
+    project: string;
+    taskId: string | null;
+    phase: string;
+    suggestion: string;
+    error: unknown;
+    level?: 'RECOVERABLE' | 'NEEDS_USER' | 'FATAL';
+  }): unknown;
+}
+
+export interface OrchestratorCallbacks {
+  rebind?: () => Promise<void>;
+  openEdge?: () => Promise<void>;
+  openProject?: () => Promise<void>;
+  viewReport?: (reportPath: string | null) => Promise<void>;
+}
+
+export interface OrchestratorOptions {
+  project: OrchestratorProject;
+  edge: EdgeObservationSource;
+  git: GitOrchestratorPort;
+  codex: CodexOrchestratorPort;
+  governance?: GovernanceOrchestratorPort;
+  architecture?: ArchitectureOrchestratorPort;
+  sol?: SolMessageSource;
+  contextRecovery?: ContextRecoverySource;
+  snapshots?: SnapshotSource;
+  notifier?: OrchestratorNotifier;
+  callbacks?: OrchestratorCallbacks;
+  stateStore?: OrchestratorStateStore;
+  targetBranch?: string;
+  expectedRemoteUrl?: string | null;
+  model?: string;
+  executablePath?: string;
+  baselineOutputHash?: string | null;
+  now?: () => Date;
+}
+
+export interface OrchestratorResult {
+  status: OrchestrationRoundStatus;
+  phase: OrchestratorPhase;
+  taskId: string | null;
+  message: string;
+}
+
+export interface Orchestrator {
+  initialize(): Promise<void>;
+  start(): Promise<OrchestratorResult>;
+  pause(): Promise<OrchestratorResult>;
+  retryCurrentStage(): Promise<OrchestratorResult>;
+  runRound(): Promise<OrchestratorResult>;
+  getState(): OrchestratorState;
+  getDashboardSnapshot(): DashboardSnapshot;
+  executeCommand(command: DashboardCommand): Promise<DashboardCommandResult>;
+}

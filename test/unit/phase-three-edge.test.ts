@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtemp } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { EdgeProfileManager, locateEdgeExecutable } from '../../src/main/edge/profile.js';
-import { EdgeStateAdapter, hasIncompleteWritingBlock } from '../../src/main/edge/state-adapter.js';
+import {
+  EdgeStateAdapter,
+  hasIncompleteWritingBlock,
+  selectChatGptProjectTargets,
+} from '../../src/main/edge/state-adapter.js';
 import { SolBindingError, SolSessionBindingStore } from '../../src/main/edge/session-binding.js';
 import type { CdpTransport, EdgeProcess, EdgeSolObservation, SolSessionState } from '../../src/main/edge/types.js';
 
@@ -113,6 +120,41 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     expect(hasIncompleteWritingBlock('[WRITING_BLOCK]x[/WRITING_BLOCK]')).toBe(false);
   });
 
+  it('persists an ownership token and rejects an external process on a reused port', async () => {
+    const profileDirectory = await mkdtemp(join(tmpdir(), 'web-chat2codex-edge-'));
+    const ownershipFilePath = join(profileDirectory, 'ownership.json');
+    const process: EdgeProcess = { exitCode: null, kill: () => true, once: () => undefined };
+    const base = {
+      executablePath: 'C:\\Edge\\msedge.exe',
+      userDataDirectory: profileDirectory,
+      ownershipFilePath,
+      remoteDebuggingPort: 9444,
+      fileExists: async () => true,
+    } as const;
+    const started = await new EdgeProfileManager({
+      ...base,
+      debugPortProbe: async () => false,
+      waitForDebugPort: async () => true,
+      processRunner: () => process,
+    }).startOrReuse();
+    expect(started.ownershipToken).toBeTruthy();
+
+    await expect(
+      new EdgeProfileManager({
+        ...base,
+        debugPortProbe: async () => true,
+        ownershipProbe: async () => false,
+      }).startOrReuse(),
+    ).rejects.toMatchObject({ code: 'EDGE_PROFILE_OWNERSHIP_INVALID' });
+    await expect(
+      new EdgeProfileManager({
+        ...base,
+        debugPortProbe: async () => true,
+        ownershipProbe: async (_port, ownership) => ownership.token === started.ownershipToken,
+      }).startOrReuse(),
+    ).resolves.toMatchObject({ reused: true, ownershipToken: started.ownershipToken });
+  });
+
   it('classifies explicit auth, network, context and lost-session signals', async () => {
     const transport = new FakeTransport();
     const adapter = new EdgeStateAdapter(transport);
@@ -126,6 +168,23 @@ describe('dedicated Edge profile and CDP state adapter', () => {
       await expect(adapter.sample('target-1')).resolves.toMatchObject({ status });
       transport.value = { ...transport.value, [field]: false };
     }
+  });
+
+  it('does not infer Project identity from an untrusted hostname and selects only known identities', async () => {
+    const transport = new FakeTransport();
+    transport.value = {
+      ...transport.value,
+      url: 'https://chatgpt.com.evil.example/g/project-from-url/c/c1',
+      projectFingerprint: 'project-from-dom',
+      accountFingerprint: 'account-1',
+    };
+    const adapter = new EdgeStateAdapter(transport);
+    await expect(adapter.readPage('target-1')).resolves.toMatchObject({
+      url: 'https://chatgpt.com.evil.example/g/project-from-url/c/c1',
+      projectFingerprint: null,
+      accountFingerprint: null,
+    });
+    await expect(selectChatGptProjectTargets(transport, adapter)).resolves.toEqual([]);
   });
 
   it('binds the current message only as baseline and blocks identity mismatches', async () => {
@@ -165,5 +224,12 @@ describe('dedicated Edge profile and CDP state adapter', () => {
       ),
     ).rejects.toMatchObject({ code: 'SESSION_MISMATCH' });
     expect(SolBindingError).toBeDefined();
+  });
+
+  it('rejects a binding when the account identity is unknown', async () => {
+    const store = new SolSessionBindingStore({ store: new MemoryStore() });
+    await expect(store.bind(observation({ accountFingerprint: null }))).rejects.toMatchObject({
+      code: 'INVALID_BINDING',
+    });
   });
 });

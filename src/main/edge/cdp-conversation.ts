@@ -1,5 +1,6 @@
 import { EdgeStateAdapter, hashMessage } from './state-adapter.js';
 import type { CdpTransport, SolConversationController, SolConversationIdentity } from './types.js';
+import { hasKnownIdentity, isAllowedChatGptUrl } from './url-security.js';
 
 export interface CdpConversationControllerOptions {
   transport: CdpTransport;
@@ -32,32 +33,39 @@ export class CdpConversationController implements SolConversationController {
     accountFingerprint: string | null;
     reason: 'CONTEXT_RECOVERY' | 'ACTIVE_ROTATION';
   }): Promise<SolConversationIdentity> {
-    if (this.injectedCreate !== undefined) return this.injectedCreate(input);
+    if (!hasKnownIdentity(input.projectFingerprint) || !hasKnownIdentity(input.accountFingerprint)) {
+      throw new Error('A known Project and account identity are required to create a conversation.');
+    }
+    if (this.injectedCreate !== undefined) {
+      const conversation = await this.injectedCreate(input);
+      assertConversationIdentity(input.projectFingerprint, input.accountFingerprint, conversation);
+      return conversation;
+    }
     const targets = await this.transport.listTargets();
     const target =
       this.configuredTargetId === undefined
-        ? targets.find(
-            (candidate) => candidate.type === 'page' && /chatgpt\.com|chat\.openai\.com/i.test(candidate.url),
-          )
-        : targets.find((candidate) => candidate.id === this.configuredTargetId);
-    if (target === undefined) throw new Error('No ChatGPT target is available for creating a conversation.');
+        ? targets.find((candidate) => candidate.type === 'page' && isAllowedChatGptUrl(candidate.url))
+        : targets.find(
+            (candidate) =>
+              candidate.id === this.configuredTargetId &&
+              candidate.type === 'page' &&
+              isAllowedChatGptUrl(candidate.url),
+          );
+    if (target === undefined) throw new Error('No allowed ChatGPT target is available for creating a conversation.');
     const before = await this.adapter.sample(target.id);
-    if (before.projectFingerprint !== input.projectFingerprint)
+    if (!hasKnownIdentity(before.projectFingerprint) || before.projectFingerprint !== input.projectFingerprint)
       throw new Error('The active tab is not in the bound Project.');
-    if (
-      input.accountFingerprint !== null &&
-      before.accountFingerprint !== null &&
-      input.accountFingerprint !== before.accountFingerprint
-    ) {
+    if (!hasKnownIdentity(before.accountFingerprint) || input.accountFingerprint !== before.accountFingerprint) {
       throw new Error('The active tab is not in the bound account.');
     }
     await this.transport.evaluate<boolean>(target.id, NEW_CHAT_SCRIPT);
     const deadline = Date.now() + this.commandTimeoutMs;
     while (Date.now() < deadline) {
       for (const candidate of await this.transport.listTargets()) {
-        if (candidate.type !== 'page' || !/chatgpt\.com|chat\.openai\.com/i.test(candidate.url)) continue;
+        if (candidate.type !== 'page' || !isAllowedChatGptUrl(candidate.url)) continue;
         const observation = await this.adapter.sample(candidate.id);
         if (observation.projectFingerprint !== input.projectFingerprint) continue;
+        if (observation.accountFingerprint !== input.accountFingerprint) continue;
         if (candidate.id === before.targetId && observation.url === before.url) continue;
         if (observation.loginWall || observation.projectFingerprint === null) continue;
         return {
@@ -75,6 +83,13 @@ export class CdpConversationController implements SolConversationController {
   }
 
   async sendMessage(input: { conversation: SolConversationIdentity; text: string }): Promise<void> {
+    if (
+      !isAllowedChatGptUrl(input.conversation.url) ||
+      !hasKnownIdentity(input.conversation.projectFingerprint) ||
+      !hasKnownIdentity(input.conversation.accountFingerprint)
+    ) {
+      throw new Error('A known Project, account, and allowed ChatGPT URL are required to send a message.');
+    }
     const result = await this.transport.evaluate<{ sent?: boolean; inputHash?: string }>(
       input.conversation.targetId,
       sendMessageScript(input.text),
@@ -121,11 +136,27 @@ function sendMessageScript(text: string): string {
 }
 
 function conversationIdFromUrl(url: string): string | null {
+  if (!isAllowedChatGptUrl(url)) return null;
   try {
     const parts = new URL(url).pathname.split('/').filter(Boolean);
     const marker = parts.findIndex((part) => part === 'c' || part === 'conversation');
     return marker >= 0 ? (parts[marker + 1] ?? null) : (parts.at(-1) ?? null);
   } catch {
     return null;
+  }
+}
+
+function assertConversationIdentity(
+  projectFingerprint: string,
+  accountFingerprint: string,
+  conversation: SolConversationIdentity,
+): void {
+  if (
+    !isAllowedChatGptUrl(conversation.url) ||
+    conversation.projectFingerprint !== projectFingerprint ||
+    !hasKnownIdentity(conversation.accountFingerprint) ||
+    conversation.accountFingerprint !== accountFingerprint
+  ) {
+    throw new Error('The created conversation does not expose the bound Project and account.');
   }
 }

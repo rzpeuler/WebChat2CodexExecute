@@ -70,24 +70,62 @@ describe('phase eight notification service', () => {
     expect(logs[0]?.details.message).toBe('[REDACTED]');
   });
 
-  it('normalizes notification show failures into a structured result', () => {
+  it('allows one controlled retry after a notification show failure', () => {
+    let showAttempts = 0;
     const service = new NotificationService(() => ({
       show: () => {
-        throw new Error('notification backend unavailable');
+        showAttempts += 1;
+        if (showAttempts === 1) {
+          throw new Error('notification backend unavailable');
+        }
       },
     }));
 
-    expect(
-      service.notify({
-        project: 'Project',
-        taskId: 'task-1',
-        phase: 'phase-8.1',
-        suggestion: '重试',
-        error: new Error('runner failed'),
-      }),
-    ).toMatchObject({
+    const input = {
+      project: 'Project',
+      taskId: 'task-1',
+      phase: 'phase-8.1',
+      suggestion: '重试',
+      error: { code: 'PROCESS_OUTPUT_FAILED', message: 'runner failed' },
+    };
+
+    expect(service.notify(input)).toMatchObject({
       notified: false,
+      errorCode: 'PROCESS_OUTPUT_FAILED',
       deliveryError: { code: 'NOTIFICATION_SHOW_FAILED', message: 'notification backend unavailable' },
     });
+    expect(service.notify(input)).toMatchObject({ notified: true, errorCode: 'PROCESS_OUTPUT_FAILED' });
+    expect(service.notify(input)).toMatchObject({ notified: false, errorCode: 'PROCESS_OUTPUT_FAILED' });
+    expect(showAttempts).toBe(2);
+  });
+
+  it('stops retrying after the second failed notification show', () => {
+    let showAttempts = 0;
+    const service = new NotificationService(() => ({
+      show: () => {
+        showAttempts += 1;
+        throw new Error('notification backend unavailable');
+      },
+    }));
+    const input = {
+      project: 'Project',
+      taskId: 'task-1',
+      phase: 'phase-8.1',
+      suggestion: '重试',
+      error: { code: 'PROCESS_OUTPUT_FAILED', message: 'runner failed' },
+    };
+
+    expect(service.notify(input)).toMatchObject({
+      notified: false,
+      errorCode: 'PROCESS_OUTPUT_FAILED',
+      deliveryError: { code: 'NOTIFICATION_SHOW_FAILED' },
+    });
+    expect(service.notify(input)).toMatchObject({
+      notified: false,
+      errorCode: 'PROCESS_OUTPUT_FAILED',
+      deliveryError: { code: 'NOTIFICATION_SHOW_FAILED' },
+    });
+    expect(service.notify(input)).toMatchObject({ notified: false, errorCode: 'PROCESS_OUTPUT_FAILED' });
+    expect(showAttempts).toBe(2);
   });
 });

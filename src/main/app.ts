@@ -15,11 +15,14 @@ import {
 import { parseTopLevelState, type TopLevelState } from '../shared/contracts/top-level-state.js';
 import { createProjectConfigStore, defaultProjectConfigPath, ProjectConfigService } from './project/config.js';
 import { NotificationService } from './notify/index.js';
+import { createAutomationRuntime, type AutomationRuntime } from './automation-runtime.js';
+import type { ProjectConfig } from '../shared/contracts/project-config.js';
 
 const appDirectory = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 let ipcRegistered = false;
 let applicationState: ApplicationState | null = null;
+let automationRuntime: AutomationRuntime | null = null;
 
 const notificationService = new NotificationService(({ title, body }) => new Notification({ title, body }), {
   logger: (event, details) => console.warn(`[notification] ${event}`, details),
@@ -60,11 +63,42 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     }
     if (!ipcRegistered) {
       const projectConfigStore = createProjectConfigStore(defaultProjectConfigPath(app.getPath('userData')));
-      registerIpcHandlers(ipcMain, app.getVersion(), new ProjectConfigService(projectConfigStore), {
+      const projectConfigService = new ProjectConfigService(projectConfigStore);
+      const installRuntime = async (config: ProjectConfig): Promise<void> => {
+        automationRuntime?.stop();
+        automationRuntime = await createAutomationRuntime(config, app.getPath('userData'), notificationService);
+        automationRuntime.startPolling();
+      };
+      const savedConfigs = await projectConfigService.loadAll();
+      if (savedConfigs[0] !== undefined) {
+        void installRuntime(savedConfigs[0]).catch((error) => {
+          notificationService.notify({
+            project: savedConfigs[0]?.projectId ?? 'Web Chat 2 Codex',
+            taskId: null,
+            phase: 'INITIALIZATION',
+            suggestion: '请检查项目配置后重试。',
+            error,
+            level: 'NEEDS_USER',
+          });
+        });
+      }
+      registerIpcHandlers(ipcMain, app.getVersion(), projectConfigService, {
         trustedRendererUrl,
         getTrustedWindow: () => mainWindow,
+        onProjectConfigSaved: (config) =>
+          installRuntime(config).catch((error) => {
+            notificationService.notify({
+              project: config.projectId,
+              taskId: null,
+              phase: 'INITIALIZATION',
+              suggestion: '请检查项目配置后重试。',
+              error,
+              level: 'NEEDS_USER',
+            });
+          }),
         dashboard: {
           getSnapshot: () => {
+            if (automationRuntime !== null) return automationRuntime.orchestrator.getDashboardSnapshot();
             const current = state.coordinator.getState();
             return {
               revision: current.revision,
@@ -74,11 +108,14 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
               recentError: current.lastError,
             };
           },
-          executeCommand: async () => ({
-            accepted: false,
-            code: 'DASHBOARD_COMMAND_UNAVAILABLE',
-            message: '自动化循环尚未连接到状态面板',
-          }),
+          executeCommand: async (command) =>
+            automationRuntime === null
+              ? {
+                  accepted: false,
+                  code: 'DASHBOARD_COMMAND_UNAVAILABLE',
+                  message: '请先保存项目配置并完成 Sol 会话绑定。',
+                }
+              : automationRuntime.orchestrator.executeCommand(command),
         },
       });
       ipcRegistered = true;
@@ -97,6 +134,8 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     await mainWindow.loadFile(rendererPath);
     mainWindow.on('closed', () => {
       mainWindow = null;
+      automationRuntime?.stop();
+      automationRuntime = null;
       initializationGate.reset();
     });
   };

@@ -1,4 +1,5 @@
 import type { CdpTarget, CdpTransport } from './types.js';
+import { isAllowedCdpWebSocketUrl } from './url-security.js';
 
 export interface CdpTransportOptions {
   port: number;
@@ -21,6 +22,7 @@ export class CdpTransportError extends Error {
 
 export class HttpCdpTransport implements CdpTransport {
   private readonly endpoint: string;
+  private readonly port: number;
   private readonly fetchImpl: typeof fetch;
   private readonly webSocketFactory: (url: string) => WebSocket;
 
@@ -28,6 +30,7 @@ export class HttpCdpTransport implements CdpTransport {
     if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535) {
       throw new CdpTransportError('Invalid CDP port.');
     }
+    this.port = options.port;
     this.endpoint = `http://127.0.0.1:${options.port}`;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));
@@ -58,7 +61,10 @@ export class HttpCdpTransport implements CdpTransport {
   async sendCommand<T = unknown>(targetId: string, method: string, params: Record<string, unknown> = {}): Promise<T> {
     const targets = await this.listTargets();
     const target = targets.find((candidate) => candidate.id === targetId);
-    if (target?.webSocketDebuggerUrl === undefined) {
+    if (
+      target?.webSocketDebuggerUrl === undefined ||
+      !isAllowedCdpWebSocketUrl(target.webSocketDebuggerUrl, this.port)
+    ) {
       throw new CdpTransportError(`CDP target ${targetId} has no WebSocket debugger endpoint.`);
     }
     const socket = this.webSocketFactory(target.webSocketDebuggerUrl);

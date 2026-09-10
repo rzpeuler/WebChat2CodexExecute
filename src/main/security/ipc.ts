@@ -1,6 +1,6 @@
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from 'electron';
 import type { RuntimeInfo, RendererApi } from '../../shared/contracts/renderer-api.js';
-import type { ProjectConfigInput } from '../../shared/contracts/project-config.js';
+import type { ProjectConfigInput, ProjectConfig } from '../../shared/contracts/project-config.js';
 import {
   sanitizeDashboardSnapshot,
   validateDashboardCommand,
@@ -29,6 +29,7 @@ export interface DashboardIpcOptions {
 export interface IpcHandlerOptions {
   trustedRendererUrl: string;
   getTrustedWindow?: () => BrowserWindow | null;
+  onProjectConfigSaved?: (config: ProjectConfig) => void | Promise<void>;
   dashboard?: DashboardIpcOptions;
 }
 
@@ -137,10 +138,12 @@ export function registerIpcHandlers(
     assertNonEmptyString(localPath, 'localPath');
     return projectConfigService.scan(localPath);
   });
-  ipcMain.handle(PROJECT_CONFIG_SAVE_CHANNEL, (event, config: unknown) => {
+  ipcMain.handle(PROJECT_CONFIG_SAVE_CHANNEL, async (event, config: unknown) => {
     assertTrustedSender(event, options);
     assertProjectConfigInput(config);
-    return projectConfigService.save(config);
+    const saved = await projectConfigService.save(config);
+    void options.onProjectConfigSaved?.(saved);
+    return saved;
   });
   ipcMain.handle(PROJECT_CONFIG_LIST_CHANNEL, (event) => {
     assertTrustedSender(event, options);

@@ -8,6 +8,7 @@ import type {
   SolSessionBinding,
   SolSessionState,
 } from './types.js';
+import { hasKnownIdentity, isAllowedChatGptUrl } from './url-security.js';
 
 export type SolBindingErrorCode =
   | 'BINDING_MISSING'
@@ -54,6 +55,11 @@ export function parseSolSessionState(value: unknown): SolSessionState {
   ) {
     throw new TypeError('Invalid Sol session state metadata.');
   }
+  for (const field of ['lastContextRecoveryInputHash', 'lastActiveRotationInputHash'] as const) {
+    if (record[field] !== undefined && record[field] !== null && typeof record[field] !== 'string') {
+      throw new TypeError(`Invalid Sol session ${field}.`);
+    }
+  }
   return record as unknown as SolSessionState;
 }
 
@@ -78,8 +84,8 @@ export class SolSessionBindingStore {
   async load(): Promise<SolSessionState | null> {
     if (this.loadPromise !== null) return this.loadPromise;
     this.loadPromise = this.store.load().then((value) => {
-      this.state = value;
-      return value;
+      this.state = value === null ? null : normalizeState(value);
+      return this.state;
     });
     try {
       return await this.loadPromise;
@@ -99,7 +105,12 @@ export class SolSessionBindingStore {
     if (observation.loginWall || observation.status === 'AUTH_REQUIRED') {
       throw new SolBindingError('AUTH_REQUIRED', 'A manual login is required before binding a Sol conversation.');
     }
-    if (observation.projectFingerprint === null || observation.url === '' || conversationId === null) {
+    if (
+      !isAllowedChatGptUrl(observation.url) ||
+      !hasKnownIdentity(observation.projectFingerprint) ||
+      !hasKnownIdentity(observation.accountFingerprint) ||
+      conversationId === null
+    ) {
       throw new SolBindingError(
         'INVALID_BINDING',
         'The selected tab does not expose a stable Project conversation identity.',
@@ -133,6 +144,8 @@ export class SolSessionBindingStore {
       lastActiveRotationKey: null,
       paused: false,
       pauseReason: null,
+      lastContextRecoveryInputHash: null,
+      lastActiveRotationInputHash: null,
       updatedAt: now,
     };
     await this.store.save(next);
@@ -199,9 +212,32 @@ export class SolSessionBindingStore {
     return cloneState(next);
   }
 
-  async markActiveRotation(key: string): Promise<SolSessionState> {
+  async prepareContextRecoveryAttempt(eventId: string, attempts: number, rawInput: string): Promise<SolSessionState> {
     const current = await this.requireState();
-    const next = { ...current, lastActiveRotationKey: key, updatedAt: this.now().toISOString() };
+    const next: SolSessionState = {
+      ...current,
+      lastContextRecoveryEventId: eventId,
+      lastContextRecoveryInputHash: hashRawInput(rawInput),
+      lastRawInput: rawInput,
+      lastRawInputHash: hashRawInput(rawInput),
+      contextRecoveryAttempts: attempts,
+      paused: false,
+      pauseReason: null,
+      updatedAt: this.now().toISOString(),
+    };
+    await this.store.save(next);
+    this.state = next;
+    return cloneState(next);
+  }
+
+  async markActiveRotation(key: string, inputHash: string | null = null): Promise<SolSessionState> {
+    const current = await this.requireState();
+    const next: SolSessionState = {
+      ...current,
+      lastActiveRotationKey: key,
+      lastActiveRotationInputHash: inputHash,
+      updatedAt: this.now().toISOString(),
+    };
     await this.store.save(next);
     this.state = next;
     return cloneState(next);
@@ -221,12 +257,16 @@ export class SolSessionBindingStore {
   assertProjectAndAccount(identity: Pick<SolConversationIdentity, 'projectFingerprint' | 'accountFingerprint'>): void {
     const current = this.state;
     if (current === null) throw new SolBindingError('BINDING_MISSING', 'No Sol conversation is bound.');
-    if (current.projectFingerprint !== identity.projectFingerprint) {
+    if (
+      !hasKnownIdentity(current.projectFingerprint) ||
+      !hasKnownIdentity(identity.projectFingerprint) ||
+      current.projectFingerprint !== identity.projectFingerprint
+    ) {
       throw new SolBindingError('PROJECT_MISMATCH', 'The target conversation belongs to a different ChatGPT Project.');
     }
     if (
-      current.accountFingerprint !== null &&
-      identity.accountFingerprint !== null &&
+      !hasKnownIdentity(current.accountFingerprint) ||
+      !hasKnownIdentity(identity.accountFingerprint) ||
       current.accountFingerprint !== identity.accountFingerprint
     ) {
       throw new SolBindingError('ACCOUNT_MISMATCH', 'The target conversation belongs to a different account.');
@@ -265,6 +305,7 @@ export function hashRawInput(input: string): string {
 }
 
 function conversationIdFromUrl(url: string): string | null {
+  if (!isAllowedChatGptUrl(url)) return null;
   try {
     const parts = new URL(url).pathname.split('/').filter(Boolean);
     const marker = parts.findIndex((part) => part === 'c' || part === 'conversation');
@@ -277,6 +318,15 @@ function conversationIdFromUrl(url: string): string | null {
 function cloneState(value: SolSessionState): SolSessionState {
   return {
     ...value,
+    conversationChain: value.conversationChain.map((entry) => ({ ...entry })),
+  };
+}
+
+function normalizeState(value: SolSessionState): SolSessionState {
+  return {
+    ...value,
+    lastContextRecoveryInputHash: value.lastContextRecoveryInputHash ?? null,
+    lastActiveRotationInputHash: value.lastActiveRotationInputHash ?? null,
     conversationChain: value.conversationChain.map((entry) => ({ ...entry })),
   };
 }

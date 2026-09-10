@@ -46,8 +46,11 @@ export interface NotificationServiceOptions {
   logger?: (event: string, details: Record<string, unknown>) => void;
 }
 
+const MAX_NOTIFICATION_ATTEMPTS = 2;
+
 export class NotificationService {
   private readonly deliveredKeys = new Set<string>();
+  private readonly deliveryAttempts = new Map<string, number>();
   private readonly logger: ((event: string, details: Record<string, unknown>) => void) | undefined;
 
   constructor(
@@ -70,7 +73,9 @@ export class NotificationService {
     if (this.deliveredKeys.has(dedupeKey)) {
       return { notified: false, dedupeKey, errorCode, level, summary };
     }
-    this.deliveredKeys.add(dedupeKey);
+
+    const attempts = (this.deliveryAttempts.get(dedupeKey) ?? 0) + 1;
+    this.deliveryAttempts.set(dedupeKey, attempts);
 
     const title = `Web Chat 2 Codex · ${level}`;
     let notification: NotificationLike;
@@ -105,17 +110,24 @@ export class NotificationService {
         { code: 'NOTIFICATION_SHOW_FAILED', message: sanitizeErrorMessage(error, '通知显示失败') },
       );
     }
+    this.deliveryAttempts.delete(dedupeKey);
+    this.deliveredKeys.add(dedupeKey);
     return { notified: true, dedupeKey, errorCode, level, summary };
   }
 
   clearDedupe(): void {
     this.deliveredKeys.clear();
+    this.deliveryAttempts.clear();
   }
 
   private deliveryFailure(
     result: Omit<NotificationResult, 'deliveryError'>,
     deliveryError: NotificationDeliveryError,
   ): NotificationResult {
+    if ((this.deliveryAttempts.get(result.dedupeKey) ?? 0) >= MAX_NOTIFICATION_ATTEMPTS) {
+      this.deliveredKeys.add(result.dedupeKey);
+      this.deliveryAttempts.delete(result.dedupeKey);
+    }
     this.safeLog('notification-delivery-error', {
       code: deliveryError.code,
       errorCode: result.errorCode,

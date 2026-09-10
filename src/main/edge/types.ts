@@ -52,6 +52,10 @@ export interface EdgeProfileOptions {
   env?: NodeJS.ProcessEnv;
   now?: () => Date;
   onProcessExit?: (cause: 'exit' | 'error') => void;
+  ownershipFilePath?: string;
+  ownershipProbe?: (port: number, ownership: EdgeProfileOwnership) => Promise<boolean>;
+  ownershipFetchImpl?: typeof fetch;
+  ownershipWebSocketFactory?: (url: string) => WebSocket;
 }
 
 export interface EdgeProfileHandle {
@@ -61,6 +65,16 @@ export interface EdgeProfileHandle {
   process: EdgeProcess | null;
   reused: boolean;
   loginRequired: boolean;
+  ownershipToken?: string;
+}
+
+export interface EdgeProfileOwnership {
+  version: 1;
+  token: string;
+  executablePath: string;
+  userDataDirectory: string;
+  remoteDebuggingPort: number;
+  registeredAt: string;
 }
 
 export interface CdpTarget {
@@ -149,6 +163,8 @@ export interface SolSessionState extends SolSessionBinding {
   lastActiveRotationKey: string | null;
   paused: boolean;
   pauseReason: string | null;
+  lastContextRecoveryInputHash?: string | null;
+  lastActiveRotationInputHash?: string | null;
 }
 
 export interface SolSessionStateStore extends StateSnapshotStore<SolSessionState> {}
