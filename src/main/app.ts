@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, Notification } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { acquireSingleInstanceLock, type SingleInstanceHost } from './lifecycle/single-instance.js';
@@ -14,11 +14,16 @@ import {
 } from './state/coordinator.js';
 import { parseTopLevelState, type TopLevelState } from '../shared/contracts/top-level-state.js';
 import { createProjectConfigStore, defaultProjectConfigPath, ProjectConfigService } from './project/config.js';
+import { NotificationService } from './notify/index.js';
 
 const appDirectory = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 let ipcRegistered = false;
 let applicationState: ApplicationState | null = null;
+
+const notificationService = new NotificationService(({ title, body }) => new Notification({ title, body }), {
+  logger: (event, details) => console.warn(`[notification] ${event}`, details),
+});
 
 function focusMainWindow(): void {
   if (mainWindow === null) {
@@ -58,6 +63,23 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
       registerIpcHandlers(ipcMain, app.getVersion(), new ProjectConfigService(projectConfigStore), {
         trustedRendererUrl,
         getTrustedWindow: () => mainWindow,
+        dashboard: {
+          getSnapshot: () => {
+            const current = state.coordinator.getState();
+            return {
+              revision: current.revision,
+              updatedAt: current.updatedAt,
+              status: current.status,
+              taskId: current.activeTaskId,
+              recentError: current.lastError,
+            };
+          },
+          executeCommand: async () => ({
+            accepted: false,
+            code: 'DASHBOARD_COMMAND_UNAVAILABLE',
+            message: '自动化循环尚未连接到状态面板',
+          }),
+        },
       });
       ipcRegistered = true;
     }
@@ -115,6 +137,14 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     },
     (diagnostic, cause) => {
       console.error('[application] initialization failed', { diagnostic, cause });
+      notificationService.notify({
+        project: 'Web Chat 2 Codex',
+        taskId: null,
+        phase: 'initialization',
+        suggestion: '检查应用状态后重试。',
+        error: cause,
+        level: 'FATAL',
+      });
     },
   );
 

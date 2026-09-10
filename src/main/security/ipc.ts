@@ -1,6 +1,15 @@
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from 'electron';
 import type { RuntimeInfo, RendererApi } from '../../shared/contracts/renderer-api.js';
 import type { ProjectConfigInput } from '../../shared/contracts/project-config.js';
+import {
+  sanitizeDashboardSnapshot,
+  validateDashboardCommand,
+  type DashboardCommand,
+  type DashboardCommandResult,
+  type DashboardSnapshot,
+  type DashboardSnapshotSource,
+} from '../../shared/contracts/dashboard.js';
+import { sanitizeSafeText } from '../../shared/contracts/safe-text.js';
 import type { ProjectConfigService } from '../project/config.js';
 
 export const RUNTIME_INFO_CHANNEL = 'app:get-runtime-info';
@@ -8,10 +17,19 @@ export const PROJECT_SCAN_CHANNEL = 'project:scan';
 export const PROJECT_CONFIG_SAVE_CHANNEL = 'project-config:save';
 export const PROJECT_CONFIG_LIST_CHANNEL = 'project-config:list';
 export const SOL_PROMPT_PREVIEW_CHANNEL = 'sol:prompt-preview';
+export const DASHBOARD_SNAPSHOT_CHANNEL = 'dashboard:get-snapshot';
+export const DASHBOARD_COMMAND_CHANNEL = 'dashboard:command';
+
+export interface DashboardIpcOptions {
+  getSnapshot?: () =>
+    DashboardSnapshotSource | DashboardSnapshot | Promise<DashboardSnapshotSource | DashboardSnapshot>;
+  executeCommand?: (command: DashboardCommand) => DashboardCommandResult | Promise<DashboardCommandResult>;
+}
 
 export interface IpcHandlerOptions {
   trustedRendererUrl: string;
   getTrustedWindow?: () => BrowserWindow | null;
+  dashboard?: DashboardIpcOptions;
 }
 
 export class IpcSecurityError extends Error {
@@ -74,6 +92,42 @@ export function registerIpcHandlers(
       appName: 'Web Chat 2 Codex',
       version,
     };
+  });
+  ipcMain.handle(DASHBOARD_SNAPSHOT_CHANNEL, async (event): Promise<DashboardSnapshot> => {
+    assertTrustedSender(event, options);
+    const source = await options.dashboard?.getSnapshot?.();
+    return sanitizeDashboardSnapshot(source ?? {});
+  });
+  ipcMain.handle(DASHBOARD_COMMAND_CHANNEL, async (event, value: unknown): Promise<DashboardCommandResult> => {
+    assertTrustedSender(event, options);
+    let command: DashboardCommand;
+    try {
+      command = validateDashboardCommand(value);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid dashboard command';
+      throw new IpcSecurityError('IPC_INVALID_ARGUMENT', message);
+    }
+    if (options.dashboard?.executeCommand === undefined) {
+      return {
+        accepted: false,
+        code: 'DASHBOARD_COMMAND_UNAVAILABLE',
+        message: '当前应用未连接自动化命令执行器',
+      };
+    }
+    try {
+      const result = await options.dashboard.executeCommand(command);
+      return {
+        accepted: result.accepted === true,
+        code: sanitizeSafeText(result.code, 64) || 'DASHBOARD_COMMAND_RESULT',
+        message: sanitizeSafeText(result.message, 240) || '命令已处理',
+      };
+    } catch (error) {
+      return {
+        accepted: false,
+        code: 'DASHBOARD_COMMAND_FAILED',
+        message: sanitizeSafeText(error instanceof Error ? error.message : '命令执行失败', 240) || '命令执行失败',
+      };
+    }
   });
   if (projectConfigService === undefined) {
     return;

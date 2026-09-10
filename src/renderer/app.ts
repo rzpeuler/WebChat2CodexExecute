@@ -1,4 +1,5 @@
 import type { ProjectConfigInput, ProjectScanResult } from '../shared/contracts/project-config.js';
+import type { DashboardCommand, DashboardCommandName, DashboardSnapshot } from '../shared/contracts/dashboard.js';
 
 const statusElement = document.querySelector<HTMLElement>('#status');
 const versionElement = document.querySelector<HTMLElement>('#version');
@@ -10,7 +11,17 @@ const detailsElement = document.querySelector<HTMLElement>('#project-details');
 const promptElement = document.querySelector<HTMLElement>('#prompt-preview');
 const scanButton = document.querySelector<HTMLButtonElement>('#scan');
 const previewButton = document.querySelector<HTMLButtonElement>('#preview');
+const dashboardProjectElement = document.querySelector<HTMLElement>('#dashboard-project');
+const dashboardSolElement = document.querySelector<HTMLElement>('#dashboard-sol');
+const dashboardStageElement = document.querySelector<HTMLElement>('#dashboard-stage');
+const dashboardTaskElement = document.querySelector<HTMLElement>('#dashboard-task');
+const dashboardRevisionsElement = document.querySelector<HTMLElement>('#dashboard-revisions');
+const dashboardLunaElement = document.querySelector<HTMLElement>('#dashboard-luna');
+const dashboardCommitsElement = document.querySelector<HTMLElement>('#dashboard-commits');
+const dashboardErrorElement = document.querySelector<HTMLElement>('#dashboard-error');
 let scanResult: ProjectScanResult | null = null;
+
+const dangerousDashboardCommands = new Set<DashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
 
 function setStatus(message: string): void {
   if (statusElement !== null) {
@@ -37,6 +48,57 @@ function getConfigInput(): ProjectConfigInput {
   };
 }
 
+function renderDashboard(snapshot: DashboardSnapshot): void {
+  if (dashboardProjectElement !== null) {
+    dashboardProjectElement.textContent = snapshot.project?.name ?? '未选择项目';
+  }
+  if (dashboardSolElement !== null) {
+    dashboardSolElement.textContent =
+      snapshot.activeSolSession === null
+        ? '无'
+        : `${snapshot.activeSolSession.sessionId} / ${snapshot.activeSolSession.status}`;
+  }
+  if (dashboardStageElement !== null) dashboardStageElement.textContent = `${snapshot.stage} / ${snapshot.status}`;
+  if (dashboardTaskElement !== null) dashboardTaskElement.textContent = snapshot.taskId ?? '无';
+  if (dashboardRevisionsElement !== null) {
+    dashboardRevisionsElement.textContent = `${snapshot.governanceRevision ?? '—'} / ${snapshot.architectureRevisions.join(', ') || '—'}`;
+  }
+  if (dashboardLunaElement !== null) {
+    dashboardLunaElement.textContent =
+      snapshot.luna.sessionId === null ? snapshot.luna.status : `${snapshot.luna.status} / ${snapshot.luna.sessionId}`;
+  }
+  if (dashboardCommitsElement !== null) {
+    dashboardCommitsElement.textContent = `本地 ${snapshot.commits.local ?? '—'} / 远端 ${snapshot.commits.remote ?? '—'}`;
+  }
+  if (dashboardErrorElement !== null) {
+    dashboardErrorElement.textContent =
+      snapshot.recentError === null ? '无' : `${snapshot.recentError.code}: ${snapshot.recentError.message}`;
+  }
+}
+
+async function refreshDashboard(): Promise<void> {
+  try {
+    renderDashboard(await window.desktopApi.getDashboardSnapshot());
+  } catch {
+    if (dashboardErrorElement !== null) dashboardErrorElement.textContent = '状态面板不可用';
+  }
+}
+
+function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand | null {
+  const command = button.dataset.dashboardCommand;
+  if (
+    command === undefined ||
+    !['start', 'pause', 'retry-current-stage', 'rebind', 'open-edge', 'open-project', 'view-report'].includes(command)
+  ) {
+    return null;
+  }
+  if (dangerousDashboardCommands.has(command as DashboardCommandName)) {
+    if (!window.confirm(`确认执行“${command}”？`)) return null;
+    return { command: command as 'start' | 'pause' | 'retry-current-stage' | 'rebind', confirm: true };
+  }
+  return { command: command as 'open-edge' | 'open-project' | 'view-report' };
+}
+
 if (statusElement !== null && versionElement !== null) {
   window.desktopApi
     .getRuntimeInfo()
@@ -49,6 +111,22 @@ if (statusElement !== null && versionElement !== null) {
       versionElement.textContent = '运行时信息不可用';
     });
 }
+
+void refreshDashboard();
+
+document.querySelectorAll<HTMLButtonElement>('[data-dashboard-command]').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const command = dashboardCommandFromButton(button);
+    if (command === null) return;
+    try {
+      const result = await window.desktopApi.executeDashboardCommand(command);
+      setStatus(result.message);
+      await refreshDashboard();
+    } catch {
+      setStatus('状态面板命令执行失败');
+    }
+  });
+});
 
 scanButton?.addEventListener('click', async () => {
   if (localPathElement === null || detailsElement === null) return;

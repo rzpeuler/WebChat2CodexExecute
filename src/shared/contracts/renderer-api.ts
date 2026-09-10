@@ -4,6 +4,7 @@ export interface RuntimeInfo {
 }
 
 import type { ProjectConfig, ProjectConfigInput, ProjectScanResult } from './project-config.js';
+import type { DashboardCommand, DashboardCommandResult, DashboardSnapshot } from './dashboard.js';
 
 export interface SolPromptPreview {
   initializationPrompt: string;
@@ -16,4 +17,6 @@ export interface RendererApi {
   saveProjectConfig(config: ProjectConfigInput): Promise<ProjectConfig>;
   loadProjectConfigs(): Promise<ProjectConfig[]>;
   previewSolPrompt(config: ProjectConfigInput): Promise<SolPromptPreview>;
+  getDashboardSnapshot(): Promise<DashboardSnapshot>;
+  executeDashboardCommand(command: DashboardCommand): Promise<DashboardCommandResult>;
 }

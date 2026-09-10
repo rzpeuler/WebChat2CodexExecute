@@ -28,6 +28,52 @@
       </form>
       <pre id="project-details" class="preview" aria-live="polite"></pre>
       <pre id="prompt-preview" class="preview" aria-live="polite"></pre>
+      <section class="panel dashboard" aria-labelledby="dashboard-title">
+        <p class="eyebrow" id="dashboard-title">AUTOMATION DASHBOARD</p>
+        <dl class="dashboard-grid">
+          <div>
+            <dt>项目</dt>
+            <dd id="dashboard-project">未选择项目</dd>
+          </div>
+          <div>
+            <dt>Sol 会话</dt>
+            <dd id="dashboard-sol">无</dd>
+          </div>
+          <div>
+            <dt>阶段 / 状态</dt>
+            <dd id="dashboard-stage">INITIALIZATION / IDLE</dd>
+          </div>
+          <div>
+            <dt>任务</dt>
+            <dd id="dashboard-task">无</dd>
+          </div>
+          <div>
+            <dt>治理 / 架构</dt>
+            <dd id="dashboard-revisions">— / —</dd>
+          </div>
+          <div>
+            <dt>Luna</dt>
+            <dd id="dashboard-luna">NOT_STARTED</dd>
+          </div>
+          <div>
+            <dt>Commit</dt>
+            <dd id="dashboard-commits">本地 — / 远端 —</dd>
+          </div>
+          <div>
+            <dt>最近异常</dt>
+            <dd id="dashboard-error">无</dd>
+          </div>
+        </dl>
+        <div class="actions" aria-label="自动化命令">
+          <button type="button" data-dashboard-command="start">启动</button>
+          <button type="button" data-dashboard-command="pause">暂停</button>
+          <button type="button" data-dashboard-command="retry-current-stage">重试当前阶段</button>
+          <button type="button" data-dashboard-command="rebind">重新绑定</button>
+          <button type="button" data-dashboard-command="open-edge">打开 Edge</button>
+          <button type="button" data-dashboard-command="open-project">打开项目</button>
+          <button type="button" data-dashboard-command="view-report">查看报告</button>
+        </div>
+      </section>
     </main>
     <script type="module" src="./app.js"></script>
   </body>
