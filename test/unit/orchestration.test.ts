@@ -143,6 +143,305 @@ function baseOptions(overrides: Partial<OrchestratorOptions> = {}): Orchestrator
 }
 
 describe('P0 main orchestration', () => {
+  it('keeps the state paused when pause races with successful context recovery', async () => {
+    let releaseRecovery!: (value: { status: string }) => void;
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation('', 'CONTEXT_LIMIT')) },
+      contextRecovery: {
+        recover: vi.fn(
+          () =>
+            new Promise<{ status: string }>((resolve) => {
+              releaseRecovery = resolve;
+            }),
+        ),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    const round = orchestrator.runRound();
+    await vi.waitFor(() => expect(options.contextRecovery?.recover).toHaveBeenCalledOnce());
+
+    await orchestrator.pause();
+    releaseRecovery({ status: 'RECOVERED' });
+    await round;
+
+    expect(orchestrator.getState()).toMatchObject({ active: false, status: 'PAUSED', phase: 'PAUSED' });
+  });
+
+  it('locks the whole dashboard governance operation and allows only navigation during it', async () => {
+    let releaseOperation!: () => void;
+    const operation = new Promise<void>((resolve) => {
+      releaseOperation = resolve;
+    });
+    const orchestrator = new MainOrchestrator(
+      baseOptions({
+        callbacks: {
+          rebind: vi.fn(async () => undefined),
+          openEdge: vi.fn(async () => undefined),
+          openProject: vi.fn(async () => undefined),
+          governanceConsistencyCheck: vi.fn(async () => undefined),
+        },
+      }),
+    );
+
+    const first = orchestrator.runDashboardOperation(() => operation);
+    await vi.waitFor(() =>
+      expect(orchestrator.getDashboardSnapshot().actions['governance-consistency-check'].busy).toBe(true),
+    );
+    expect(orchestrator.getDashboardSnapshot().actions.rebind).toMatchObject({ enabled: false, busy: true });
+    expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({ enabled: false, busy: true });
+    expect(orchestrator.getDashboardSnapshot().actions['open-edge']).toEqual({
+      enabled: true,
+      busy: false,
+      reason: null,
+    });
+    await expect(orchestrator.runDashboardOperation(async () => undefined)).rejects.toMatchObject({
+      code: 'DASHBOARD_ACTION_BUSY',
+    });
+
+    releaseOperation();
+    await first;
+    expect(orchestrator.getDashboardSnapshot().actions['governance-consistency-check'].busy).toBe(false);
+  });
+
+  it('keeps the same navigation action single-flight while allowing it during a round', async () => {
+    let releaseOpenEdge!: () => void;
+    const openEdge = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseOpenEdge = resolve;
+        }),
+    );
+    const orchestrator = new MainOrchestrator(baseOptions({ callbacks: { openEdge } }));
+
+    const first = orchestrator.executeCommand({ command: 'open-edge' });
+    await vi.waitFor(() => expect(orchestrator.getDashboardSnapshot().actions['open-edge'].busy).toBe(true));
+    await expect(orchestrator.executeCommand({ command: 'open-edge' })).resolves.toMatchObject({
+      accepted: false,
+      code: 'DASHBOARD_ACTION_BUSY',
+    });
+    releaseOpenEdge();
+    await expect(first).resolves.toMatchObject({ accepted: true });
+  });
+
+  it('does not start again after a Sol protocol error has blocked the old output', async () => {
+    const options = baseOptions({ edge: { observe: vi.fn(async () => observation(`${taskText()}\n${taskText()}`)) } });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    await orchestrator.runRound();
+
+    const before = orchestrator.getState();
+    expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({ enabled: false, busy: false });
+    await expect(orchestrator.start()).resolves.toMatchObject({
+      status: 'PAUSED',
+      message: expect.stringContaining('新的 Sol 输出'),
+    });
+    await expect(orchestrator.executeCommand({ command: 'start', confirm: true })).resolves.toMatchObject({
+      accepted: false,
+      code: 'DASHBOARD_ACTION_UNAVAILABLE',
+      message: expect.stringContaining('新的 Sol 输出'),
+    });
+    expect(orchestrator.getState()).toMatchObject({ active: before.active, recentError: before.recentError });
+  });
+
+  it('rechecks action state before executing commands and keeps open navigation available while a round is busy', async () => {
+    let releaseObservation!: (value: EdgeSolObservation) => void;
+    const openEdge = vi.fn(async () => undefined);
+    const options = baseOptions({
+      edge: {
+        observe: vi.fn(
+          () =>
+            new Promise<EdgeSolObservation>((resolve) => {
+              releaseObservation = resolve;
+            }),
+        ),
+      },
+      callbacks: { openEdge },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    const running = orchestrator.runRound();
+    await vi.waitFor(() => expect(options.edge.observe).toHaveBeenCalledOnce());
+
+    await expect(orchestrator.executeCommand({ command: 'retry-current-stage', confirm: true })).resolves.toEqual({
+      accepted: false,
+      code: 'DASHBOARD_ACTION_BUSY',
+      message: '该动作正在处理中，请稍候。',
+    });
+    await expect(orchestrator.executeCommand({ command: 'open-edge' })).resolves.toEqual({
+      accepted: true,
+      code: 'OK',
+      message: '命令已完成。',
+    });
+    expect(openEdge).toHaveBeenCalledOnce();
+
+    releaseObservation(observation(''));
+    await running;
+    await expect(orchestrator.executeCommand({ command: 'retry-current-stage', confirm: true })).resolves.toMatchObject(
+      {
+        accepted: false,
+        code: 'DASHBOARD_ACTION_UNAVAILABLE',
+      },
+    );
+  });
+
+  it.each([
+    'ARCHITECTURE_FREEZE_FETCH_FAILED',
+    'PROCESS_SPAWN_FAILED',
+    'PROCESS_WAIT_FAILED',
+    'COMMAND_FAILED',
+    'COMMIT_FAILED',
+    'GOVERNANCE_CHANGE_COMMIT_FAILED',
+    'GOVERNANCE_RECONCILIATION_COMMIT_FAILED',
+    'NETWORK_ERROR',
+  ])('marks %s as retryable in the dashboard', async (code) => {
+    const options = baseOptions({
+      edge: {
+        observe: vi.fn(async () => {
+          const error = new Error(code);
+          Object.assign(error, { code });
+          throw error;
+        }),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    await orchestrator.runRound();
+    expect(orchestrator.getDashboardSnapshot().actions['retry-current-stage']).toEqual({
+      enabled: true,
+      busy: false,
+      reason: null,
+    });
+  });
+
+  it.each([
+    'ARCHITECTURE_FREEZE_URL_INVALID',
+    'ARCHITECTURE_FREEZE_PATH_UNSAFE',
+    'ARCHITECTURE_FREEZE_HASH_MISMATCH',
+    'INVALID_RESULT',
+    'BASELINE_CHANGED',
+    'GOVERNANCE_RECONCILIATION_PROTOCOL_INVALID',
+    'GOVERNANCE_RECONCILIATION_INVALID',
+    'GOVERNANCE_CHANGE_ID_CONFLICT',
+  ])('requires new Sol output for non-retryable error %s', async (code) => {
+    const options = baseOptions({
+      edge: {
+        observe: vi.fn(async () => {
+          const error = new Error(code);
+          Object.assign(error, { code });
+          throw error;
+        }),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    await orchestrator.runRound();
+    expect(orchestrator.getDashboardSnapshot().actions['retry-current-stage']).toMatchObject({
+      enabled: false,
+      reason: expect.stringContaining('新的 Sol 输出'),
+    });
+  });
+
+  it.each(['PROTECTED_PATH', 'UNAUTHORIZED_CHANGE'])('gates both start and retry for %s', async (code) => {
+    const options = baseOptions({
+      edge: {
+        observe: vi.fn(async () => {
+          const error = new Error(code);
+          Object.assign(error, { code });
+          throw error;
+        }),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    await orchestrator.runRound();
+
+    expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({
+      enabled: false,
+      reason: expect.stringContaining('新的 Sol 输出'),
+    });
+    expect(orchestrator.getDashboardSnapshot().actions['retry-current-stage']).toMatchObject({
+      enabled: false,
+      reason: expect.stringContaining('新的 Sol 输出'),
+    });
+    await expect(orchestrator.start()).resolves.toMatchObject({
+      status: 'PAUSED',
+      message: expect.stringContaining('新的 Sol 输出'),
+    });
+    await expect(orchestrator.executeCommand({ command: 'start', confirm: true })).resolves.toMatchObject({
+      accepted: false,
+      code: 'DASHBOARD_ACTION_UNAVAILABLE',
+      message: expect.stringContaining('新的 Sol 输出'),
+    });
+  });
+
+  it('computes dashboard action availability from state and in-flight work', async () => {
+    let releaseObservation!: (value: EdgeSolObservation) => void;
+    const options = baseOptions({
+      edge: {
+        observe: vi.fn(
+          () =>
+            new Promise<EdgeSolObservation>((resolve) => {
+              releaseObservation = resolve;
+            }),
+        ),
+      },
+      callbacks: {
+        rebind: vi.fn(async () => undefined),
+        governanceConsistencyCheck: vi.fn(async () => undefined),
+        openEdge: vi.fn(async () => undefined),
+        openProject: vi.fn(async () => undefined),
+        viewReport: vi.fn(async () => undefined),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    expect(orchestrator.getDashboardSnapshot().actions.start.enabled).toBe(true);
+    await orchestrator.start();
+    const running = orchestrator.runRound();
+    await vi.waitFor(() => expect(options.edge.observe).toHaveBeenCalledOnce());
+    const busy = orchestrator.getDashboardSnapshot().actions;
+    expect(busy.start).toMatchObject({ enabled: false, busy: true });
+    expect(busy['retry-current-stage']).toMatchObject({ enabled: false, busy: true });
+    expect(busy.pause).toEqual({ enabled: true, busy: false, reason: null });
+
+    releaseObservation(observation(''));
+    await running;
+    expect(orchestrator.getDashboardSnapshot().actions.pause.enabled).toBe(true);
+  });
+
+  it('allows retry for recoverable errors and asks Sol for a new output on protocol errors', async () => {
+    const recoverable = baseOptions({
+      edge: {
+        observe: vi.fn(async () => {
+          const error = new Error('network unavailable');
+          Object.assign(error, { code: 'NETWORK_ERROR' });
+          throw error;
+        }),
+      },
+    });
+    const retryable = new MainOrchestrator(recoverable);
+    await retryable.start();
+    await retryable.runRound();
+    expect(retryable.getDashboardSnapshot().actions['retry-current-stage']).toEqual({
+      enabled: true,
+      busy: false,
+      reason: null,
+    });
+
+    const protocol = baseOptions({
+      edge: { observe: vi.fn(async () => observation(`${taskText()}\n${taskText()}`)) },
+    });
+    const blocked = new MainOrchestrator(protocol);
+    await blocked.start();
+    await blocked.runRound();
+    expect(blocked.getDashboardSnapshot().actions['retry-current-stage']).toMatchObject({
+      enabled: false,
+      busy: false,
+    });
+    expect(blocked.getDashboardSnapshot().actions['retry-current-stage'].reason).toContain('新的 Sol 输出');
+  });
+
   it('runs governance sync, Luna, code sync, and Sol acknowledgement in order', async () => {
     const options = baseOptions({
       edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${taskText()}`)) },

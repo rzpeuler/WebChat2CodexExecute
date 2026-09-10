@@ -9,6 +9,18 @@ describe('phase eight renderer security boundary', () => {
     expect(source).toContain('confirm: true');
     expect(source).toContain('textContent');
     expect(source).not.toMatch(/\b(innerHTML|outerHTML|insertAdjacentHTML|ipcRenderer|require\s*\()/);
+    expect(source).toContain("from '../shared/contracts/dashboard.js'");
+    expect(source).not.toContain('RendererDashboardSnapshot');
+    expect(source).not.toContain('if (action === undefined) return { enabled: true');
+    expect(source).toContain('状态动作不可用，请刷新状态面板。');
+  });
+
+  it('prioritizes protocol and governance recent errors over unrelated action reasons', async () => {
+    const source = await readFile(new URL('../../src/renderer/app.ts', import.meta.url), 'utf8');
+    expect(source).toContain('请让 Sol 重新输出/规划任务，不要重复旧输出。');
+    expect(source.indexOf('needsNewSolOutput')).toBe(-1);
+    expect(source.indexOf('recentError !== null')).toBeLessThan(source.indexOf('actionReasonSuggestion(snapshot)'));
+    expect(source).toContain('GOVERNANCE.*(?:CONFLICT|BLOCKED)');
   });
 
   it('keeps preload exposure limited to the typed renderer API', async () => {

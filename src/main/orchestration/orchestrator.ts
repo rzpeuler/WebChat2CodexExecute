@@ -4,6 +4,7 @@ import {
   validateDashboardCommand,
   type DashboardCommand,
   type DashboardCommandResult,
+  type DashboardActions,
   type DashboardSnapshot,
 } from '../../shared/contracts/dashboard.js';
 import {
@@ -94,6 +95,8 @@ export class MainOrchestrator implements Orchestrator {
   private initialized = false;
   private roundPromise: Promise<OrchestratorResult> | null = null;
   private reconciliationPromise: Promise<GovernanceReconciliationRunResult> | null = null;
+  private dashboardOperationPromise: Promise<void> | null = null;
+  private readonly dashboardNavigationPromises = new Map<'open-edge' | 'open-project', Promise<void>>();
 
   constructor(options: OrchestratorOptions) {
     this.project = options.project;
@@ -159,11 +162,74 @@ export class MainOrchestrator implements Orchestrator {
       luna: this.state.luna,
       commits: this.state.commits,
       recentError: this.state.recentError,
+      actions: this.dashboardActions(),
     });
+  }
+
+  private dashboardActions(): DashboardActions {
+    const roundBusy = this.roundPromise !== null;
+    const reconciliationBusy = this.reconciliationPromise !== null;
+    const operationBusy = roundBusy || reconciliationBusy || this.dashboardOperationPromise !== null;
+    const hasRecoverableError = this.pendingCodeSync !== null || isRetryableDashboardError(this.state.recentError);
+    const blockedBySol = dashboardNeedsNewSol(this.state.recentError);
+    const callbackAvailable = (
+      name: 'rebind' | 'governanceConsistencyCheck' | 'openEdge' | 'openProject' | 'viewReport',
+    ) => this.callbacks[name] !== undefined;
+    const disabled = (reason: string, busy = false) => ({ enabled: false, busy, reason });
+    const enabled = () => ({ enabled: true, busy: false, reason: null });
+
+    return {
+      start:
+        operationBusy || this.state.status === 'RUNNING'
+          ? disabled('已有编排操作正在处理中。', operationBusy)
+          : blockedBySol
+            ? disabled('当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。')
+            : this.state.status === 'NEEDS_USER_ACTION'
+              ? disabled('请先完成用户操作后再启动。')
+              : enabled(),
+      pause: reconciliationBusy
+        ? disabled('治理一致性检查正在处理中。', true)
+        : this.state.status === 'RUNNING' && this.state.active
+          ? enabled()
+          : disabled('编排器当前未运行。'),
+      'retry-current-stage': operationBusy
+        ? disabled('已有操作正在处理中。', operationBusy)
+        : blockedBySol
+          ? disabled('当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。')
+          : hasRecoverableError
+            ? enabled()
+            : disabled('当前没有可重试的阶段错误。'),
+      rebind: operationBusy
+        ? disabled('已有操作正在处理中。', operationBusy)
+        : callbackAvailable('rebind')
+          ? enabled()
+          : disabled('重新绑定回调不可用。'),
+      'governance-consistency-check': operationBusy
+        ? disabled('已有操作正在处理中。', operationBusy)
+        : callbackAvailable('governanceConsistencyCheck')
+          ? enabled()
+          : disabled('治理一致性检查回调不可用。'),
+      'open-edge': this.dashboardNavigationPromises.has('open-edge')
+        ? disabled('打开 Edge 操作正在处理中。', true)
+        : callbackAvailable('openEdge')
+          ? enabled()
+          : disabled('打开 Edge 回调不可用。'),
+      'open-project': this.dashboardNavigationPromises.has('open-project')
+        ? disabled('打开项目操作正在处理中。', true)
+        : callbackAvailable('openProject')
+          ? enabled()
+          : disabled('打开项目回调不可用。'),
+      'view-report':
+        this.state.taskId !== null && callbackAvailable('viewReport')
+          ? enabled()
+          : disabled(callbackAvailable('viewReport') ? '当前没有可查看的任务报告。' : '查看报告回调不可用.'),
+    };
   }
 
   async start(): Promise<OrchestratorResult> {
     await this.initialize();
+    if (dashboardNeedsNewSol(this.state.recentError))
+      return result('PAUSED', this.state, '当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。');
     this.state.active = true;
     this.state.status = 'RUNNING';
     this.state.phase =
@@ -232,6 +298,9 @@ export class MainOrchestrator implements Orchestrator {
   async executeCommand(command: DashboardCommand): Promise<DashboardCommandResult> {
     try {
       const validated = validateDashboardCommand(command);
+      const action = this.dashboardActions()[validated.command];
+      if (action.busy) return rejected('DASHBOARD_ACTION_BUSY', '该动作正在处理中，请稍候。');
+      if (!action.enabled) return rejected('DASHBOARD_ACTION_UNAVAILABLE', action.reason ?? '该动作当前不可用。');
       switch (validated.command) {
         case 'start':
           await this.start();
@@ -259,6 +328,19 @@ export class MainOrchestrator implements Orchestrator {
     } catch (error) {
       return rejected('DASHBOARD_COMMAND_FAILED', error instanceof Error ? error.message : '命令执行失败。');
     }
+  }
+
+  async runDashboardOperation(operation: () => Promise<void>): Promise<void> {
+    if (this.dashboardOperationPromise !== null)
+      throw new OrchestratorError('DASHBOARD_ACTION_BUSY', '该动作正在处理中，请稍候。');
+    let tracked!: Promise<void>;
+    tracked = Promise.resolve()
+      .then(operation)
+      .finally(() => {
+        if (this.dashboardOperationPromise === tracked) this.dashboardOperationPromise = null;
+      });
+    this.dashboardOperationPromise = tracked;
+    return tracked;
   }
 
   private async processGovernanceReconciliation(
@@ -633,8 +715,9 @@ export class MainOrchestrator implements Orchestrator {
     status: OrchestratorState['status'],
     taskId = this.state.taskId,
   ): Promise<void> {
-    this.state.phase = phase;
-    this.state.status = status;
+    const inactive = !this.state.active && status === 'RUNNING';
+    this.state.phase = inactive ? 'PAUSED' : phase;
+    this.state.status = inactive ? 'PAUSED' : status;
     this.state.taskId = taskId;
     this.state.revision += 1;
     this.state.updatedAt = this.now().toISOString();
@@ -719,6 +802,21 @@ export class MainOrchestrator implements Orchestrator {
   ): Promise<DashboardCommandResult> {
     const callback = this.callbacks[name];
     if (callback === undefined) return rejected('COMMAND_UNAVAILABLE', unavailable);
+    const navigationCommand = name === 'openEdge' ? 'open-edge' : name === 'openProject' ? 'open-project' : null;
+    if (navigationCommand !== null) {
+      if (this.dashboardNavigationPromises.has(navigationCommand))
+        return rejected('DASHBOARD_ACTION_BUSY', '该动作正在处理中，请稍候。');
+      let tracked!: Promise<void>;
+      tracked = Promise.resolve()
+        .then(callback)
+        .finally(() => {
+          if (this.dashboardNavigationPromises.get(navigationCommand) === tracked)
+            this.dashboardNavigationPromises.delete(navigationCommand);
+        });
+      this.dashboardNavigationPromises.set(navigationCommand, tracked);
+      await tracked;
+      return accepted('OK', '命令已完成。');
+    }
     await callback();
     return accepted('OK', '命令已完成。');
   }
@@ -760,6 +858,41 @@ function errorCode(error: unknown): string {
   if (typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string')
     return error.code;
   return 'ORCHESTRATION_FAILED';
+}
+
+const DASHBOARD_NON_RETRYABLE_ERROR_CODES = new Set([
+  'ARCHITECTURE_FREEZE_CONTENT_TYPE_INVALID',
+  'ARCHITECTURE_FREEZE_DUPLICATE_CONFLICT',
+  'ARCHITECTURE_FREEZE_HASH_MISMATCH',
+  'ARCHITECTURE_FREEZE_INVALID',
+  'ARCHITECTURE_FREEZE_PATH_UNSAFE',
+  'ARCHITECTURE_FREEZE_PRIVATE_HOST',
+  'ARCHITECTURE_FREEZE_REDIRECT_REJECTED',
+  'ARCHITECTURE_FREEZE_RESPONSE_INVALID',
+  'ARCHITECTURE_FREEZE_TOO_LARGE',
+  'ARCHITECTURE_FREEZE_URL_INVALID',
+  'BASELINE_CHANGED',
+  'INVALID_RESULT',
+  'PROTECTED_PATH',
+  'UNAUTHORIZED_CHANGE',
+]);
+
+function dashboardNeedsNewSol(error: { code: string; message: string } | null): boolean {
+  if (error === null) return false;
+  return (
+    DASHBOARD_NON_RETRYABLE_ERROR_CODES.has(error.code) ||
+    /^(?:WRITING_BLOCK|PROTOCOL|SOL_BLOCKED|.*(?:CONFLICT|SCOPE))/.test(error.code) ||
+    /^GOVERNANCE_RECONCILIATION_.*(?:PROTOCOL|INVALID)/.test(error.code) ||
+    /^GOVERNANCE(?:_|$).*(?:CONFLICT|BLOCKED|PATH_|SHA_)/.test(error.code) ||
+    error.code === 'GOVERNANCE_RECONCILIATION_WRONG_ENTRYPOINT'
+  );
+}
+
+function isRetryableDashboardError(error: { code: string; message: string } | null): boolean {
+  if (error === null || dashboardNeedsNewSol(error)) return false;
+  return /^(?:FAILED|TIMEOUT|NETWORK|SESSION|CLI|CODEX|LUNA|REPORT|TEST|GIT|PUSH|SYNC|CONTEXT|AUTH|PROCESS_|COMMAND_FAILED|DASHBOARD_COMMAND_FAILED|COMMIT_FAILED|GOVERNANCE_CHANGE_COMMIT_FAILED|GOVERNANCE_RECONCILIATION_COMMIT_FAILED|ARCHITECTURE_FREEZE_(?:FETCH_FAILED|CONTENT_UNREADABLE|COMMIT_FAILED)|EDGE_PROCESS_EXITED|GOVERNANCE_RECONCILIATION_(?:TIMEOUT|AUTH_REQUIRED|CONTEXT_LIMIT)|BLOCKED_EXTERNAL_SETUP)/i.test(
+    error.code,
+  );
 }
 
 function safeSyncId(value: string): string {

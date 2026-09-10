@@ -36,9 +36,43 @@ describe('phase eight dashboard contract', () => {
       stage: 'phase-8.2',
       status: 'RUNNING',
       recentError: { code: 'NETWORK_ERROR', message: '[REDACTED] full log' },
+      actions: expect.objectContaining({
+        start: { enabled: false, busy: false, reason: null },
+      }),
     });
     expect(snapshot.project?.remoteUrl).not.toContain('password');
     expect(snapshot.recentError?.message).not.toContain('secret');
+  });
+
+  it('backfills a safe action contract for snapshots produced by older clients', () => {
+    const snapshot = sanitizeDashboardSnapshot({ status: 'IDLE' });
+
+    expect(Object.keys(snapshot.actions)).toEqual([
+      'start',
+      'pause',
+      'retry-current-stage',
+      'rebind',
+      'governance-consistency-check',
+      'open-edge',
+      'open-project',
+      'view-report',
+    ]);
+    expect(snapshot.actions.start).toEqual({ enabled: false, busy: false, reason: null });
+  });
+
+  it('sanitizes action flags and reasons without trusting malformed input', () => {
+    const snapshot = sanitizeDashboardSnapshot({
+      actions: {
+        start: { enabled: true, busy: 'yes' as never, reason: 'Token=secret' },
+        pause: { enabled: 1 as never, busy: true, reason: 'x'.repeat(500) },
+      },
+    });
+
+    expect(snapshot.actions.start).toEqual({ enabled: true, busy: false, reason: '[REDACTED]' });
+    expect(snapshot.actions.pause.enabled).toBe(false);
+    expect(snapshot.actions.pause.busy).toBe(true);
+    expect(snapshot.actions.pause.reason).toHaveLength(240);
+    expect(snapshot.actions.pause.reason).toMatch(/^x+…$/);
   });
 
   it('requires explicit confirmation for dangerous commands and validates report paths', () => {

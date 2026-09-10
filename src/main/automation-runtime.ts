@@ -201,7 +201,8 @@ export async function createAutomationRuntime(
     }
     throw new Error('GOVERNANCE_RECONCILIATION_TIMEOUT');
   };
-  const orchestrator = new MainOrchestrator({
+  let orchestrator: MainOrchestrator;
+  orchestrator = new MainOrchestrator({
     project: {
       projectId: config.projectId,
       name: config.projectId,
@@ -221,41 +222,42 @@ export async function createAutomationRuntime(
     notifier,
     callbacks: {
       rebind,
-      governanceConsistencyCheck: async () => {
-        const resumeLoop = orchestrator.getState().active;
-        if (resumeLoop) await orchestrator.pause();
-        try {
-          const before = await edge.observe();
-          const baseline = await git.captureBaseline(config.localPath, {
-            ...(config.targetBranch === 'HEAD' ? {} : { expectedBranch: config.targetBranch }),
-            ...(config.remoteUrl === null ? {} : { expectedRemoteUrl: config.remoteUrl }),
-          });
-          const prompt = promptCompiler.compileGovernanceReconciliationPrompt({
-            project: config,
-            baselineCommit: baseline.head,
-          });
-          await sol.sendMessage({ text: prompt, observation: before });
-          const completed = await waitForReconciliationOutput(before);
-          const result = await orchestrator.runGovernanceReconciliation({
-            solOutput: completed.latestAssistantText,
-            baseline,
-          });
-          if (result.status === 'PAUSED') {
-            throw new Error(result.message);
+      governanceConsistencyCheck: (): Promise<void> =>
+        orchestrator.runDashboardOperation(async () => {
+          const resumeLoop = orchestrator.getState().active;
+          if (resumeLoop) await orchestrator.pause();
+          try {
+            const before = await edge.observe();
+            const baseline = await git.captureBaseline(config.localPath, {
+              ...(config.targetBranch === 'HEAD' ? {} : { expectedBranch: config.targetBranch }),
+              ...(config.remoteUrl === null ? {} : { expectedRemoteUrl: config.remoteUrl }),
+            });
+            const prompt = promptCompiler.compileGovernanceReconciliationPrompt({
+              project: config,
+              baselineCommit: baseline.head,
+            });
+            await sol.sendMessage({ text: prompt, observation: before });
+            const completed = await waitForReconciliationOutput(before);
+            const result = await orchestrator.runGovernanceReconciliation({
+              solOutput: completed.latestAssistantText,
+              baseline,
+            });
+            if (result.status === 'PAUSED') {
+              throw new Error(result.message);
+            }
+            if (resumeLoop) await orchestrator.start();
+          } catch (error) {
+            notifier.notify({
+              project: config.projectId,
+              taskId: null,
+              phase: 'GOVERNANCE_RECONCILIATION',
+              suggestion: '治理一致性检查未完成，请查看状态面板后重试。',
+              error,
+              level: 'NEEDS_USER',
+            });
+            throw error;
           }
-          if (resumeLoop) await orchestrator.start();
-        } catch (error) {
-          notifier.notify({
-            project: config.projectId,
-            taskId: null,
-            phase: 'GOVERNANCE_RECONCILIATION',
-            suggestion: '治理一致性检查未完成，请查看状态面板后重试。',
-            error,
-            level: 'NEEDS_USER',
-          });
-          throw error;
-        }
-      },
+        }),
       openEdge: async () => {
         await ensureEdge();
       },

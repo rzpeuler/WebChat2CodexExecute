@@ -15,6 +15,14 @@ export const DASHBOARD_COMMANDS = [
 export type DashboardCommandName = (typeof DASHBOARD_COMMANDS)[number];
 export type DangerousDashboardCommandName = 'start' | 'pause' | 'retry-current-stage' | 'rebind';
 
+export interface DashboardActionState {
+  enabled: boolean;
+  busy: boolean;
+  reason: string | null;
+}
+
+export type DashboardActions = Record<DashboardCommandName, DashboardActionState>;
+
 export interface DashboardCommandBase {
   command: DashboardCommandName;
 }
@@ -90,6 +98,7 @@ export interface DashboardSnapshot {
     remote: string | null;
   };
   recentError: DashboardErrorSnapshot | null;
+  actions: DashboardActions;
 }
 
 export interface DashboardSnapshotSource {
@@ -105,6 +114,7 @@ export interface DashboardSnapshotSource {
   luna?: Partial<DashboardLunaSnapshot>;
   commits?: Partial<DashboardSnapshot['commits']>;
   recentError?: unknown;
+  actions?: Partial<Record<DashboardCommandName, Partial<DashboardActionState>>>;
 }
 
 const DANGEROUS_COMMANDS = new Set<DangerousDashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
@@ -178,6 +188,7 @@ export function sanitizeDashboardSnapshot(source: DashboardSnapshotSource): Dash
       remote: sanitizeCommit(source.commits?.remote),
     },
     recentError,
+    actions: sanitizeDashboardActions(source.actions),
   };
 }
 
@@ -191,6 +202,22 @@ function sanitizeDashboardError(error: unknown): DashboardErrorSnapshot | null {
     code: stableErrorCode(error),
     message: sanitizeErrorMessage(error),
   };
+}
+
+function sanitizeDashboardActions(actions: DashboardSnapshotSource['actions']): DashboardActions {
+  return Object.fromEntries(
+    DASHBOARD_COMMANDS.map((command) => {
+      const action = actions?.[command];
+      return [
+        command,
+        {
+          enabled: action?.enabled === true,
+          busy: action?.busy === true,
+          reason: sanitizeSafeText(action?.reason, 240) || null,
+        },
+      ];
+    }),
+  ) as DashboardActions;
 }
 
 function sanitizeIdentifier(value: unknown, fallback: string): string {

@@ -12,80 +12,203 @@
   </head>
   <body>
     <main class="shell">
-      <p class="eyebrow">LOCAL ORCHESTRATOR / PROJECT SETUP</p>
-      <h1>项目初始化</h1>
-      <p id="status">正在启动安全渲染器…</p>
-      <p id="version" class="muted">正在读取运行时信息…</p>
-      <form id="project-form" class="panel">
-        <label
-          >本地项目目录<input id="local-path" required placeholder="选择项目父目录或已有仓库根目录" readonly
-        /></label>
-        <div class="actions">
-          <button id="select-directory" type="button">选择本地目录</button>
+      <header class="topbar" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">LOCAL ORCHESTRATOR / WEB CHAT 2 CODEX</p>
+          <h1 id="page-title">项目自动化工作台</h1>
+          <p id="status" class="status-message" aria-live="polite">正在启动安全渲染器…</p>
         </div>
-        <label>远程仓库地址<input id="remote-url" placeholder="https://github.com/user/repository.git" /></label>
-        <label>新项目目录名<input id="directory-name" placeholder="仅克隆新项目时填写，例如 my-repo" /></label>
-        <label>目标分支<input id="target-branch" value="main" placeholder="已有项目默认使用扫描到的当前分支" /></label>
-        <label>报告目录<input id="report-directory" required value="docs/task-reports" /></label>
-        <div class="actions">
-          <button id="scan" type="button">扫描项目</button>
-          <button id="check-git-access" type="button">检查 Git 远程授权</button>
-          <button id="clone-initialize" type="button">克隆并初始化新项目</button>
-          <button id="adopt-initialize" type="button">接管并初始化已有项目</button>
-          <button id="save" type="submit">保存配置</button>
-          <button id="preview" type="button">预览 Sol 提示词</button>
+        <div class="topbar-meta">
+          <p id="dashboard-header-project" class="header-project">未选择项目</p>
+          <span id="dashboard-status-badge" class="status-badge status-idle">待机</span>
+          <p id="dashboard-updated-at" class="muted">最近更新：—</p>
+          <button
+            id="help-button"
+            class="button-secondary"
+            type="button"
+            aria-haspopup="dialog"
+            aria-controls="help-dialog"
+          >
+            功能说明
+          </button>
         </div>
-      </form>
-      <pre id="project-details" class="preview" aria-live="polite"></pre>
-      <pre id="prompt-preview" class="preview" aria-live="polite"></pre>
-      <section class="panel dashboard" aria-labelledby="dashboard-title">
-        <p class="eyebrow" id="dashboard-title">AUTOMATION DASHBOARD</p>
-        <dl class="dashboard-grid">
+      </header>
+
+      <p id="version" class="muted runtime-version">正在读取运行时信息…</p>
+
+      <section id="project-preparation" class="workflow-section" aria-labelledby="project-preparation-title">
+        <div class="section-heading">
+          <span class="section-number">01</span>
           <div>
-            <dt>项目</dt>
-            <dd id="dashboard-project">未选择项目</dd>
+            <p class="eyebrow">PROJECT PREPARATION</p>
+            <h2 id="project-preparation-title">项目准备</h2>
+            <p class="section-description">先确认项目目录、Git 远程和治理配置，再进入自动化循环。</p>
           </div>
+        </div>
+        <form id="project-form" class="panel project-form">
+          <label
+            >本地项目目录<input id="local-path" required placeholder="选择项目父目录或已有仓库根目录" readonly
+          /></label>
+          <div class="actions">
+            <button id="select-directory" class="button-secondary" type="button">选择本地目录</button>
+          </div>
+          <label>远程仓库地址<input id="remote-url" placeholder="https://github.com/user/repository.git" /></label>
+          <label>新项目目录名<input id="directory-name" placeholder="仅克隆新项目时填写，例如 my-repo" /></label>
+          <div class="form-grid">
+            <label
+              >目标分支<input id="target-branch" value="main" placeholder="已有项目默认使用扫描到的当前分支"
+            /></label>
+            <label>报告目录<input id="report-directory" required value="docs/task-reports" /></label>
+          </div>
+          <div class="actions">
+            <button id="scan" type="button">扫描项目</button>
+            <button id="check-git-access" class="button-secondary" type="button">检查 Git 远程授权</button>
+            <button id="clone-initialize" type="button">克隆并初始化新项目</button>
+            <button id="adopt-initialize" type="button">接管并初始化已有项目</button>
+            <button id="save" type="submit">保存配置</button>
+            <button id="preview" class="button-secondary" type="button">预览 Sol 提示词</button>
+          </div>
+        </form>
+        <pre id="project-details" class="preview" aria-live="polite"></pre>
+        <pre id="prompt-preview" class="preview" aria-live="polite"></pre>
+      </section>
+
+      <section id="web-chat-connection" class="workflow-section" aria-labelledby="web-chat-connection-title">
+        <div class="section-heading">
+          <span class="section-number">02</span>
           <div>
-            <dt>Sol 会话</dt>
-            <dd id="dashboard-sol">无</dd>
+            <p class="eyebrow">WEB CHAT CONNECTION</p>
+            <h2 id="web-chat-connection-title">连接 Web Chat</h2>
+            <p class="section-description">使用专用 Edge 会话连接当前 Project 内的 Sol 对话。</p>
           </div>
+        </div>
+        <div class="panel compact-panel">
+          <div class="actions" aria-label="Web Chat 连接操作">
+            <button type="button" data-dashboard-command="open-edge">打开 Edge</button>
+            <button type="button" data-dashboard-command="rebind">重新绑定 Sol 会话</button>
+          </div>
+          <p class="helper-text">如果登录、Project 身份或会话发生变化，请先重新绑定，再启动自动循环。</p>
+        </div>
+      </section>
+
+      <section id="automation-cycle" class="workflow-section" aria-labelledby="automation-cycle-title">
+        <div class="section-heading">
+          <span class="section-number">03</span>
           <div>
-            <dt>阶段 / 状态</dt>
-            <dd id="dashboard-stage">INITIALIZATION / IDLE</dd>
+            <p class="eyebrow">AUTOMATION CYCLE</p>
+            <h2 id="automation-cycle-title">自动循环</h2>
+            <p class="section-description">每一轮由 Sol 规划、Luna 执行、Git 同步，再回到 Sol 验收。</p>
           </div>
+        </div>
+        <section class="panel dashboard" aria-labelledby="dashboard-title">
+          <div class="dashboard-heading">
+            <div>
+              <p class="eyebrow" id="dashboard-title">LIVE DASHBOARD</p>
+              <h3>运行状态</h3>
+            </div>
+            <span class="polling-note">每 1.5 秒刷新</span>
+          </div>
+          <dl class="dashboard-grid">
+            <div>
+              <dt>项目</dt>
+              <dd id="dashboard-project">未选择项目</dd>
+            </div>
+            <div>
+              <dt>Sol 会话</dt>
+              <dd id="dashboard-sol">无</dd>
+            </div>
+            <div>
+              <dt>阶段 / 状态</dt>
+              <dd id="dashboard-stage">待启动 / 待机</dd>
+            </div>
+            <div>
+              <dt>任务</dt>
+              <dd id="dashboard-task">无</dd>
+            </div>
+            <div>
+              <dt>治理 / 架构</dt>
+              <dd id="dashboard-revisions">— / —</dd>
+            </div>
+            <div>
+              <dt>Luna</dt>
+              <dd id="dashboard-luna">未开始</dd>
+            </div>
+            <div>
+              <dt>Commit</dt>
+              <dd id="dashboard-commits">本地 — / 远端 —</dd>
+            </div>
+            <div>
+              <dt>最近异常</dt>
+              <dd id="dashboard-error" class="dashboard-error">无</dd>
+            </div>
+          </dl>
+          <div class="dashboard-notices" aria-live="polite">
+            <p id="dashboard-suggestion" class="suggestion">建议：—</p>
+          </div>
+          <div class="actions dashboard-actions" aria-label="自动循环操作">
+            <button type="button" data-dashboard-command="start">启动自动循环</button>
+            <button type="button" data-dashboard-command="pause">暂停</button>
+            <button type="button" data-dashboard-command="retry-current-stage">重试当前阶段</button>
+          </div>
+        </section>
+      </section>
+
+      <section id="maintenance-acceptance" class="workflow-section" aria-labelledby="maintenance-acceptance-title">
+        <div class="section-heading">
+          <span class="section-number">04</span>
           <div>
-            <dt>任务</dt>
-            <dd id="dashboard-task">无</dd>
+            <p class="eyebrow">MAINTENANCE & ACCEPTANCE</p>
+            <h2 id="maintenance-acceptance-title">维护与验收</h2>
+            <p class="section-description">完成治理检查，或打开项目与报告进行人工验收。</p>
           </div>
-          <div>
-            <dt>治理 / 架构</dt>
-            <dd id="dashboard-revisions">— / —</dd>
+        </div>
+        <div class="panel compact-panel">
+          <div class="actions" aria-label="维护与验收操作">
+            <button type="button" data-dashboard-command="governance-consistency-check">治理一致性检查</button>
+            <button class="button-secondary" type="button" data-dashboard-command="open-project">打开项目</button>
+            <button class="button-secondary" type="button" data-dashboard-command="view-report">查看报告</button>
           </div>
-          <div>
-            <dt>Luna</dt>
-            <dd id="dashboard-luna">NOT_STARTED</dd>
-          </div>
-          <div>
-            <dt>Commit</dt>
-            <dd id="dashboard-commits">本地 — / 远端 —</dd>
-          </div>
-          <div>
-            <dt>最近异常</dt>
-            <dd id="dashboard-error">无</dd>
-          </div>
-        </dl>
-        <div class="actions" aria-label="自动化命令">
-          <button type="button" data-dashboard-command="start">启动</button>
-          <button type="button" data-dashboard-command="pause">暂停</button>
-          <button type="button" data-dashboard-command="retry-current-stage">重试当前阶段</button>
-          <button type="button" data-dashboard-command="rebind">重新绑定</button>
-          <button type="button" data-dashboard-command="governance-consistency-check">治理一致性检查</button>
-          <button type="button" data-dashboard-command="open-edge">打开 Edge</button>
-          <button type="button" data-dashboard-command="open-project">打开项目</button>
-          <button type="button" data-dashboard-command="view-report">查看报告</button>
+          <p class="helper-text">按钮的可用条件、处理中状态和禁用原因以后台快照为准。</p>
         </div>
       </section>
     </main>
+
+    <div
+      id="help-dialog"
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="help-dialog-title"
+      hidden
+    >
+      <section class="modal" tabindex="-1">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">LOCAL HELP</p>
+            <h2 id="help-dialog-title">功能说明</h2>
+          </div>
+          <button id="help-close" class="icon-button" type="button" aria-label="关闭功能说明">×</button>
+        </div>
+        <div class="modal-content">
+          <h3>推荐操作顺序</h3>
+          <ol>
+            <li>项目准备：选择或克隆项目，扫描并保存配置。</li>
+            <li>连接 Web Chat：打开专用 Edge，登录后重新绑定 Sol 会话。</li>
+            <li>自动循环：确认状态为可运行后启动；运行中可暂停或重试允许恢复的阶段。</li>
+            <li>维护与验收：检查治理一致性，并查看项目与任务报告。</li>
+          </ol>
+          <h3>状态与阻塞</h3>
+          <p>
+            运行中表示后台正在处理；需要用户处理通常意味着登录、授权、API Key 或 OTP
+            等外部操作；失败时请查看最近异常和按钮旁的建议。
+          </p>
+          <p>如果提示协议错误、治理冲突、范围冲突或需要重新规划，请让 Sol 重新输出/规划任务，不要重复旧输出。</p>
+          <h3>按钮可用条件</h3>
+          <p>每个动作的启用条件、处理中状态和禁用原因由后端快照提供。按钮显示“处理中”时不会重复提交同一动作。</p>
+        </div>
+      </section>
+    </div>
+
     <script type="module" src="./app.js"></script>
   </body>
 </html>

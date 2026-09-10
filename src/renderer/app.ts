@@ -1,5 +1,10 @@
 import type { ProjectConfigInput, ProjectScanResult } from '../shared/contracts/project-config.js';
-import type { DashboardCommand, DashboardCommandName, DashboardSnapshot } from '../shared/contracts/dashboard.js';
+import type {
+  DashboardActionState,
+  DashboardCommand,
+  DashboardCommandName,
+  DashboardSnapshot,
+} from '../shared/contracts/dashboard.js';
 
 const statusElement = document.querySelector<HTMLElement>('#status');
 const versionElement = document.querySelector<HTMLElement>('#version');
@@ -13,9 +18,14 @@ const detailsElement = document.querySelector<HTMLElement>('#project-details');
 const promptElement = document.querySelector<HTMLElement>('#prompt-preview');
 const scanButton = document.querySelector<HTMLButtonElement>('#scan');
 const selectDirectoryButton = document.querySelector<HTMLButtonElement>('#select-directory');
+const checkGitAccessButton = document.querySelector<HTMLButtonElement>('#check-git-access');
 const cloneInitializeButton = document.querySelector<HTMLButtonElement>('#clone-initialize');
 const adoptInitializeButton = document.querySelector<HTMLButtonElement>('#adopt-initialize');
+const saveButton = document.querySelector<HTMLButtonElement>('#save');
 const previewButton = document.querySelector<HTMLButtonElement>('#preview');
+const dashboardHeaderProjectElement = document.querySelector<HTMLElement>('#dashboard-header-project');
+const dashboardStatusBadgeElement = document.querySelector<HTMLElement>('#dashboard-status-badge');
+const dashboardUpdatedAtElement = document.querySelector<HTMLElement>('#dashboard-updated-at');
 const dashboardProjectElement = document.querySelector<HTMLElement>('#dashboard-project');
 const dashboardSolElement = document.querySelector<HTMLElement>('#dashboard-sol');
 const dashboardStageElement = document.querySelector<HTMLElement>('#dashboard-stage');
@@ -24,23 +34,90 @@ const dashboardRevisionsElement = document.querySelector<HTMLElement>('#dashboar
 const dashboardLunaElement = document.querySelector<HTMLElement>('#dashboard-luna');
 const dashboardCommitsElement = document.querySelector<HTMLElement>('#dashboard-commits');
 const dashboardErrorElement = document.querySelector<HTMLElement>('#dashboard-error');
+const dashboardSuggestionElement = document.querySelector<HTMLElement>('#dashboard-suggestion');
+const helpButton = document.querySelector<HTMLButtonElement>('#help-button');
+const helpDialog = document.querySelector<HTMLElement>('#help-dialog');
+const helpCloseButton = document.querySelector<HTMLButtonElement>('#help-close');
+
 let scanResult: ProjectScanResult | null = null;
+let currentSnapshot: DashboardSnapshot | null = null;
+let refreshInFlight: Promise<void> | null = null;
+let helpPreviouslyFocused: HTMLElement | null = null;
+const pendingDashboardCommands = new Set<DashboardCommandName>();
 
 const dangerousDashboardCommands = new Set<DashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
+const dashboardCommandNames: DashboardCommandName[] = [
+  'start',
+  'pause',
+  'retry-current-stage',
+  'rebind',
+  'governance-consistency-check',
+  'open-edge',
+  'open-project',
+  'view-report',
+];
+const stageLabels: Record<string, string> = {
+  IDLE: '待启动',
+  READING_SOL: '读取 Sol',
+  PARSING: '解析任务',
+  APPLYING_UPDATES: '应用更新',
+  SYNCING_GOVERNANCE: '同步治理',
+  RUNNING_LUNA: '执行 Luna',
+  SYNCING_CODE: '同步代码',
+  NOTIFYING_SOL: '通知 Sol',
+  WAITING_FOR_SOL: '等待 Sol',
+  PAUSED: '已暂停',
+  FAILED: '执行失败',
+};
+const statusLabels: Record<string, string> = {
+  IDLE: '待机',
+  ARMED: '已准备',
+  RUNNING: '运行中',
+  PAUSED: '已暂停',
+  NEEDS_USER_ACTION: '需要用户处理',
+  FAILED: '失败',
+};
+const lunaLabels: Record<string, string> = {
+  NOT_STARTED: '未开始',
+  RUNNING: '执行中',
+  COMPLETED: '已完成',
+  FAILED: '失败',
+  PAUSED: '已暂停',
+};
+const solLabels: Record<string, string> = {
+  THINKING: '思考中',
+  COMPLETED_CANDIDATE: '等待确认',
+  NETWORK_ERROR: '网络错误',
+  CONTEXT_LIMIT: '上下文已满',
+  AUTH_REQUIRED: '需要授权',
+  SESSION_LOST: '会话已丢失',
+  AMBIGUOUS: '状态不明确',
+};
 
 function setStatus(message: string): void {
-  if (statusElement !== null) {
-    statusElement.textContent = message;
-  }
+  if (statusElement !== null) statusElement.textContent = message;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message.trim() !== '' ? error.message : fallback;
+}
+
+function errorSuggestion(message: string): string {
+  if (/登录|授权|credential|token|api key|otp/i.test(message)) return '建议：完成登录或授权后重试。';
+  if (/协议|冲突|范围|replan|规划|writing block/i.test(message)) return '建议：请让 Sol 重新输出/规划任务。';
+  return '建议：查看 Dashboard 最近异常和动作禁用原因。';
+}
+
+function showOperationError(error: unknown, fallback: string): void {
+  const message = errorMessage(error, fallback);
+  setStatus(`${message} ${errorSuggestion(message)}`);
 }
 
 function getConfigInput(): ProjectConfigInput {
   if (localPathElement === null || targetBranchElement === null || reportDirectoryElement === null) {
-    throw new Error('Project form is unavailable');
+    throw new Error('项目表单不可用');
   }
-  if (scanResult === null) {
-    throw new Error('请先扫描 Git 项目');
-  }
+  if (scanResult === null) throw new Error('请先扫描 Git 项目');
   return {
     projectId: scanResult.projectId,
     localPath: scanResult.localPath,
@@ -77,7 +154,6 @@ async function initializeProject(mode: 'clone' | 'adopt'): Promise<void> {
           ...(targetBranchElement?.value.trim() ? { targetBranch: targetBranchElement.value.trim() } : {}),
         }
       : { mode, targetDirectory: selectedDirectory };
-  setStatus(mode === 'clone' ? '正在克隆并初始化项目…' : '正在备份并初始化治理目录…');
   const result = await window.desktopApi.initializeProject(input);
   localPathElement.value = result.projectRoot;
   await scanSelectedProject();
@@ -88,77 +164,260 @@ async function initializeProject(mode: 'clone' | 'adopt'): Promise<void> {
   );
 }
 
-async function checkRemoteAccess(): Promise<void> {
-  if (localPathElement === null || remoteUrlElement === null) return;
+async function checkRemoteAccess(): Promise<string> {
+  if (localPathElement === null || remoteUrlElement === null) throw new Error('项目表单不可用');
   if (localPathElement.value.trim() === '') throw new Error('请先选择本地目录');
   if (remoteUrlElement.value.trim() === '') throw new Error('请先输入远程仓库地址');
-  setStatus('正在检查 Git 远程授权…');
   const result = await window.desktopApi.checkProjectRemoteAccess({
     directory: localPathElement.value.trim(),
     remoteUrl: remoteUrlElement.value.trim(),
   });
-  setStatus(result.message);
+  return result.message;
+}
+
+function setButtonsBusy(buttons: Array<HTMLButtonElement | null>, busy: boolean): void {
+  buttons.forEach((button) => {
+    if (button === null) return;
+    if (busy) {
+      if (button.dataset.idleLabel === undefined) button.dataset.idleLabel = button.textContent ?? '';
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+      button.textContent = `${button.dataset.idleLabel}（处理中）`;
+    } else {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      if (button.dataset.idleLabel !== undefined) button.textContent = button.dataset.idleLabel;
+    }
+  });
+}
+
+async function runProjectOperation<T>(options: {
+  buttons: Array<HTMLButtonElement | null>;
+  startMessage: string;
+  action: () => Promise<T>;
+  successMessage: string | ((value: T) => string);
+  errorFallback: string;
+}): Promise<T | null> {
+  if (options.buttons.some((button) => button?.disabled === true)) return null;
+  setButtonsBusy(options.buttons, true);
+  setStatus(options.startMessage);
+  try {
+    const result = await options.action();
+    setStatus(typeof options.successMessage === 'function' ? options.successMessage(result) : options.successMessage);
+    return result;
+  } catch (error) {
+    showOperationError(error, options.errorFallback);
+    return null;
+  } finally {
+    setButtonsBusy(options.buttons, false);
+  }
+}
+
+function getStageLabel(stage: string): string {
+  return stageLabels[stage] ?? (stage || '未知阶段');
+}
+
+function getStatusLabel(status: string): string {
+  return statusLabels[status] ?? (status || '未知状态');
+}
+
+function getLunaLabel(status: string): string {
+  return lunaLabels[status] ?? (status || '未知');
+}
+
+function getSolLabel(status: string): string {
+  return solLabels[status] ?? (status || '未知');
+}
+
+function formatUpdatedAt(updatedAt: string): string {
+  const timestamp = Date.parse(updatedAt);
+  if (Number.isNaN(timestamp)) return '—';
+  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(timestamp);
+}
+
+function readActionState(snapshot: DashboardSnapshot, command: DashboardCommandName): DashboardActionState {
+  const action = snapshot.actions?.[command];
+  if (action === undefined) return { enabled: false, busy: false, reason: '状态动作不可用，请刷新状态面板。' };
+  return action;
+}
+
+function actionReasonSuggestion(snapshot: DashboardSnapshot): string | null {
+  for (const command of dashboardCommandNames) {
+    const action = readActionState(snapshot, command);
+    if (!action.enabled && action.reason !== null) return action.reason;
+  }
+  return null;
+}
+
+function getDashboardSuggestion(snapshot: DashboardSnapshot): string {
+  if (
+    snapshot.recentError !== null &&
+    /WRITING_BLOCK|PROTOCOL|INVALID_RESULT|BASELINE_CHANGED|GOVERNANCE.*(?:CONFLICT|BLOCKED)|CONFLICT|SCOPE|SOL_BLOCKED|WRONG_ENTRYPOINT/i.test(
+      snapshot.recentError.code,
+    )
+  ) {
+    return '请让 Sol 重新输出/规划任务，不要重复旧输出。';
+  }
+  const actionReason = actionReasonSuggestion(snapshot);
+  if (actionReason !== null) return actionReason;
+  if (snapshot.recentError !== null) {
+    return '请查看最近异常的诊断，并按提示完成修复后再执行可用动作。';
+  }
+  if (snapshot.status === 'NEEDS_USER_ACTION') return '请完成登录、授权、API Key 或 OTP 等外部操作。';
+  if (snapshot.status === 'IDLE') return '请先完成项目准备和 Web Chat 会话绑定。';
+  return '当前没有需要用户处理的事项。';
+}
+
+function applyDashboardActionStates(snapshot: DashboardSnapshot): void {
+  document.querySelectorAll<HTMLButtonElement>('[data-dashboard-command]').forEach((button) => {
+    const command = button.dataset.dashboardCommand as DashboardCommandName | undefined;
+    if (command === undefined || !dashboardCommandNames.includes(command)) return;
+    if (button.dataset.dashboardLabel === undefined) button.dataset.dashboardLabel = button.textContent ?? '';
+    const state = readActionState(snapshot, command);
+    const busy = state.busy || pendingDashboardCommands.has(command);
+    const enabled = state.enabled && !busy;
+    const label = button.dataset.dashboardLabel ?? command;
+    button.disabled = !enabled;
+    button.setAttribute('aria-disabled', String(!enabled));
+    if (busy) {
+      button.setAttribute('aria-busy', 'true');
+      button.textContent = `${label}（处理中）`;
+    } else {
+      button.removeAttribute('aria-busy');
+      button.textContent = label;
+    }
+    if (state.reason !== null && !enabled) {
+      button.title = state.reason;
+      button.setAttribute('aria-label', `${label}：${state.reason}`);
+    } else if (busy) {
+      button.title = '后台处理中，请稍候';
+      button.setAttribute('aria-label', `${label}：后台处理中`);
+    } else {
+      button.removeAttribute('title');
+      button.setAttribute('aria-label', label);
+    }
+  });
 }
 
 function renderDashboard(snapshot: DashboardSnapshot): void {
-  if (dashboardProjectElement !== null) {
-    dashboardProjectElement.textContent = snapshot.project?.name ?? '未选择项目';
+  currentSnapshot = snapshot;
+  const rendererSnapshot = snapshot;
+  const statusLabel = getStatusLabel(rendererSnapshot.status);
+  if (dashboardHeaderProjectElement !== null) {
+    dashboardHeaderProjectElement.textContent = rendererSnapshot.project?.name ?? '未选择项目';
   }
+  if (dashboardStatusBadgeElement !== null) {
+    dashboardStatusBadgeElement.textContent = statusLabel;
+    dashboardStatusBadgeElement.className = `status-badge status-${rendererSnapshot.status.toLowerCase()}`;
+    dashboardStatusBadgeElement.title = rendererSnapshot.status;
+  }
+  if (dashboardUpdatedAtElement !== null) {
+    dashboardUpdatedAtElement.textContent = `最近更新：${formatUpdatedAt(rendererSnapshot.updatedAt)}`;
+    dashboardUpdatedAtElement.title = rendererSnapshot.updatedAt;
+  }
+  if (dashboardProjectElement !== null)
+    dashboardProjectElement.textContent = rendererSnapshot.project?.name ?? '未选择项目';
   if (dashboardSolElement !== null) {
     dashboardSolElement.textContent =
-      snapshot.activeSolSession === null
+      rendererSnapshot.activeSolSession === null
         ? '无'
-        : `${snapshot.activeSolSession.sessionId} / ${snapshot.activeSolSession.status}`;
+        : `${rendererSnapshot.activeSolSession.sessionId} / ${getSolLabel(rendererSnapshot.activeSolSession.status)}`;
   }
-  if (dashboardStageElement !== null) dashboardStageElement.textContent = `${snapshot.stage} / ${snapshot.status}`;
-  if (dashboardTaskElement !== null) dashboardTaskElement.textContent = snapshot.taskId ?? '无';
+  if (dashboardStageElement !== null) {
+    dashboardStageElement.textContent = `${getStageLabel(rendererSnapshot.stage)} / ${statusLabel}`;
+    dashboardStageElement.title = `${rendererSnapshot.stage} / ${rendererSnapshot.status}`;
+  }
+  if (dashboardTaskElement !== null) dashboardTaskElement.textContent = rendererSnapshot.taskId ?? '无';
   if (dashboardRevisionsElement !== null) {
-    dashboardRevisionsElement.textContent = `${snapshot.governanceRevision ?? '—'} / ${snapshot.architectureRevisions.join(', ') || '—'}`;
+    dashboardRevisionsElement.textContent = `${rendererSnapshot.governanceRevision ?? '—'} / ${rendererSnapshot.architectureRevisions.join(', ') || '—'}`;
   }
   if (dashboardLunaElement !== null) {
     dashboardLunaElement.textContent =
-      snapshot.luna.sessionId === null ? snapshot.luna.status : `${snapshot.luna.status} / ${snapshot.luna.sessionId}`;
+      rendererSnapshot.luna.sessionId === null
+        ? getLunaLabel(rendererSnapshot.luna.status)
+        : `${getLunaLabel(rendererSnapshot.luna.status)} / ${rendererSnapshot.luna.sessionId}`;
   }
   if (dashboardCommitsElement !== null) {
-    dashboardCommitsElement.textContent = `本地 ${snapshot.commits.local ?? '—'} / 远端 ${snapshot.commits.remote ?? '—'}`;
+    dashboardCommitsElement.textContent = `本地 ${rendererSnapshot.commits.local ?? '—'} / 远端 ${rendererSnapshot.commits.remote ?? '—'}`;
   }
   if (dashboardErrorElement !== null) {
     dashboardErrorElement.textContent =
-      snapshot.recentError === null ? '无' : `${snapshot.recentError.code}: ${snapshot.recentError.message}`;
+      rendererSnapshot.recentError === null
+        ? '无'
+        : `${rendererSnapshot.recentError.code}：${rendererSnapshot.recentError.message}`;
   }
+  if (dashboardSuggestionElement !== null)
+    dashboardSuggestionElement.textContent = `建议：${getDashboardSuggestion(rendererSnapshot)}`;
+  applyDashboardActionStates(rendererSnapshot);
 }
 
-async function refreshDashboard(): Promise<void> {
-  try {
-    renderDashboard(await window.desktopApi.getDashboardSnapshot());
-  } catch {
-    if (dashboardErrorElement !== null) dashboardErrorElement.textContent = '状态面板不可用';
-  }
+function refreshDashboard(): Promise<void> {
+  if (refreshInFlight !== null) return refreshInFlight;
+  refreshInFlight = (async () => {
+    try {
+      renderDashboard(await window.desktopApi.getDashboardSnapshot());
+    } catch (error) {
+      if (dashboardErrorElement !== null) dashboardErrorElement.textContent = '状态面板不可用';
+      showOperationError(error, '状态面板不可用');
+    }
+  })().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
 }
 
 function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand | null {
-  const command = button.dataset.dashboardCommand;
-  if (
-    command === undefined ||
-    ![
-      'start',
-      'pause',
-      'retry-current-stage',
-      'rebind',
-      'governance-consistency-check',
-      'open-edge',
-      'open-project',
-      'view-report',
-    ].includes(command)
-  ) {
-    return null;
+  const command = button.dataset.dashboardCommand as DashboardCommandName | undefined;
+  if (command === undefined || !dashboardCommandNames.includes(command)) return null;
+  if (currentSnapshot !== null) {
+    const state = readActionState(currentSnapshot, command);
+    if (!state.enabled || state.busy || pendingDashboardCommands.has(command)) {
+      setStatus(state.reason ?? '该动作当前不可用，请等待状态更新。');
+      return null;
+    }
   }
-  if (dangerousDashboardCommands.has(command as DashboardCommandName)) {
-    if (!window.confirm(`确认执行“${command}”？`)) return null;
+  if (dangerousDashboardCommands.has(command)) {
+    const labels: Record<string, string> = {
+      start: '启动自动循环',
+      pause: '暂停自动循环',
+      'retry-current-stage': '重试当前阶段',
+      rebind: '重新绑定 Sol 会话',
+    };
+    if (!window.confirm(`确认执行“${labels[command]}”？`)) return null;
     return { command: command as 'start' | 'pause' | 'retry-current-stage' | 'rebind', confirm: true };
   }
   return { command: command as 'governance-consistency-check' | 'open-edge' | 'open-project' | 'view-report' };
 }
+
+async function executeDashboardCommandFromButton(button: HTMLButtonElement): Promise<void> {
+  const command = button.dataset.dashboardCommand as DashboardCommandName | undefined;
+  const dashboardCommand = dashboardCommandFromButton(button);
+  if (command === undefined || dashboardCommand === null) return;
+  pendingDashboardCommands.add(command);
+  if (currentSnapshot !== null) applyDashboardActionStates(currentSnapshot);
+  setStatus('动作已接受，后台处理中…');
+  try {
+    const result = await window.desktopApi.executeDashboardCommand(dashboardCommand);
+    setStatus(result.accepted ? `动作已接受，后台处理中：${result.message}` : `动作未执行：${result.message}`);
+    await refreshDashboard();
+  } catch (error) {
+    showOperationError(error, '状态面板命令执行失败');
+    await refreshDashboard();
+  } finally {
+    pendingDashboardCommands.delete(command);
+    if (currentSnapshot !== null) applyDashboardActionStates(currentSnapshot);
+  }
+}
+
+const projectOperationButtons = [
+  selectDirectoryButton,
+  scanButton,
+  checkGitAccessButton,
+  cloneInitializeButton,
+  adoptInitializeButton,
+  saveButton,
+  previewButton,
+];
 
 if (statusElement !== null && versionElement !== null) {
   window.desktopApi
@@ -167,96 +426,143 @@ if (statusElement !== null && versionElement !== null) {
       statusElement.textContent = '就绪 — 尚未运行自动化循环。';
       versionElement.textContent = `Version ${runtimeInfo.version}`;
     })
-    .catch(() => {
-      statusElement.textContent = '就绪';
+    .catch((error) => {
+      showOperationError(error, '运行时信息不可用');
       versionElement.textContent = '运行时信息不可用';
     });
 }
 
-void refreshDashboard();
-
 document.querySelectorAll<HTMLButtonElement>('[data-dashboard-command]').forEach((button) => {
-  button.addEventListener('click', async () => {
-    const command = dashboardCommandFromButton(button);
-    if (command === null) return;
-    try {
-      const result = await window.desktopApi.executeDashboardCommand(command);
-      setStatus(result.message);
-      await refreshDashboard();
-    } catch {
-      setStatus('状态面板命令执行失败');
-    }
+  button.addEventListener('click', () => void executeDashboardCommandFromButton(button));
+});
+
+scanButton?.addEventListener('click', () => {
+  void runProjectOperation({
+    buttons: projectOperationButtons,
+    startMessage: '正在扫描 Git 仓库…',
+    action: scanSelectedProject,
+    successMessage: () =>
+      scanResult?.governanceManifestStatus === 'invalid'
+        ? `扫描完成，但 governance manifest 无效：${scanResult.governanceManifestError?.message ?? '未知错误'}`
+        : '扫描完成，请确认目标分支和报告目录。',
+    errorFallback: '项目扫描失败',
   });
 });
 
-scanButton?.addEventListener('click', async () => {
-  setStatus('正在扫描 Git 仓库…');
-  try {
-    await scanSelectedProject();
-    if (scanResult === null) throw new Error('扫描没有返回项目');
-    setStatus(
-      scanResult.governanceManifestStatus === 'invalid'
-        ? `扫描完成，但 governance manifest 无效：${scanResult.governanceManifestError?.message ?? '未知错误'}`
-        : '扫描完成，请确认目标分支和报告目录。',
-    );
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '项目扫描失败');
-  }
+selectDirectoryButton?.addEventListener('click', () => {
+  void runProjectOperation({
+    buttons: projectOperationButtons,
+    startMessage: '正在打开目录选择器…',
+    action: () => window.desktopApi.selectProjectDirectory(),
+    successMessage: (selected) => {
+      if (selected !== null && localPathElement !== null) localPathElement.value = selected;
+      return selected === null ? '未选择目录。' : '已选择本地目录，请继续扫描、克隆或接管初始化。';
+    },
+    errorFallback: '选择目录失败',
+  });
 });
 
-selectDirectoryButton?.addEventListener('click', async () => {
-  try {
-    const selected = await window.desktopApi.selectProjectDirectory();
-    if (selected !== null && localPathElement !== null) {
-      localPathElement.value = selected;
-      setStatus('已选择本地目录，请选择扫描、克隆或接管初始化。');
-    }
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '选择目录失败');
-  }
+checkGitAccessButton?.addEventListener('click', () => {
+  void runProjectOperation({
+    buttons: projectOperationButtons,
+    startMessage: '正在检查 Git 远程授权…',
+    action: checkRemoteAccess,
+    successMessage: (message) => message,
+    errorFallback: 'Git 远程授权检查失败',
+  });
 });
 
-document.querySelector<HTMLButtonElement>('#check-git-access')?.addEventListener('click', async () => {
-  try {
-    await checkRemoteAccess();
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : 'Git 远程授权检查失败');
-  }
+cloneInitializeButton?.addEventListener('click', () => {
+  void runProjectOperation({
+    buttons: projectOperationButtons,
+    startMessage: '正在克隆并初始化项目…',
+    action: () => initializeProject('clone'),
+    successMessage: () => '项目初始化操作已完成。',
+    errorFallback: '克隆初始化失败',
+  });
 });
 
-cloneInitializeButton?.addEventListener('click', async () => {
-  try {
-    await initializeProject('clone');
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '克隆初始化失败');
-  }
+adoptInitializeButton?.addEventListener('click', () => {
+  void runProjectOperation({
+    buttons: projectOperationButtons,
+    startMessage: '正在备份并初始化治理目录…',
+    action: () => initializeProject('adopt'),
+    successMessage: () => '项目初始化操作已完成。',
+    errorFallback: '已有项目初始化失败',
+  });
 });
 
-adoptInitializeButton?.addEventListener('click', async () => {
-  try {
-    await initializeProject('adopt');
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '已有项目初始化失败');
-  }
-});
-
-form?.addEventListener('submit', async (event) => {
+form?.addEventListener('submit', (event) => {
   event.preventDefault();
-  try {
-    const config = await window.desktopApi.saveProjectConfig(getConfigInput());
-    setStatus(`配置已保存：${config.projectId}`);
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '配置保存失败');
+  void runProjectOperation({
+    buttons: projectOperationButtons,
+    startMessage: '正在保存项目配置…',
+    action: () => window.desktopApi.saveProjectConfig(getConfigInput()),
+    successMessage: (config) => `配置已保存：${config.projectId}`,
+    errorFallback: '配置保存失败',
+  });
+});
+
+previewButton?.addEventListener('click', () => {
+  void runProjectOperation({
+    buttons: projectOperationButtons,
+    startMessage: '正在生成 Sol 初始化提示词…',
+    action: async () => {
+      if (promptElement === null) throw new Error('提示词预览区域不可用');
+      const preview = await window.desktopApi.previewSolPrompt(getConfigInput());
+      promptElement.textContent = preview.initializationPrompt;
+      return preview;
+    },
+    successMessage: () => 'Sol 初始化提示词预览已生成。',
+    errorFallback: '提示词预览失败',
+  });
+});
+
+function closeHelp(): void {
+  if (helpDialog === null || helpDialog.hidden) return;
+  helpDialog.hidden = true;
+  helpPreviouslyFocused?.focus();
+  helpPreviouslyFocused = null;
+}
+
+function openHelp(): void {
+  if (helpDialog === null) return;
+  helpPreviouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  helpDialog.hidden = false;
+  helpCloseButton?.focus();
+}
+
+helpButton?.addEventListener('click', openHelp);
+helpCloseButton?.addEventListener('click', closeHelp);
+helpDialog?.addEventListener('click', (event) => {
+  if (event.target === helpDialog) closeHelp();
+});
+helpDialog?.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeHelp();
+    return;
+  }
+  if (event.key !== 'Tab' || helpDialog === null) return;
+  const focusable = Array.from(
+    helpDialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  );
+  if (focusable.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const first = focusable[0]!;
+  const last = focusable[focusable.length - 1]!;
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
   }
 });
 
-previewButton?.addEventListener('click', async () => {
-  if (promptElement === null) return;
-  try {
-    const preview = await window.desktopApi.previewSolPrompt(getConfigInput());
-    promptElement.textContent = preview.initializationPrompt;
-    setStatus('Sol 初始化提示词预览已生成。');
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '提示词预览失败');
-  }
-});
+void refreshDashboard();
+window.setInterval(() => void refreshDashboard(), 1500);
