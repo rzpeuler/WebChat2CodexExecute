@@ -161,7 +161,15 @@ describe('CodexRunner', () => {
     const result = await runner.runTask(input(root, codex));
     expect(result.status).toBe('COMPLETED');
     expect(result.config).toEqual({ model: 'gpt-5.6-luna', sandbox: 'danger-full-access', approvalPolicy: 'never' });
-    expect(processArgs.slice(0, 5)).toEqual(['exec', '--model', 'gpt-5.6-luna', '--sandbox', 'danger-full-access']);
+    expect(processArgs.slice(0, 7)).toEqual([
+      '--ask-for-approval',
+      'never',
+      'exec',
+      '--model',
+      'gpt-5.6-luna',
+      '--sandbox',
+      'danger-full-access',
+    ]);
     expect(processArgs).toContain('--json');
     expect(processArgs).not.toContain('push');
     expect(result.stderrSummary).not.toContain('should-not-leak');

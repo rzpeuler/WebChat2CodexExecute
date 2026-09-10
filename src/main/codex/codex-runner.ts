@@ -931,13 +931,13 @@ export class CodexRunner {
 
   private execArgs(execution: CodexExecutionConfig, outputPath: string, prompt: string): string[] {
     return [
+      '--ask-for-approval',
+      execution.approvalPolicy,
       'exec',
       '--model',
       execution.model,
       '--sandbox',
       execution.sandbox,
-      '--ask-for-approval',
-      execution.approvalPolicy,
       '--json',
       '--output-last-message',
       outputPath,
