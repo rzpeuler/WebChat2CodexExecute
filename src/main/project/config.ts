@@ -11,10 +11,20 @@ import {
   type ProjectConfigInput,
   type ProjectScanResult,
 } from '../../shared/contracts/project-config.js';
-import { GovernanceManifestStore, type GovernanceManifestDocument } from '../governance/manifest.js';
+import {
+  GovernanceManifestError,
+  GovernanceManifestStore,
+  type GovernanceManifestDocument,
+} from '../governance/manifest.js';
 import { SolPromptCompiler, type SolPromptCompilation } from '../sol/prompt-compiler.js';
-import { assertSafeProjectPath, realProjectRoot, PathSafetyError } from '../security/path-safety.js';
+import {
+  assertSafeFilePath,
+  assertSafeProjectPath,
+  realProjectRoot,
+  PathSafetyError,
+} from '../security/path-safety.js';
 import { resolveProjectPath } from '../security/path-safety.js';
+import { compareCodePoints } from '../../shared/sorting.js';
 
 const execFile = promisify(execFileCallback);
 const DEFAULT_MANIFEST_RELATIVE_PATH = 'docs/governance/governance-manifest.yaml';
@@ -153,7 +163,7 @@ async function listGovernanceDirectoryCandidates(
   }
 
   const candidates: string[] = [];
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+  for (const entry of entries.sort((left, right) => compareCodePoints(left.name, right.name))) {
     const entryPath = join(directoryPath, entry.name);
     if (entry.isSymbolicLink()) {
       continue;
@@ -167,7 +177,7 @@ async function listGovernanceDirectoryCandidates(
     }
 
     const nestedEntries = await readdir(entryPath, { withFileTypes: true });
-    for (const nestedEntry of nestedEntries.sort((left, right) => left.name.localeCompare(right.name))) {
+    for (const nestedEntry of nestedEntries.sort((left, right) => compareCodePoints(left.name, right.name))) {
       if (
         nestedEntry.isFile() &&
         !nestedEntry.isSymbolicLink() &&
@@ -212,7 +222,7 @@ async function discoverGovernanceDocumentCandidates(
     ...scopedDirectoryCandidates.flat(),
   ]
     .map((filePath) => ({ filePath, relativePath: normalizedRelativePath(projectRoot, filePath) }))
-    .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+    .sort((left, right) => compareCodePoints(left.relativePath, right.relativePath));
 
   return paths.map(({ relativePath }) => ({
     id: `discovered-governance:${relativePath}`,
@@ -273,6 +283,18 @@ export async function scanGitProject(localPath: string): Promise<ProjectScanResu
     });
   }
   const manifestPath = resolveProjectPath(repositoryRoot, DEFAULT_MANIFEST_RELATIVE_PATH);
+  try {
+    await assertSafeProjectPath(repositoryRoot, manifestPath);
+  } catch (error) {
+    if (error instanceof PathSafetyError) {
+      throw new ProjectConfigError(
+        error.code === 'PATH_OUTSIDE_PROJECT' ? 'PATH_OUTSIDE_PROJECT' : 'INVALID_PROJECT_PATH',
+        error.message,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
   let manifestExists = false;
   try {
     await access(manifestPath);
@@ -284,32 +306,27 @@ export async function scanGitProject(localPath: string): Promise<ProjectScanResu
       });
     }
   }
-  try {
-    await assertSafeProjectPath(repositoryRoot, manifestPath);
-  } catch (error) {
-    if (error instanceof PathSafetyError) {
-      throw new ProjectConfigError(
-        error.code === 'PATH_OUTSIDE_PROJECT' ? 'PATH_OUTSIDE_PROJECT' : 'INVALID_PROJECT_PATH',
-        error.message,
-        {
-          cause: error,
-        },
-      );
-    }
-    throw error;
-  }
 
   let registeredGovernanceDocumentCandidates: ProjectScanResult['governanceDocumentCandidates'] = [];
+  let governanceManifestStatus: ProjectScanResult['governanceManifestStatus'] = manifestExists ? 'valid' : 'missing';
+  let governanceManifestError: ProjectScanResult['governanceManifestError'];
   if (manifestExists) {
     try {
       const manifest = await new GovernanceManifestStore(repositoryRoot, manifestPath).load();
+      if (manifest === null) {
+        governanceManifestStatus = 'missing';
+      }
       registeredGovernanceDocumentCandidates = await Promise.all(
         (manifest?.documents ?? []).map((document) => toGovernanceDocumentCandidate(repositoryRoot, document)),
       );
     } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'MANIFEST_INVALID_YAML')) {
+      if (!(
+        error instanceof GovernanceManifestError && ['MANIFEST_INVALID_YAML', 'MANIFEST_INVALID'].includes(error.code)
+      )) {
         throw error;
       }
+      governanceManifestStatus = 'invalid';
+      governanceManifestError = { code: error.code, message: error.message };
     }
   }
   const governanceDocumentCandidates = mergeGovernanceDocumentCandidates(
@@ -325,6 +342,8 @@ export async function scanGitProject(localPath: string): Promise<ProjectScanResu
     headCommit: headResult.value,
     governanceManifestPath: manifestPath,
     governanceManifestExists: manifestExists,
+    governanceManifestStatus,
+    ...(governanceManifestError === undefined ? {} : { governanceManifestError }),
     governanceDocumentCandidates,
   };
 }
@@ -416,11 +435,18 @@ export class ProjectConfigStore {
   private readonly store: AtomicJsonFileStore<ProjectConfig[]>;
 
   constructor(filePath: string) {
-    this.store = new AtomicJsonFileStore(filePath, {
+    const persistedFilePath = resolve(filePath);
+    const safePersistenceCheck = async (): Promise<void> => {
+      await assertSafeFilePath(persistedFilePath);
+      await assertSafeFilePath(`${persistedFilePath}.lock`);
+      await assertSafeFilePath(`${persistedFilePath}.bak`);
+    };
+    this.store = new AtomicJsonFileStore(persistedFilePath, {
       validate: (value) => {
         assertNoForbiddenKeys(value);
         return parseProjectConfigList(value);
       },
+      beforeOperation: safePersistenceCheck,
     });
   }
 
@@ -495,7 +521,45 @@ export class ProjectConfigService {
   }
 
   async previewSolPrompt(configInput: ProjectConfigInput | ProjectConfig): Promise<SolPromptCompilation> {
-    const project = normalizeProjectConfig(configInput);
+    if (typeof configInput !== 'object' || configInput === null || Array.isArray(configInput)) {
+      throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project config must be an object');
+    }
+    const scan = await scanGitProject(configInput.localPath);
+    const suppliedBranch = typeof configInput.currentBranch === 'string' ? configInput.currentBranch.trim() : '';
+    if (suppliedBranch !== '' && suppliedBranch !== scan.currentBranch) {
+      throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project current branch does not match the Git scan');
+    }
+    const suppliedCommit = typeof configInput.headCommit === 'string' ? configInput.headCommit.trim() : '';
+    if (suppliedCommit !== '' && suppliedCommit !== scan.headCommit) {
+      throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project HEAD commit does not match the Git scan');
+    }
+    const suppliedRemote =
+      configInput.remoteUrl === undefined ? scan.remoteUrl : redactRemoteUrl(configInput.remoteUrl);
+    if (suppliedRemote !== scan.remoteUrl) {
+      throw new ProjectConfigError('INVALID_PROJECT_CONFIG', 'Project remote does not match the Git scan');
+    }
+    const requestedManifestPath = resolveProjectPath(
+      scan.localPath,
+      configInput.governanceManifestPath ?? scan.governanceManifestPath,
+    );
+    if (
+      scan.governanceManifestStatus === 'invalid' &&
+      candidatePathKey(requestedManifestPath) === candidatePathKey(scan.governanceManifestPath)
+    ) {
+      throw new ProjectConfigError(
+        'INVALID_PROJECT_CONFIG',
+        `Governance manifest is invalid: ${scan.governanceManifestError?.message ?? 'unknown manifest error'}`,
+      );
+    }
+    const project = normalizeProjectConfig({
+      ...configInput,
+      projectId: configInput.projectId ?? scan.projectId,
+      localPath: scan.localPath,
+      remoteUrl: scan.remoteUrl,
+      currentBranch: scan.currentBranch,
+      headCommit: scan.headCommit,
+      governanceManifestPath: configInput.governanceManifestPath ?? scan.governanceManifestPath,
+    });
     await realProjectRoot(project.localPath);
     await assertSafeProjectPath(project.localPath, project.reportDirectory);
     await assertSafeProjectPath(project.localPath, project.governanceManifestPath);

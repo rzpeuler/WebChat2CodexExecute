@@ -6,6 +6,7 @@ import type {
   GovernanceManifestDocument,
   GovernanceManifestIndex,
 } from '../governance/manifest.js';
+import { compareCodePoints } from '../../shared/sorting.js';
 
 export type WritingBlockType = 'LUNA_TASK' | 'GOVERNANCE_CHANGE' | 'ARCHITECTURE_FREEZE' | 'BLOCKED';
 
@@ -23,7 +24,7 @@ export interface SolPromptInput {
   currentStatus?: string;
   recentLunaReportSummary?: string;
   recentGovernanceGaps?: string[];
-  taskBook?: Record<string, unknown>;
+  taskBook?: Record<string, unknown> | string;
 }
 
 export interface SolPromptCompilation {
@@ -85,12 +86,28 @@ function sanitizeText(value: string): string {
     .replace(
       /\b(?:[a-z\d_-]*?(?:cookie|password|token|secret|credentials?|private[_-]?key|authorization|access[_-]?key|api[_-]?key|auth)[a-z\d_-]*)\s*[:=]\s*(?!\[REDACTED(?:-CREDENTIAL)?\])[^\s,;]+/gi,
       (match) => `${match.split(/\s*[:=]\s*/)[0]}: [REDACTED]`,
+    )
+    .replace(/"([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*("(?:\\.|[^"\\])*"|[^\s,}\]]+)/gi, (match, key: string) =>
+      SENSITIVE_KEY_PATTERN.test(key) ? `"${key}": "[REDACTED]"` : match,
     );
+}
+
+function parseJsonObjectString(value: string): Record<string, unknown> | null {
+  if (!value.trimStart().startsWith('{')) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function sanitizeValue(value: unknown): unknown {
   if (typeof value === 'string') {
-    return sanitizeText(value);
+    const parsed = parseJsonObjectString(value);
+    return parsed === null ? sanitizeText(value) : sanitizeValue(parsed);
   }
   if (Array.isArray(value)) {
     return value.map(sanitizeValue);
@@ -98,7 +115,7 @@ function sanitizeValue(value: unknown): unknown {
   if (typeof value === 'object' && value !== null) {
     return Object.fromEntries(
       Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareCodePoints(left, right))
         .map(([key, child]) => [key, SENSITIVE_KEY_PATTERN.test(key) ? '[REDACTED]' : sanitizeValue(child)]),
     );
   }
@@ -159,10 +176,25 @@ function formatArchitecture(revisions: SolArchitectureRevision[]): string {
   return `architecture_revisions: ${stableJson(revisions)}`;
 }
 
+function formatFieldValue(value: unknown): string {
+  if (typeof value === 'string') {
+    const parsed = parseJsonObjectString(value);
+    return parsed === null ? sanitizeText(value) : stableJson(parsed);
+  }
+  return stableJson(value);
+}
+
+function taskBookFields(value: Record<string, unknown> | string): Record<string, unknown> {
+  if (isRecord(value)) {
+    return value;
+  }
+  return { task_book: parseJsonObjectString(value) ?? value };
+}
+
 export function compileWritingBlock(type: WritingBlockType, fields: Record<string, unknown>): string {
   const body = Object.entries(fields)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${key}: ${typeof value === 'string' ? sanitizeText(value) : stableJson(value)}`)
+    .sort(([left], [right]) => compareCodePoints(left, right))
+    .map(([key, value]) => `${key}: ${formatFieldValue(value)}`)
     .join('\n');
   return `[WRITING_BLOCK type="${type}"]\n${body}\n[/WRITING_BLOCK]`;
 }
@@ -190,9 +222,9 @@ export class SolPromptCompiler {
       formatArchitecture(architectureRevisions),
       `current_phase: ${sanitizeText(input.currentPhase ?? 'INITIALIZATION')}`,
       `current_status: ${sanitizeText(input.currentStatus ?? 'IDLE')}`,
-      `recent_luna_report_summary: ${sanitizeText(input.recentLunaReportSummary ?? '[none]')}`,
+      `recent_luna_report_summary: ${formatFieldValue(input.recentLunaReportSummary ?? '[none]')}`,
       `recent_governance_gaps: ${stableJson(input.recentGovernanceGaps ?? [])}`,
-      ...(input.taskBook === undefined ? [] : ['', compileWritingBlock('LUNA_TASK', input.taskBook)]),
+      ...(input.taskBook === undefined ? [] : ['', compileWritingBlock('LUNA_TASK', taskBookFields(input.taskBook))]),
     ].join('\n');
     const initializationPrompt = `${INITIALIZATION_TEMPLATE}\n\n${dynamicContext}`;
     return { initializationPrompt, dynamicContext };

@@ -26,6 +26,7 @@ export interface AtomicJsonFileStoreOptions<T> {
   lock?: FileLockOptions;
   onDiagnostic?: (diagnostic: PersistenceDiagnostic) => void;
   chmod?: ChmodFile;
+  beforeOperation?: () => Promise<void>;
 }
 
 export interface FileLockOptions {
@@ -56,6 +57,7 @@ export interface JsonlFileEventLogOptions extends FileLockOptions {
 export interface AtomicTextFileStoreOptions extends FileLockOptions {
   onDiagnostic?: (diagnostic: PersistenceDiagnostic) => void;
   chmod?: ChmodFile;
+  beforeOperation?: () => Promise<void>;
 }
 
 export class SnapshotFormatError extends Error {
@@ -202,9 +204,12 @@ async function withFileLock<T>(
   targetPath: string,
   operation: () => Promise<T>,
   options: FileLockOptions | undefined,
+  beforeOperation?: () => Promise<void>,
 ): Promise<T> {
+  await beforeOperation?.();
   const release = await acquireFileLock(targetPath, options);
   try {
+    await beforeOperation?.();
     return await operation();
   } finally {
     await release();
@@ -222,9 +227,15 @@ export function withSharedStateTransactionLock<T>(
   return withFileLock(resolve(lockPath), operation, options);
 }
 
-async function replaceAtomically(tempPath: string, targetPath: string): Promise<void> {
+async function replaceAtomically(
+  tempPath: string,
+  targetPath: string,
+  beforeOperation?: () => Promise<void>,
+): Promise<void> {
   try {
+    await beforeOperation?.();
     await rename(tempPath, targetPath);
+    await beforeOperation?.();
     await rm(`${targetPath}.bak`, { force: true });
     return;
   } catch (error) {
@@ -237,18 +248,24 @@ async function replaceAtomically(tempPath: string, targetPath: string): Promise<
   // the replacement crash-recoverable: load() can use it if the process stops
   // after the old file has been moved but before the new file is installed.
   const backupPath = `${targetPath}.bak`;
+  await beforeOperation?.();
   await rm(backupPath, { force: true });
   try {
+    await beforeOperation?.();
     await rename(targetPath, backupPath);
+    await beforeOperation?.();
     await rename(tempPath, targetPath);
+    await beforeOperation?.();
     await rm(backupPath, { force: true });
   } catch (error) {
     try {
+      await beforeOperation?.();
       const targetExists = await readFile(targetPath).then(
         () => true,
         () => false,
       );
       if (!targetExists) {
+        await beforeOperation?.();
         await rename(backupPath, targetPath);
       }
     } catch {
@@ -259,9 +276,14 @@ async function replaceAtomically(tempPath: string, targetPath: string): Promise<
   }
 }
 
-async function readJson<T>(filePath: string, validate: SnapshotValidator<T> | undefined): Promise<T> {
+async function readJson<T>(
+  filePath: string,
+  validate: SnapshotValidator<T> | undefined,
+  beforeRead?: () => Promise<void>,
+): Promise<T> {
   let parsed: unknown;
   try {
+    await beforeRead?.();
     parsed = JSON.parse(await readFile(filePath, 'utf8')) as unknown;
   } catch (error) {
     if (isNodeError(error, 'ENOENT')) {
@@ -285,6 +307,7 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
   private readonly lock: FileLockOptions | undefined;
   private readonly onDiagnostic: ((diagnostic: PersistenceDiagnostic) => void) | undefined;
   private readonly chmod: ChmodFile;
+  private readonly beforeOperation: (() => Promise<void>) | undefined;
   private lastLoadDiagnostic: SnapshotLoadDiagnostic | null = null;
   private writeChain: Promise<void> = Promise.resolve();
 
@@ -294,11 +317,12 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
     this.lock = options.lock;
     this.onDiagnostic = options.onDiagnostic;
     this.chmod = options.chmod ?? chmod;
+    this.beforeOperation = options.beforeOperation;
   }
 
   load(): Promise<T | null> {
     this.lastLoadDiagnostic = null;
-    return withFileLock(this.filePath, () => this.loadWithoutLock(), this.lock);
+    return withFileLock(this.filePath, () => this.loadWithoutLock(), this.lock, this.beforeOperation);
   }
 
   getLastLoadDiagnostic(): SnapshotLoadDiagnostic | null {
@@ -307,11 +331,11 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
 
   private async loadWithoutLock(): Promise<T | null> {
     try {
-      return await readJson<T>(this.filePath, this.validate);
+      return await readJson<T>(this.filePath, this.validate, this.beforeOperation);
     } catch (error) {
       if (isNodeError(error, 'ENOENT')) {
         try {
-          return await readJson<T>(`${this.filePath}.bak`, this.validate);
+          return await readJson<T>(`${this.filePath}.bak`, this.validate, this.beforeOperation);
         } catch (backupError) {
           if (isNodeError(backupError, 'ENOENT')) {
             return null;
@@ -321,7 +345,7 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
       }
 
       try {
-        const backup = await readJson<T>(`${this.filePath}.bak`, this.validate);
+        const backup = await readJson<T>(`${this.filePath}.bak`, this.validate, this.beforeOperation);
         const diagnostic: SnapshotLoadDiagnostic = {
           code: 'PRIMARY_SNAPSHOT_CORRUPT_USING_BACKUP',
           filePath: this.filePath,
@@ -354,14 +378,18 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
       async () => {
         const tempPath = join(dirname(this.filePath), `.${basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`);
         try {
+          await this.beforeOperation?.();
           await writePrivateFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
-          await replaceAtomically(tempPath, this.filePath);
+          await this.beforeOperation?.();
+          await replaceAtomically(tempPath, this.filePath, this.beforeOperation);
+          await this.beforeOperation?.();
           await this.chmodWithDiagnostic(this.filePath);
         } finally {
           await rm(tempPath, { force: true });
         }
       },
       this.lock,
+      this.beforeOperation,
     );
   }
 
@@ -387,10 +415,13 @@ export class AtomicJsonFileStore<T> implements StateSnapshotStore<T>, Transactio
       withFileLock(
         this.filePath,
         async () => {
+          await this.beforeOperation?.();
           await rm(this.filePath, { force: true });
+          await this.beforeOperation?.();
           await rm(`${this.filePath}.bak`, { force: true });
         },
         this.lock,
+        this.beforeOperation,
       ),
     );
     this.writeChain = clearOperation.catch(() => undefined);
@@ -408,6 +439,7 @@ export class AtomicTextFileStore implements StateSnapshotStore<string> {
   private readonly lock: FileLockOptions | undefined;
   private readonly onDiagnostic: ((diagnostic: PersistenceDiagnostic) => void) | undefined;
   private readonly chmod: ChmodFile;
+  private readonly beforeOperation: (() => Promise<void>) | undefined;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(filePath: string, options: AtomicTextFileStoreOptions = {}) {
@@ -415,6 +447,7 @@ export class AtomicTextFileStore implements StateSnapshotStore<string> {
     this.lock = options;
     this.onDiagnostic = options.onDiagnostic;
     this.chmod = options.chmod ?? chmod;
+    this.beforeOperation = options.beforeOperation;
   }
 
   load(): Promise<string | null> {
@@ -422,12 +455,14 @@ export class AtomicTextFileStore implements StateSnapshotStore<string> {
       this.filePath,
       async () => {
         try {
+          await this.beforeOperation?.();
           return await readFile(this.filePath, 'utf8');
         } catch (error) {
           if (!isNodeError(error, 'ENOENT')) {
             throw error;
           }
           try {
+            await this.beforeOperation?.();
             return await readFile(`${this.filePath}.bak`, 'utf8');
           } catch (backupError) {
             if (isNodeError(backupError, 'ENOENT')) {
@@ -438,6 +473,7 @@ export class AtomicTextFileStore implements StateSnapshotStore<string> {
         }
       },
       this.lock,
+      this.beforeOperation,
     );
   }
 
@@ -451,8 +487,11 @@ export class AtomicTextFileStore implements StateSnapshotStore<string> {
             `.${basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`,
           );
           try {
+            await this.beforeOperation?.();
             await writePrivateFile(tempPath, value);
-            await replaceAtomically(tempPath, this.filePath);
+            await this.beforeOperation?.();
+            await replaceAtomically(tempPath, this.filePath, this.beforeOperation);
+            await this.beforeOperation?.();
             try {
               await this.chmod(this.filePath, 0o600);
             } catch (error) {
@@ -472,6 +511,7 @@ export class AtomicTextFileStore implements StateSnapshotStore<string> {
           }
         },
         this.lock,
+        this.beforeOperation,
       ),
     );
     this.writeChain = saveOperation.catch(() => undefined);

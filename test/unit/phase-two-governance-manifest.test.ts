@@ -111,4 +111,25 @@ describe('governance manifest registry', () => {
       await expect(new GovernanceManifestStore(projectRoot, manifestPath).save(manifest)).resolves.toBeUndefined();
     }
   });
+
+  it('rechecks the manifest target before both load and save', async () => {
+    const projectRoot = await temporaryDirectory();
+    const outside = await temporaryDirectory();
+    const outsideManifest = join(outside, 'manifest.yaml');
+    const linkedManifest = join(projectRoot, 'governance-manifest.yaml');
+    await writeFile(outsideManifest, 'version: 1\ndocuments: []\n', 'utf8');
+    let linked = true;
+    try {
+      await symlink(outsideManifest, linkedManifest, 'file');
+    } catch {
+      linked = false;
+    }
+    if (linked) {
+      const store = new GovernanceManifestStore(projectRoot, linkedManifest);
+      await expect(store.load()).rejects.toMatchObject({ code: 'MANIFEST_PATH_OUTSIDE_PROJECT' });
+      await expect(store.save({ version: 1, documents: [] })).rejects.toMatchObject({
+        code: 'MANIFEST_PATH_OUTSIDE_PROJECT',
+      });
+    }
+  });
 });

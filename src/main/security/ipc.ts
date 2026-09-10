@@ -10,6 +10,7 @@ export const PROJECT_CONFIG_LIST_CHANNEL = 'project-config:list';
 export const SOL_PROMPT_PREVIEW_CHANNEL = 'sol:prompt-preview';
 
 export interface IpcHandlerOptions {
+  trustedRendererUrl: string;
   getTrustedWindow?: () => BrowserWindow | null;
 }
 
@@ -36,13 +37,8 @@ function assertTrustedSender(event: IpcMainInvokeEvent, options: IpcHandlerOptio
   if (trustedWindow !== undefined && (trustedWindow === null || trustedWindow.webContents !== event.sender)) {
     throw new IpcSecurityError('IPC_UNAUTHORIZED', 'IPC sender is not the trusted main window');
   }
-  try {
-    if (new URL(senderFrame.url).protocol !== 'file:') {
-      throw new IpcSecurityError('IPC_UNAUTHORIZED', 'IPC sender is not a controlled renderer');
-    }
-  } catch (error) {
-    if (error instanceof IpcSecurityError) throw error;
-    throw new IpcSecurityError('IPC_UNAUTHORIZED', 'IPC sender URL is invalid');
+  if (senderFrame.url !== options.trustedRendererUrl) {
+    throw new IpcSecurityError('IPC_UNAUTHORIZED', 'IPC sender is not the trusted renderer document');
   }
 }
 
@@ -69,8 +65,8 @@ function assertProjectConfigInput(value: unknown): asserts value is ProjectConfi
 export function registerIpcHandlers(
   ipcMain: IpcMain,
   version: string,
-  projectConfigService?: ProjectConfigService,
-  options: IpcHandlerOptions = {},
+  projectConfigService: ProjectConfigService | undefined,
+  options: IpcHandlerOptions,
 ): void {
   ipcMain.handle(RUNTIME_INFO_CHANNEL, (event): RuntimeInfo => {
     assertTrustedSender(event, options);

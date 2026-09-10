@@ -165,4 +165,38 @@ describe('Sol initialization prompt compiler', () => {
     expect(prompt).toContain('"keep":true');
     expect(prompt).toContain('[REDACTED]');
   });
+
+  it('parses and recursively redacts nested JSON strings, including malformed JSON-like text', () => {
+    const prompt = compileSolInitializationPrompt({
+      project,
+      governance,
+      recentLunaReportSummary: JSON.stringify({
+        summary: 'safe',
+        nested: { apiKey: 'nested-api-secret', values: [{ privateKey: 'nested-private-secret' }] },
+      }),
+      taskBook: JSON.stringify({
+        task_id: 'task-json',
+        details: { password: 'nested-password-secret', cookie: 'nested-cookie-secret' },
+      }),
+    });
+
+    for (const secret of [
+      'nested-api-secret',
+      'nested-private-secret',
+      'nested-password-secret',
+      'nested-cookie-secret',
+    ]) {
+      expect(prompt).not.toContain(secret);
+    }
+    expect(prompt).toContain('"apiKey":"[REDACTED]"');
+    expect(prompt).toContain('"password":"[REDACTED]"');
+
+    const malformedPrompt = compileSolInitializationPrompt({
+      project,
+      governance,
+      recentLunaReportSummary: '{"authorization":"malformed-secret","safe": }',
+    });
+    expect(malformedPrompt).not.toContain('malformed-secret');
+    expect(malformedPrompt).toContain('"authorization": "[REDACTED]"');
+  });
 });

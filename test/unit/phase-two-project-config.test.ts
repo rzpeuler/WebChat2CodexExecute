@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { compareCodePoints } from '../../src/shared/sorting.js';
 import {
   ProjectConfigService,
   ProjectConfigStore,
@@ -62,6 +63,7 @@ describe('phase two project configuration', () => {
     expect(saved.localPath).toBe(await realpath(repository));
     expect(saved.headCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(saved.remoteUrl).toBe('https://example.com/team/repo.git');
+    expect(scan.governanceManifestStatus).toBe('missing');
     expect(scan.governanceDocumentCandidates).toEqual([
       {
         id: 'discovered-governance:README.md',
@@ -88,6 +90,7 @@ describe('phase two project configuration', () => {
     );
 
     const scan = await scanGitProject(repository);
+    expect(scan.governanceManifestStatus).toBe('valid');
     expect(scan.governanceDocumentCandidates).toEqual([
       {
         id: 'policy',
@@ -124,7 +127,7 @@ describe('phase two project configuration', () => {
 
     const scan = await scanGitProject(repository);
     const paths = scan.governanceDocumentCandidates.map((candidate) => candidate.path);
-    expect(paths).toEqual([...paths].sort((left, right) => left.localeCompare(right)));
+    expect(paths).toEqual([...paths].sort(compareCodePoints));
     expect(paths).toEqual(
       expect.arrayContaining([
         'AGENTS.md',
@@ -141,6 +144,20 @@ describe('phase two project configuration', () => {
     );
     expect(discovered.length).toBeGreaterThan(0);
     expect(discovered.every((candidate) => candidate.status === 'candidate' && candidate.exists)).toBe(true);
+  });
+
+  it('reports a damaged manifest explicitly while retaining discovered candidates', async () => {
+    const repository = await gitRepository();
+    const manifestDirectory = join(repository, 'docs', 'governance');
+    await mkdir(manifestDirectory, { recursive: true });
+    await writeFile(join(manifestDirectory, 'governance-manifest.yaml'), 'documents: [', 'utf8');
+
+    const scan = await scanGitProject(repository);
+    expect(scan.governanceManifestStatus).toBe('invalid');
+    expect(scan.governanceManifestError).toMatchObject({ code: 'MANIFEST_INVALID_YAML' });
+    expect(scan.governanceDocumentCandidates).toEqual([
+      expect.objectContaining({ id: 'discovered-governance:README.md', status: 'candidate' }),
+    ]);
   });
 
   it('rejects non-repositories and report paths outside the repository', async () => {
@@ -186,6 +203,49 @@ describe('phase two project configuration', () => {
         headCommit: 'a'.repeat(40),
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PROJECT_CONFIG' });
+  });
+
+  it('re-scans Git before preview and rejects a stale HEAD baseline', async () => {
+    const repository = await gitRepository();
+    const scan = await scanGitProject(repository);
+    const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
+    await writeFile(join(repository, 'changed.txt'), 'changed\n', 'utf8');
+    await git(repository, 'add', 'changed.txt');
+    await git(repository, 'commit', '-m', 'changed');
+
+    await expect(service.previewSolPrompt({ ...scan, reportDirectory: 'reports' })).rejects.toMatchObject({
+      code: 'INVALID_PROJECT_CONFIG',
+    });
+  });
+
+  it('re-scans Git before preview and rejects a stale remote baseline', async () => {
+    const repository = await gitRepository();
+    await git(repository, 'remote', 'add', 'origin', 'https://example.com/team/old.git');
+    const scan = await scanGitProject(repository);
+    const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
+    await git(repository, 'remote', 'set-url', 'origin', 'https://example.com/team/new.git');
+
+    await expect(service.previewSolPrompt({ ...scan, reportDirectory: 'reports' })).rejects.toMatchObject({
+      code: 'INVALID_PROJECT_CONFIG',
+    });
+  });
+
+  it('rejects a symlinked config persistence target before filesystem access', async () => {
+    const repository = await gitRepository();
+    const outside = await temporaryDirectory();
+    const storePath = join(await temporaryDirectory(), 'projects.json');
+    let linked = true;
+    try {
+      await symlink(join(outside, 'projects.json'), storePath, 'file');
+    } catch {
+      linked = false;
+    }
+    if (linked) {
+      const scan = await scanGitProject(repository);
+      await expect(
+        new ProjectConfigStore(storePath).save({ ...scan, reportDirectory: 'reports' }),
+      ).rejects.toMatchObject({ code: 'PROJECT_PATH_UNSAFE' });
+    }
   });
 
   it('rejects report paths that resolve through a junction or symlink outside the repository', async () => {

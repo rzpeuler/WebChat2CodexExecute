@@ -149,7 +149,9 @@ export class GovernanceManifestStore {
         },
       );
     }
-    this.textStore = new AtomicTextFileStore(this.manifestPath);
+    this.textStore = new AtomicTextFileStore(this.manifestPath, {
+      beforeOperation: () => this.assertSafeManifestPath(),
+    });
   }
 
   getPath(): string {
@@ -193,6 +195,7 @@ export class GovernanceManifestStore {
 
   async readDocument(document: GovernanceManifestDocument): Promise<string> {
     const documentPath = await this.safeDocumentPath(document);
+    await this.safeDocumentPath(document);
     try {
       return await readFile(documentPath, 'utf8');
     } catch (error) {
@@ -206,6 +209,8 @@ export class GovernanceManifestStore {
     try {
       await realProjectRoot(this.projectRoot);
       await assertSafeProjectPath(this.projectRoot, this.manifestPath);
+      await assertSafeProjectPath(this.projectRoot, `${this.manifestPath}.lock`);
+      await assertSafeProjectPath(this.projectRoot, `${this.manifestPath}.bak`);
     } catch (error) {
       if (error instanceof PathSafetyError) {
         throw new GovernanceManifestError(

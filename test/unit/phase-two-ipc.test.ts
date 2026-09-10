@@ -33,7 +33,10 @@ function setup() {
     previewSolPrompt: async (config: unknown) => config,
   } as unknown as ProjectConfigService;
   const trustedWindow = { webContents: sender };
-  registerIpcHandlers(ipcMain, '1.0.0', service, { getTrustedWindow: () => trustedWindow as never });
+  registerIpcHandlers(ipcMain, '1.0.0', service, {
+    trustedRendererUrl: frame.url,
+    getTrustedWindow: () => trustedWindow as never,
+  });
   const event = { sender, senderFrame: frame } as unknown as IpcMainInvokeEvent;
   return { event, frame, handlers };
 }
@@ -68,6 +71,14 @@ describe('IPC authorization and runtime argument boundary', () => {
       senderFrame: { url: 'https://evil.example/' },
     } as unknown as IpcMainInvokeEvent;
     await expect(invoke(handlers.get(RUNTIME_INFO_CHANNEL), nonFileEvent)).rejects.toMatchObject({
+      code: 'IPC_UNAUTHORIZED',
+    });
+
+    const differentFileEvent = {
+      ...event,
+      senderFrame: { url: 'file:///trusted/renderer/other.html' },
+    } as unknown as IpcMainInvokeEvent;
+    await expect(invoke(handlers.get(RUNTIME_INFO_CHANNEL), differentFileEvent)).rejects.toMatchObject({
       code: 'IPC_UNAUTHORIZED',
     });
 

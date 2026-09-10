@@ -127,6 +127,53 @@ export async function assertSafeProjectPath(projectRoot: string, candidatePath: 
   return lexicalCandidate;
 }
 
+/**
+ * Performs the same preflight checks for a persisted file that is not rooted
+ * in a project. Node exposes symlink/junction-style reparse points through
+ * lstat().isSymbolicLink(), but does not provide portable reparse tags or
+ * stable directory handles for a handle-scoped no-TOCTOU guarantee. Callers
+ * must invoke this immediately before each filesystem operation; this is
+ * defense in depth, not a claim that a concurrent native replacement race is
+ * impossible with path-based fs/promises APIs.
+ */
+export async function assertSafeFilePath(filePath: string): Promise<string> {
+  const candidatePath = resolve(filePath);
+  try {
+    await assertNoSymlinkComponents(candidatePath);
+    const stats = await lstat(candidatePath);
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw new PathSafetyError('PROJECT_PATH_UNSAFE', `Persisted path is not a regular file: ${candidatePath}`);
+    }
+    await realpath(candidatePath);
+    return candidatePath;
+  } catch (error) {
+    if (!isNodeError(error, 'ENOENT')) {
+      if (error instanceof PathSafetyError) {
+        throw new PathSafetyError('PROJECT_PATH_UNSAFE', `Persisted path is not safe: ${candidatePath}`, {
+          cause: error,
+        });
+      }
+      throw new PathSafetyError('PROJECT_PATH_UNSAFE', `Persisted path is not safe: ${candidatePath}`, {
+        cause: error,
+      });
+    }
+  }
+
+  const parent = await nearestExistingParent(candidatePath);
+  try {
+    await assertNoSymlinkComponents(parent);
+    await realpath(parent);
+  } catch (error) {
+    if (error instanceof PathSafetyError) {
+      throw new PathSafetyError('PROJECT_PATH_UNSAFE', `Persisted path parent is not safe: ${parent}`, {
+        cause: error,
+      });
+    }
+    throw new PathSafetyError('PROJECT_PATH_UNSAFE', `Persisted path parent is not safe: ${parent}`, { cause: error });
+  }
+  return candidatePath;
+}
+
 export async function realProjectRoot(projectRoot: string): Promise<string> {
   const lexicalRoot = resolve(projectRoot);
   try {

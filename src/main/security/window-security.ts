@@ -1,4 +1,4 @@
-import type { WebPreferences } from 'electron';
+import type { BrowserWindow, WebPreferences } from 'electron';
 
 export const SECURE_WINDOW_WEB_PREFERENCES = {
   contextIsolation: true,
@@ -6,3 +6,15 @@ export const SECURE_WINDOW_WEB_PREFERENCES = {
   sandbox: true,
   webSecurity: true,
 } satisfies WebPreferences;
+
+export function attachWindowSecurityHandlers(
+  window: Pick<BrowserWindow, 'webContents'>,
+  trustedRendererUrl: string,
+): void {
+  window.webContents.on('will-navigate', (event, url) => {
+    if (url !== trustedRendererUrl) {
+      event.preventDefault();
+    }
+  });
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+}

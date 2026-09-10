@@ -58,7 +58,11 @@ scanButton?.addEventListener('click', async () => {
     localPathElement.value = scanResult.localPath;
     if (targetBranchElement !== null) targetBranchElement.value = scanResult.currentBranch;
     detailsElement.textContent = JSON.stringify(scanResult, null, 2);
-    setStatus('扫描完成，请确认目标分支和报告目录。');
+    setStatus(
+      scanResult.governanceManifestStatus === 'invalid'
+        ? `扫描完成，但 governance manifest 无效：${scanResult.governanceManifestError?.message ?? '未知错误'}`
+        : '扫描完成，请确认目标分支和报告目录。',
+    );
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '项目扫描失败');
   }

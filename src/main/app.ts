@@ -1,11 +1,11 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { acquireSingleInstanceLock, type SingleInstanceHost } from './lifecycle/single-instance.js';
 import { initializeApplicationState, type ApplicationState } from './lifecycle/application-state.js';
 import { createInitializationGate } from './lifecycle/initialization.js';
 import { registerIpcHandlers } from './security/ipc.js';
-import { SECURE_WINDOW_WEB_PREFERENCES } from './security/window-security.js';
+import { attachWindowSecurityHandlers, SECURE_WINDOW_WEB_PREFERENCES } from './security/window-security.js';
 import { AtomicJsonFileStore, JsonlFileEventLog } from './state/persistence.js';
 import {
   parsePendingTopLevelStateTransaction,
@@ -42,6 +42,8 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
   app.quit();
 } else {
   const createWindow = async (state: ApplicationState): Promise<void> => {
+    const rendererPath = join(appDirectory, '../renderer/index.html');
+    const trustedRendererUrl = pathToFileURL(rendererPath).toString();
     const currentState = state.coordinator.getState();
     if (state.recovery.restored) {
       console.info(`[state-recovery] restored ${currentState.status} state at revision ${currentState.revision}`);
@@ -54,6 +56,7 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     if (!ipcRegistered) {
       const projectConfigStore = createProjectConfigStore(defaultProjectConfigPath(app.getPath('userData')));
       registerIpcHandlers(ipcMain, app.getVersion(), new ProjectConfigService(projectConfigStore), {
+        trustedRendererUrl,
         getTrustedWindow: () => mainWindow,
       });
       ipcRegistered = true;
@@ -68,7 +71,8 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
         preload: join(appDirectory, 'preload.cjs'),
       },
     });
-    await mainWindow.loadFile(join(appDirectory, '../renderer/index.html'));
+    attachWindowSecurityHandlers(mainWindow, trustedRendererUrl);
+    await mainWindow.loadFile(rendererPath);
     mainWindow.on('closed', () => {
       mainWindow = null;
       initializationGate.reset();

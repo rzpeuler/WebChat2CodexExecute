@@ -18,7 +18,16 @@ export interface ProjectScanResult {
   headCommit: string;
   governanceManifestPath: string;
   governanceManifestExists: boolean;
+  governanceManifestStatus: GovernanceManifestStatus;
+  governanceManifestError?: GovernanceManifestErrorInfo;
   governanceDocumentCandidates: GovernanceDocumentCandidate[];
+}
+
+export type GovernanceManifestStatus = 'missing' | 'valid' | 'invalid';
+
+export interface GovernanceManifestErrorInfo {
+  code: string;
+  message: string;
 }
 
 export interface GovernanceDocumentCandidate {
