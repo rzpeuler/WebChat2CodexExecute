@@ -193,6 +193,11 @@ function defaultProcessRunner(
     cwd: options.cwd,
     shell: false,
     windowsHide: options.windowsHide,
+    // Recent `codex exec` versions keep reading stdin when it remains open,
+    // even when a prompt argument is already present. The orchestrator sends
+    // the prompt as an argument, so stdin must be closed to avoid a hung Luna
+    // process.
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   const wait = new Promise<number>((resolveWait, rejectWait) => {
     child.once('error', rejectWait);
