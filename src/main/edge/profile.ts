@@ -269,7 +269,6 @@ export class EdgeProfileManager {
       `--user-data-dir=${this.options.userDataDirectory}`,
       `--remote-debugging-port=${this.options.remoteDebuggingPort}`,
       `--web-chat2codex-edge-ownership=${ownership.token}`,
-      '--enable-automation',
       '--no-first-run',
       '--no-default-browser-check',
       ...(this.options.initialUrl === undefined ? [] : [this.options.initialUrl]),

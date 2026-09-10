@@ -97,6 +97,7 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     expect(calls[0]?.args).toEqual(
       expect.arrayContaining(['--user-data-dir=C:\\app\\edge-profile', '--remote-debugging-port=9333']),
     );
+    expect(calls[0]?.args).not.toContain('--enable-automation');
   });
 
   it('requires two stable samples and never marks an incomplete Writing Block complete', async () => {
