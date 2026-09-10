@@ -2,7 +2,10 @@ import { access, stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { execFile as execFileCallback } from 'node:child_process';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { redactRemoteUrl } from '../project/config.js';
+import { PersistentGitPendingPushState } from './pending-push-state.js';
 import {
   GitControllerError,
   type CaptureBaselineOptions,
@@ -12,6 +15,8 @@ import {
   type GitControllerOptions,
   type GitExecFile,
   type GitPendingPush,
+  type GitPendingPushRecovery,
+  type GitPendingPushRecord,
   type GitPendingPushState,
   type GitSyncResult,
   type GovernanceSyncInput,
@@ -39,6 +44,17 @@ export class InMemoryGitPendingPushState implements GitPendingPushState {
   clear(key: string, commit: string): void {
     if (this.pendingPushes.get(key)?.commit === commit) this.pendingPushes.delete(key);
   }
+
+  list(): GitPendingPushRecord[] {
+    return [...this.pendingPushes].map(([key, pendingPush]) => ({ key, pendingPush: { ...pendingPush } }));
+  }
+}
+
+function defaultPendingPushStatePath(): string {
+  const base =
+    process.platform === 'win32' ? (process.env.LOCALAPPDATA ?? process.env.APPDATA) : process.env.XDG_STATE_HOME;
+  const dataDirectory = base === undefined ? join(tmpdir(), 'web-chat2codex') : join(base, 'web-chat2codex');
+  return join(dataDirectory, 'state', 'git-pending-push.json');
 }
 
 function pendingPushKey(baseline: Pick<GitBaseline, 'repositoryRoot' | 'remoteName' | 'branch'>): string {
@@ -142,7 +158,21 @@ export class GitController {
   constructor(options: GitControllerOptions = {}) {
     this.execFile = options.execFile ?? defaultExecFile;
     this.logger = options.logger ?? (() => undefined);
-    this.pendingPushState = options.pendingPushState ?? new InMemoryGitPendingPushState();
+    this.pendingPushState =
+      options.pendingPushState ??
+      new PersistentGitPendingPushState(options.pendingPushStatePath ?? defaultPendingPushStatePath());
+  }
+
+  async recoverPendingPushes(): Promise<GitPendingPushRecovery[]> {
+    await this.loadPendingPushState();
+    const list = this.pendingPushState.list;
+    if (list === undefined) return [];
+    const records = await list.call(this.pendingPushState);
+    const recovered: GitPendingPushRecovery[] = [];
+    for (const record of records) {
+      recovered.push(await this.recoverPendingPush(record));
+    }
+    return recovered;
   }
 
   async captureBaseline(repositoryPath: string, options: CaptureBaselineOptions = {}): Promise<GitBaseline> {
@@ -267,12 +297,13 @@ export class GitController {
     baseline: GitBaseline,
     repositoryRoot: string,
   ): Promise<GitSyncResult> {
+    await this.loadPendingPushState();
     const key = pendingPushKey(baseline);
-    const pendingPush = this.pendingPushState.read(key);
+    const pendingPush = await this.pendingPushState.read(key);
     const isPendingPush = pendingPush !== null && this.matchesPendingPush(pendingPush, baseline, commit);
     const remoteTip = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
     if (remoteTip === commit) {
-      this.pendingPushState.clear(key, commit);
+      await this.pendingPushState.clear(key, commit);
       return { kind, commit, pushed: true, remoteCommit: commit, pushRetried: false };
     }
     this.assertRemoteBaseline(baseline, remoteTip);
@@ -304,16 +335,16 @@ export class GitController {
           remoteUrl: baseline.remoteUrl,
         });
       }
-      this.pendingPushState.clear(key, commit);
+      await this.pendingPushState.clear(key, commit);
       return { kind, commit, pushed: true, remoteCommit: observed, pushRetried };
     } catch (error) {
       if (!(error instanceof GitControllerError) || error.code !== 'PUSH_FAILED') throw error;
-      this.rememberPendingPush(key, baseline, commit);
+      await this.rememberPendingPush(key, baseline, commit);
       if (error.details.uncertain !== true) throw error;
 
       const observed = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
       if (observed === commit) {
-        this.pendingPushState.clear(key, commit);
+        await this.pendingPushState.clear(key, commit);
         return { kind, commit, pushed: true, remoteCommit: observed, pushRetried };
       }
       this.assertRemoteBaseline(baseline, observed);
@@ -321,13 +352,13 @@ export class GitController {
         await this.pushOnce(repositoryRoot, baseline);
       } catch (retryError) {
         if (retryError instanceof GitControllerError && retryError.code === 'PUSH_FAILED') {
-          this.rememberPendingPush(key, baseline, commit);
+          await this.rememberPendingPush(key, baseline, commit);
         }
         throw retryError;
       }
       const afterRetry = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
       if (afterRetry !== commit) {
-        this.rememberPendingPush(key, baseline, commit);
+        await this.rememberPendingPush(key, baseline, commit);
         throw new GitControllerError('PUSH_FAILED', 'Push response remained unconfirmed after retry', {
           localCommit: commit,
           remoteCommit: afterRetry,
@@ -336,7 +367,7 @@ export class GitController {
           uncertain: true,
         });
       }
-      this.pendingPushState.clear(key, commit);
+      await this.pendingPushState.clear(key, commit);
       return { kind, commit, pushed: true, remoteCommit: afterRetry, pushRetried: true };
     }
   }
@@ -352,8 +383,8 @@ export class GitController {
     );
   }
 
-  private rememberPendingPush(key: string, baseline: GitBaseline, commit: string): void {
-    this.pendingPushState.write(key, {
+  private async rememberPendingPush(key: string, baseline: GitBaseline, commit: string): Promise<void> {
+    await this.pendingPushState.write(key, {
       repositoryRoot: baseline.repositoryRoot,
       remoteName: baseline.remoteName,
       remoteUrl: baseline.remoteUrl,
@@ -361,6 +392,37 @@ export class GitController {
       baselineRemoteTip: baseline.remoteTip,
       commit,
     });
+  }
+
+  private async loadPendingPushState(): Promise<void> {
+    await this.pendingPushState.load?.();
+  }
+
+  private async recoverPendingPush(record: GitPendingPushRecord): Promise<GitPendingPushRecovery> {
+    try {
+      const remoteCommit = await this.queryRemoteAfterFetch(record.pendingPush.repositoryRoot, record.pendingPush);
+      if (remoteCommit === record.pendingPush.commit) {
+        await this.pendingPushState.clear(record.key, record.pendingPush.commit);
+        return { pendingPush: record.pendingPush, remoteCommit, status: 'confirmed' };
+      }
+      if (remoteCommit === record.pendingPush.baselineRemoteTip) {
+        return { pendingPush: record.pendingPush, remoteCommit, status: 'pending' };
+      }
+      this.log('pending-push-remote-advanced', {
+        branch: record.pendingPush.branch,
+        remoteName: record.pendingPush.remoteName,
+        remoteCommit,
+        expected: record.pendingPush.baselineRemoteTip,
+      });
+      return { pendingPush: record.pendingPush, remoteCommit, status: 'remote-advanced' };
+    } catch (error) {
+      this.log('pending-push-recovery-unknown', {
+        branch: record.pendingPush.branch,
+        remoteName: record.pendingPush.remoteName,
+        error: error instanceof Error ? error.name : 'unknown-error',
+      });
+      return { pendingPush: record.pendingPush, remoteCommit: null, status: 'unknown' };
+    }
   }
 
   private async pushOnce(repositoryRoot: string, baseline: GitBaseline): Promise<void> {

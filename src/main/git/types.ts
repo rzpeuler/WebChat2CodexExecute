@@ -51,10 +51,25 @@ export interface GitPendingPush {
   commit: string;
 }
 
+export interface GitPendingPushRecord {
+  key: string;
+  pendingPush: GitPendingPush;
+}
+
+export type GitPendingPushRecoveryStatus = 'confirmed' | 'pending' | 'remote-advanced' | 'unknown';
+
+export interface GitPendingPushRecovery {
+  pendingPush: GitPendingPush;
+  remoteCommit: string | null;
+  status: GitPendingPushRecoveryStatus;
+}
+
 export interface GitPendingPushState {
-  read(key: string): GitPendingPush | null;
-  write(key: string, pendingPush: GitPendingPush): void;
-  clear(key: string, commit: string): void;
+  read(key: string): GitPendingPush | null | Promise<GitPendingPush | null>;
+  write(key: string, pendingPush: GitPendingPush): void | Promise<void>;
+  clear(key: string, commit: string): void | Promise<void>;
+  load?(): Promise<void>;
+  list?(): GitPendingPushRecord[] | Promise<GitPendingPushRecord[]>;
 }
 
 export interface GitControllerErrorDetails {
@@ -93,6 +108,7 @@ export interface GitControllerOptions {
   execFile?: GitExecFile;
   logger?: (event: string, details: Record<string, unknown>) => void;
   pendingPushState?: GitPendingPushState;
+  pendingPushStatePath?: string;
 }
 
 export interface CaptureBaselineOptions {

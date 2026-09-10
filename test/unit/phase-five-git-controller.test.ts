@@ -3,7 +3,13 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { GitController, type GitCommandResult, type GitExecFile } from '../../src/main/git/index.js';
+import {
+  GitController,
+  PersistentGitPendingPushState,
+  type GitCommandResult,
+  type GitExecFile,
+  type GitPendingPush,
+} from '../../src/main/git/index.js';
 
 const execFile = promisify(execFileCallback);
 const directories: string[] = [];
@@ -146,6 +152,141 @@ describe('GitController', () => {
     expect(pushCount).toBe(1);
     expect(recoveryCalls.some((args) => args[1] === 'fetch')).toBe(true);
     expect(recoveryCalls.some((args) => args[1] === 'push')).toBe(false);
+  });
+
+  it('persists a pending push across controller instances and clears it after confirmation', async () => {
+    const { root } = await repository();
+    const statePath = join(dirname(root), 'pending-push-state', 'state.json');
+    let failPush = true;
+    const firstExecutor: GitExecFile = async (file, args, options) => {
+      if (file === 'git' && args[0] === 'push' && failPush) {
+        failPush = false;
+        throw Object.assign(new Error('remote rejected'), { stderr: 'remote rejected', uncertain: false });
+      }
+      return realExecutor()(file, args, options);
+    };
+    const baseline = await new GitController({
+      execFile: firstExecutor,
+      pendingPushStatePath: statePath,
+    }).captureBaseline(root);
+    await writeFile(join(root, 'restart.md'), '# Restart\n', 'utf8');
+    const input = { baseline, changeId: 'restart-1', changedPaths: ['restart.md'] };
+
+    await expect(
+      new GitController({ execFile: firstExecutor, pendingPushStatePath: statePath }).syncGovernance(input),
+    ).rejects.toMatchObject({ code: 'PUSH_FAILED' });
+    expect(JSON.parse(await readFile(statePath, 'utf8'))).toMatchObject({
+      version: 1,
+      pendingPushes: expect.any(Object),
+    });
+
+    const result = await new GitController({ pendingPushStatePath: statePath }).syncGovernance(input);
+
+    expect(result.pushRetried).toBe(true);
+    await expect(readFile(statePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('loads pending pushes at startup, queries the remote OID, and preserves an advanced remote', async () => {
+    const { root, remote } = await repository();
+    const statePath = join(dirname(root), 'pending-push-state', 'advanced.json');
+    let failPush = true;
+    const failingExecutor: GitExecFile = async (file, args, options) => {
+      if (file === 'git' && args[0] === 'push' && failPush) {
+        failPush = false;
+        throw Object.assign(new Error('remote rejected'), { stderr: 'remote rejected', uncertain: false });
+      }
+      return realExecutor()(file, args, options);
+    };
+    const firstController = new GitController({ execFile: failingExecutor, pendingPushStatePath: statePath });
+    const baseline = await firstController.captureBaseline(root);
+    await writeFile(join(root, 'advanced.md'), '# Advanced\n', 'utf8');
+    const input = { baseline, changeId: 'advanced-1', changedPaths: ['advanced.md'] };
+    await expect(firstController.syncGovernance(input)).rejects.toMatchObject({ code: 'PUSH_FAILED' });
+
+    const external = join(dirname(root), 'external-startup');
+    await command(root, ['clone', remote, external]);
+    await command(external, ['switch', '-c', 'main', '--track', 'origin/main']);
+    await command(external, ['config', 'user.email', 'external@example.invalid']);
+    await command(external, ['config', 'user.name', 'External User']);
+    await writeFile(join(external, 'external-startup.md'), '# External startup\n', 'utf8');
+    await command(external, ['add', '--', 'external-startup.md']);
+    await command(external, ['commit', '-m', 'external startup']);
+    await command(external, ['push', 'origin', 'main']);
+
+    let pushCount = 0;
+    const recoveryController = new GitController({
+      pendingPushStatePath: statePath,
+      execFile: async (file, args, options) => {
+        if (file === 'git' && args[0] === 'push') pushCount += 1;
+        return realExecutor()(file, args, options);
+      },
+    });
+    const recovery = await recoveryController.recoverPendingPushes();
+
+    expect(recovery).toHaveLength(1);
+    expect(recovery[0]).toMatchObject({ status: 'remote-advanced', pendingPush: { commit: expect.any(String) } });
+    expect(recovery[0]?.remoteCommit).not.toBe(baseline.remoteTip);
+    expect(pushCount).toBe(0);
+    expect(JSON.parse(await readFile(statePath, 'utf8')).pendingPushes).not.toEqual({});
+    await expect(recoveryController.syncGovernance(input)).rejects.toMatchObject({ code: 'BASELINE_CHANGED' });
+    expect(pushCount).toBe(0);
+  });
+
+  it('retains pending state when startup remote inspection is unknown', async () => {
+    const { root } = await repository();
+    const statePath = join(dirname(root), 'pending-push-state', 'unknown.json');
+    let failPush = true;
+    const firstExecutor: GitExecFile = async (file, args, options) => {
+      if (file === 'git' && args[0] === 'push' && failPush) {
+        failPush = false;
+        throw Object.assign(new Error('remote rejected'), { stderr: 'remote rejected', uncertain: false });
+      }
+      return realExecutor()(file, args, options);
+    };
+    const controller = new GitController({ execFile: firstExecutor, pendingPushStatePath: statePath });
+    const baseline = await controller.captureBaseline(root);
+    await writeFile(join(root, 'unknown.md'), '# Unknown\n', 'utf8');
+    await expect(
+      controller.syncGovernance({ baseline, changeId: 'unknown-1', changedPaths: ['unknown.md'] }),
+    ).rejects.toMatchObject({ code: 'PUSH_FAILED' });
+
+    const recovery = await new GitController({
+      pendingPushStatePath: statePath,
+      execFile: async (file, args, options) => {
+        if (file === 'git' && args[0] === 'fetch') {
+          throw Object.assign(new Error('network timeout'), { stderr: 'network timeout', uncertain: true });
+        }
+        return realExecutor()(file, args, options);
+      },
+    }).recoverPendingPushes();
+
+    expect(recovery).toMatchObject([{ status: 'unknown', remoteCommit: null }]);
+    expect(JSON.parse(await readFile(statePath, 'utf8')).pendingPushes).not.toEqual({});
+  });
+
+  it('serializes concurrent persistent updates without losing entries', async () => {
+    const { root } = await repository();
+    const statePath = join(dirname(root), 'pending-push-state', 'concurrent.json');
+    const first: GitPendingPush = {
+      repositoryRoot: root,
+      remoteName: 'origin',
+      remoteUrl: 'remote-a',
+      branch: 'main',
+      baselineRemoteTip: null,
+      commit: 'commit-a',
+    };
+    const second = { ...first, remoteUrl: 'remote-b', commit: 'commit-b' };
+    const firstState = new PersistentGitPendingPushState(statePath);
+    const secondState = new PersistentGitPendingPushState(statePath);
+
+    await Promise.all([firstState.write('first', first), secondState.write('second', second)]);
+
+    await expect(new PersistentGitPendingPushState(statePath).list()).resolves.toEqual(
+      expect.arrayContaining([
+        { key: 'first', pendingPush: first },
+        { key: 'second', pendingPush: second },
+      ]),
+    );
   });
 
   it('rejects an external remote tip advance before attempting a push', async () => {
