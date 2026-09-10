@@ -7,8 +7,9 @@ import type {
   GovernanceManifestIndex,
 } from '../governance/manifest.js';
 import { compareCodePoints } from '../../shared/sorting.js';
+import { WRITING_BLOCK_SCHEMA_VERSION, type WritingBlockType } from '../../shared/protocol/writing-block.js';
 
-export type WritingBlockType = 'LUNA_TASK' | 'GOVERNANCE_CHANGE' | 'ARCHITECTURE_FREEZE' | 'BLOCKED';
+export type { WritingBlockType } from '../../shared/protocol/writing-block.js';
 
 export interface SolArchitectureRevision {
   id: string;
@@ -192,7 +193,7 @@ function taskBookFields(value: Record<string, unknown> | string): Record<string,
 }
 
 export function compileWritingBlock(type: WritingBlockType, fields: Record<string, unknown>): string {
-  const body = Object.entries(fields)
+  const body = Object.entries({ schema_version: WRITING_BLOCK_SCHEMA_VERSION, ...fields })
     .sort(([left], [right]) => compareCodePoints(left, right))
     .map(([key, value]) => `${key}: ${formatFieldValue(value)}`)
     .join('\n');
