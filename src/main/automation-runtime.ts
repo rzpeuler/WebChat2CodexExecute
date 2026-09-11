@@ -418,9 +418,9 @@ export async function createAutomationRuntime(
       };
       bindingStore.assertCanSend(identity);
       assertRuntimeOperationAllowed();
-      await bindingStore.recordRawInput(input.text);
-      assertRuntimeOperationAllowed();
       await conversations.sendMessage({ conversation: identity, text: input.text });
+      assertRuntimeOperationAllowed();
+      await bindingStore.recordRawInput(input.text);
     },
   };
 

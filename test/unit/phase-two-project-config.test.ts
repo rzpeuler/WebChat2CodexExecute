@@ -72,6 +72,52 @@ describe('phase two project configuration', () => {
     expect(persisted).not.toContain('super-secret');
   });
 
+  it('overwrites configurations for the same local directory and preserves the stable project id', async () => {
+    const repository = await gitRepository();
+    const otherRepository = await gitRepository();
+    const firstScan = await scanGitProject(repository);
+    const secondScan = await scanGitProject(repository);
+    const otherScan = await scanGitProject(otherRepository);
+    const storePath = join(await temporaryDirectory(), 'projects.json');
+    const store = new ProjectConfigStore(storePath);
+
+    const first = await store.save({ ...firstScan, projectId: 'stable-project', reportDirectory: 'reports/first' });
+    const other = await store.save({ ...otherScan, projectId: 'other-project', reportDirectory: 'reports/other' });
+    expect(secondScan.localPath.toLowerCase()).toBe(first.localPath.toLowerCase());
+    const overwritten = await store.save({
+      ...secondScan,
+      projectId: 'new-scan-project-id',
+      localPath: repository.replaceAll('\\', '/'),
+      governanceManifestPath: 'docs/governance/governance-manifest.yaml',
+      reportDirectory: 'reports/second',
+    });
+
+    expect(first.projectId).toBe('stable-project');
+    expect(overwritten.projectId).toBe('stable-project');
+    await expect(store.loadAll()).resolves.toEqual([overwritten, other]);
+    const persisted = JSON.parse(await readFile(storePath, 'utf8')) as Array<{ projectId: string }>;
+    expect(persisted.map(({ projectId }) => projectId)).toEqual(['stable-project', 'other-project']);
+  });
+
+  it('repairs legacy duplicate directory entries when loading the project store', async () => {
+    const repository = await gitRepository();
+    const scan = await scanGitProject(repository);
+    const storePath = join(await temporaryDirectory(), 'projects.json');
+    const oldConfig = normalizeProjectConfig({ ...scan, projectId: 'old-project', reportDirectory: 'reports/old' });
+    const latestConfig = normalizeProjectConfig({
+      ...scan,
+      projectId: 'latest-project',
+      reportDirectory: 'reports/latest',
+    });
+    await writeFile(storePath, JSON.stringify([oldConfig, latestConfig]), 'utf8');
+
+    const store = new ProjectConfigStore(storePath);
+    await expect(store.loadAll()).resolves.toEqual([latestConfig]);
+    const persisted = JSON.parse(await readFile(storePath, 'utf8')) as Array<{ projectId: string }>;
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]?.projectId).toBe('latest-project');
+  });
+
   it('returns safe registered governance document candidates from a parseable manifest', async () => {
     const repository = await gitRepository();
     await mkdir(join(repository, 'docs', 'governance'), { recursive: true });

@@ -7,6 +7,7 @@ import {
   accountFingerprintFromStorageKeys,
   EdgeStateAdapter,
   hasIncompleteWritingBlock,
+  hashMessage,
   projectFingerprintFromChatGptUrl,
   selectChatGptProjectTargets,
 } from '../../src/main/edge/state-adapter.js';
@@ -303,6 +304,92 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     ).rejects.toMatchObject({ code: 'SESSION_CONVERSATION_IDENTITY_CHANGED' });
     expect(evaluate).toHaveBeenCalledOnce();
     expect(evaluate.mock.calls[0]?.[1]).not.toContain('textarea');
+  });
+
+  it('confirms a Sol message after the DOM submission before returning success', async () => {
+    const evaluate = vi.fn(async <T = unknown>(_: string, expression: string): Promise<T> => {
+      if (expression.includes('const value')) {
+        return { sent: true, inputHash: hashMessage('hello'), composerEmpty: true } as T;
+      }
+      return {
+        title: 'Sol',
+        url: 'https://chatgpt.com/g/project-1/c/conversation-1',
+        projectFingerprint: 'project-1',
+        accountFingerprint: 'account-1',
+        latestAssistantText: 'hello',
+        statusText: '',
+        errorText: '',
+        isThinking: false,
+      } as T;
+    });
+    const transport: CdpTransport = {
+      listTargets: vi.fn(async () => [
+        { id: 'target-1', type: 'page', title: 'Sol', url: 'https://chatgpt.com/g/project-1/c/conversation-1' },
+      ]),
+      evaluate: evaluate as CdpTransport['evaluate'],
+      sendCommand: vi.fn(async <T = unknown>() => ({}) as T) as CdpTransport['sendCommand'],
+    };
+    const controller = new CdpConversationController({ transport, adapter: new EdgeStateAdapter(transport) });
+
+    await expect(
+      controller.sendMessage({
+        conversation: {
+          conversationId: 'conversation-1',
+          url: 'https://chatgpt.com/g/project-1/c/conversation-1',
+          title: 'Sol',
+          projectFingerprint: 'project-1',
+          accountFingerprint: 'account-1',
+          targetId: 'target-1',
+        },
+        text: 'hello',
+      }),
+    ).resolves.toBeUndefined();
+    expect(evaluate).toHaveBeenCalledWith('target-1', expect.stringContaining('const value'));
+  });
+
+  it('rejects an unconfirmed Sol submission instead of reporting it as sent', async () => {
+    const evaluate = vi.fn(async <T = unknown>(_: string, expression: string): Promise<T> => {
+      if (expression.includes('const value')) {
+        return { sent: true, inputHash: hashMessage('hello'), composerEmpty: false } as T;
+      }
+      if (expression.includes('return { empty')) return { empty: false } as T;
+      return {
+        title: 'Sol',
+        url: 'https://chatgpt.com/g/project-1/c/conversation-1',
+        projectFingerprint: 'project-1',
+        accountFingerprint: 'account-1',
+        latestAssistantText: 'hello',
+        statusText: '',
+        errorText: '',
+        isThinking: false,
+      } as T;
+    });
+    const transport: CdpTransport = {
+      listTargets: vi.fn(async () => [
+        { id: 'target-1', type: 'page', title: 'Sol', url: 'https://chatgpt.com/g/project-1/c/conversation-1' },
+      ]),
+      evaluate: evaluate as CdpTransport['evaluate'],
+      sendCommand: vi.fn(async <T = unknown>() => ({}) as T) as CdpTransport['sendCommand'],
+    };
+    const controller = new CdpConversationController({
+      transport,
+      adapter: new EdgeStateAdapter(transport),
+      submissionConfirmationTimeoutMs: 1,
+    });
+
+    await expect(
+      controller.sendMessage({
+        conversation: {
+          conversationId: 'conversation-1',
+          url: 'https://chatgpt.com/g/project-1/c/conversation-1',
+          title: 'Sol',
+          projectFingerprint: 'project-1',
+          accountFingerprint: 'account-1',
+          targetId: 'target-1',
+        },
+        text: 'hello',
+      }),
+    ).rejects.toMatchObject({ code: 'SOL_INPUT_SUBMIT_UNCONFIRMED' });
   });
 
   it('locates configured Edge and starts with an isolated profile and shell:false', async () => {

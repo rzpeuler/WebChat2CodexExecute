@@ -26,6 +26,14 @@ describe('renderer UI layout', () => {
     expect(app).toContain('closeContentDialog');
   });
 
+  it('loads the last project config and preserves saved target/report fields after Git refresh', async () => {
+    const app = await readRendererFile('app.ts');
+    expect(app).toContain('window.desktopApi.loadProjectConfigs()');
+    expect(app).toContain('hydrateSavedProjectConfig');
+    expect(app).toContain('projectRelativePath');
+    expect(app).toContain('已加载上次项目配置，但 Git 状态刷新失败');
+  });
+
   it('keeps the feedback bar fixed and widens the desktop shell', async () => {
     const css = await readRendererFile('styles.css');
     expect(css).toContain('width: min(1360px, 100%);');

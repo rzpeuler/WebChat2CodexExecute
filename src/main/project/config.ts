@@ -1,7 +1,7 @@
 import { access } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { execFile as execFileCallback } from 'node:child_process';
-import { resolve, join } from 'node:path';
+import { resolve, join, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AtomicJsonFileStore, SnapshotFormatError } from '../state/persistence.js';
 import {
@@ -372,6 +372,23 @@ export function normalizeProjectConfig(input: ProjectConfigInput): ProjectConfig
   return config;
 }
 
+function projectPathKey(localPath: string): string {
+  const normalized = resolve(localPath).replace(/[\\/]+$/, '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function deduplicateProjectConfigs(configs: ProjectConfig[]): { configs: ProjectConfig[]; changed: boolean } {
+  const lastIndexByPath = new Map<string, number>();
+  configs.forEach((config, index) => lastIndexByPath.set(projectPathKey(config.localPath), index));
+  const unique = configs.filter((config, index) => lastIndexByPath.get(projectPathKey(config.localPath)) === index);
+  const changed = unique.length !== configs.length;
+  if (changed && unique.length > 1) {
+    const mostRecentlyPersisted = unique.pop();
+    if (mostRecentlyPersisted !== undefined) unique.unshift(mostRecentlyPersisted);
+  }
+  return { configs: unique, changed };
+}
+
 export class ProjectConfigStore {
   private readonly store: AtomicJsonFileStore<ProjectConfig[]>;
 
@@ -394,7 +411,10 @@ export class ProjectConfigStore {
 
   async loadAll(): Promise<ProjectConfig[]> {
     try {
-      return (await this.store.load()) ?? [];
+      const loaded = (await this.store.load()) ?? [];
+      const canonical = deduplicateProjectConfigs(loaded);
+      if (canonical.changed) await this.store.save(canonical.configs);
+      return canonical.configs;
     } catch (error) {
       // Preserve the project-config error code when the JSON store wraps a
       // validation failure, including a rejected custom governance path.
@@ -425,17 +445,27 @@ export class ProjectConfigStore {
   }
 
   async save(configInput: ProjectConfigInput | ProjectConfig): Promise<ProjectConfig> {
-    const config = normalizeProjectConfig(configInput);
-    const configs = await this.loadAll();
-    const index = configs.findIndex((item) => item.projectId === config.projectId);
-    if (index === -1) {
-      configs.push(config);
-    } else {
-      configs[index] = config;
+    let config = normalizeProjectConfig(configInput);
+    const canonicalLocalPath = await realProjectRoot(config.localPath);
+    if (canonicalLocalPath !== config.localPath) {
+      config = normalizeProjectConfig({
+        ...config,
+        localPath: canonicalLocalPath,
+        reportDirectory: relative(config.localPath, config.reportDirectory) || '.',
+        governanceManifestPath: DEFAULT_MANIFEST_RELATIVE_PATH,
+      });
     }
-    assertNoForbiddenKeys(configs);
-    await this.store.save(configs);
-    return config;
+    const configs = await this.loadAll();
+    const existingForPath = configs.find((item) => projectPathKey(item.localPath) === projectPathKey(config.localPath));
+    const saved = existingForPath === undefined ? config : { ...config, projectId: existingForPath.projectId };
+    const remaining = configs.filter(
+      (item) =>
+        projectPathKey(item.localPath) !== projectPathKey(config.localPath) && item.projectId !== saved.projectId,
+    );
+    remaining.unshift(saved);
+    assertNoForbiddenKeys(remaining);
+    await this.store.save(remaining);
+    return saved;
   }
 }
 

@@ -1,4 +1,4 @@
-import type { ProjectConfigInput, ProjectScanResult } from '../shared/contracts/project-config.js';
+import type { ProjectConfig, ProjectConfigInput, ProjectScanResult } from '../shared/contracts/project-config.js';
 import { LOOP_GRAPH_NODE_DEFINITIONS } from '../shared/contracts/dashboard.js';
 import type {
   DashboardActionState,
@@ -61,6 +61,7 @@ let currentSnapshot: DashboardSnapshot | null = null;
 let refreshInFlight: Promise<void> | null = null;
 let helpPreviouslyFocused: HTMLElement | null = null;
 let contentPreviouslyFocused: HTMLElement | null = null;
+let savedProjectLoadCompleted = false;
 let selectedLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
 let lastCurrentLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
 const loopGraphNodeButtons = new Map<LoopGraphNodeId, LoopGraphButtonParts>();
@@ -149,6 +150,55 @@ function errorSuggestion(message: string): string {
 function showOperationError(error: unknown, fallback: string): void {
   const message = errorMessage(error, fallback);
   setStatus(`${message} ${errorSuggestion(message)}`);
+}
+
+function projectRelativePath(localPath: string, childPath: string): string {
+  const root = localPath.replaceAll('\\', '/').replace(/\/+$/, '');
+  const child = childPath.replaceAll('\\', '/');
+  const rootKey = root.toLowerCase();
+  const childKey = child.toLowerCase();
+  if (childKey === rootKey) return '.';
+  if (childKey.startsWith(`${rootKey}/`)) return child.slice(root.length + 1);
+  return childPath;
+}
+
+function hydrateSavedProjectConfig(config: ProjectConfig): void {
+  if (localPathElement !== null) localPathElement.value = config.localPath;
+  if (remoteUrlElement !== null) remoteUrlElement.value = config.remoteUrl ?? '';
+  if (targetBranchElement !== null) targetBranchElement.value = config.targetBranch;
+  if (reportDirectoryElement !== null)
+    reportDirectoryElement.value = projectRelativePath(config.localPath, config.reportDirectory);
+}
+
+async function loadSavedProjectConfig(): Promise<void> {
+  try {
+    const configs = await window.desktopApi.loadProjectConfigs();
+    const saved = configs[0];
+    if (saved === undefined) {
+      setStatus('就绪 — 尚未运行自动化循环。');
+      return;
+    }
+
+    hydrateSavedProjectConfig(saved);
+    setStatus(`已加载上次项目配置：${saved.localPath}，正在刷新 Git 状态…`);
+    try {
+      const scanned = await window.desktopApi.scanProject(saved.localPath);
+      scanResult = { ...scanned, projectId: saved.projectId };
+      if (localPathElement !== null) localPathElement.value = scanned.localPath;
+      if (remoteUrlElement !== null) remoteUrlElement.value = scanned.remoteUrl ?? '';
+      if (targetBranchElement !== null) targetBranchElement.value = saved.targetBranch;
+      if (reportDirectoryElement !== null)
+        reportDirectoryElement.value = projectRelativePath(saved.localPath, saved.reportDirectory);
+      if (detailsElement !== null) detailsElement.textContent = JSON.stringify(scanned, null, 2);
+      if (viewProjectDetailsButton !== null) viewProjectDetailsButton.disabled = false;
+      setStatus(`已加载上次项目：${scanned.localPath}。Git 状态已刷新。`);
+    } catch (error) {
+      if (detailsElement !== null) detailsElement.textContent = JSON.stringify(saved, null, 2);
+      setStatus(`已加载上次项目配置，但 Git 状态刷新失败：${errorMessage(error, '未知错误')} 请重新扫描。`);
+    }
+  } finally {
+    savedProjectLoadCompleted = true;
+  }
 }
 
 function getConfigInput(): ProjectConfigInput {
@@ -576,7 +626,7 @@ if (statusElement !== null && versionElement !== null) {
   window.desktopApi
     .getRuntimeInfo()
     .then((runtimeInfo) => {
-      statusElement.textContent = '就绪 — 尚未运行自动化循环。';
+      if (!savedProjectLoadCompleted) statusElement.textContent = '就绪 — 正在加载上次项目配置…';
       versionElement.textContent = `Version ${runtimeInfo.version}`;
     })
     .catch((error) => {
@@ -584,6 +634,10 @@ if (statusElement !== null && versionElement !== null) {
       versionElement.textContent = '运行时信息不可用';
     });
 }
+
+void loadSavedProjectConfig().catch((error) => {
+  showOperationError(error, '上次项目配置加载失败');
+});
 
 document.querySelectorAll<HTMLButtonElement>('[data-dashboard-command]').forEach((button) => {
   button.addEventListener('click', () => void executeDashboardCommandFromButton(button));

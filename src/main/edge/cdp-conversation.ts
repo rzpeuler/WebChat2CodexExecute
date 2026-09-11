@@ -8,6 +8,7 @@ export interface CdpConversationControllerOptions {
   targetId?: string;
   createConversation?: SolConversationController['createConversation'];
   commandTimeoutMs?: number;
+  submissionConfirmationTimeoutMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
 }
 
@@ -17,6 +18,7 @@ export class CdpConversationController implements SolConversationController {
   private readonly configuredTargetId: string | undefined;
   private readonly injectedCreate: SolConversationController['createConversation'] | undefined;
   private readonly commandTimeoutMs: number;
+  private readonly submissionConfirmationTimeoutMs: number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
 
   constructor(options: CdpConversationControllerOptions) {
@@ -25,6 +27,7 @@ export class CdpConversationController implements SolConversationController {
     this.configuredTargetId = options.targetId;
     this.injectedCreate = options.createConversation;
     this.commandTimeoutMs = options.commandTimeoutMs ?? 10_000;
+    this.submissionConfirmationTimeoutMs = options.submissionConfirmationTimeoutMs ?? 3_000;
     this.sleep = options.sleep ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   }
 
@@ -106,14 +109,37 @@ export class CdpConversationController implements SolConversationController {
     ) {
       throw conversationIdentityChanged('The active ChatGPT target no longer matches the bound conversation.');
     }
-    const result = await this.transport.evaluate<{ sent?: boolean; inputHash?: string }>(
-      input.conversation.targetId,
-      sendMessageScript(input.text),
-    );
+    const beforeAssistantHash = current.latestAssistantHash;
+    const result = await this.transport.evaluate<{
+      sent?: boolean;
+      inputHash?: string;
+      composerEmpty?: boolean;
+    }>(input.conversation.targetId, sendMessageScript(input.text));
     if (result?.sent !== true || result.inputHash !== hashMessage(input.text)) {
-      throw new Error('The original Sol input could not be submitted exactly.');
+      throw solInputSubmissionError('Sol 输入未提交：未找到可用的提交控件或输入内容未按预期提交。');
     }
+    if (result.composerEmpty === true) return;
+
+    const deadline = Date.now() + this.submissionConfirmationTimeoutMs;
+    while (Date.now() < deadline) {
+      const composer = await this.transport.evaluate<{ empty?: boolean }>(
+        input.conversation.targetId,
+        COMPOSER_STATE_SCRIPT,
+      );
+      if (composer?.empty === true) return;
+      const after = await this.adapter.sample(input.conversation.targetId);
+      const assistantChanged = after.latestAssistantHash !== null && after.latestAssistantHash !== beforeAssistantHash;
+      if (after.isThinking || assistantChanged) return;
+      await this.sleep(100);
+    }
+    throw solInputSubmissionError('Sol 输入提交未得到确认：请检查专用 Edge 中是否出现了本条用户消息，然后重试。');
   }
+}
+
+function solInputSubmissionError(message: string): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string };
+  error.code = 'SOL_INPUT_SUBMIT_UNCONFIRMED';
+  return error;
 }
 
 function conversationIdentityChanged(message: string): Error & { code: string } {
@@ -153,9 +179,21 @@ function sendMessageScript(text: string): string {
     if (submit instanceof HTMLElement) submit.click();
     else if (form instanceof HTMLFormElement) form.requestSubmit();
     else return { sent: false, inputHash: null };
-    return { sent: true, inputHash: ${JSON.stringify(hashMessage(text))} };
+    const composerText = input instanceof HTMLTextAreaElement ? input.value : input.textContent ?? '';
+    return {
+      sent: true,
+      inputHash: ${JSON.stringify(hashMessage(text))},
+      composerEmpty: composerText.trim() === ''
+    };
   })()`;
 }
+
+const COMPOSER_STATE_SCRIPT = `(() => {
+  const input = document.querySelector('textarea, [contenteditable="true"]');
+  if (!(input instanceof HTMLElement)) return { empty: true };
+  const text = input instanceof HTMLTextAreaElement ? input.value : input.textContent ?? '';
+  return { empty: text.trim() === '' };
+})()`;
 
 function conversationIdFromUrl(url: string): string | null {
   if (!isAllowedChatGptUrl(url)) return null;
