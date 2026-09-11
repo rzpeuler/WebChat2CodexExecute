@@ -73,4 +73,15 @@ describe('canonical governance text hash', () => {
     expect(result.canonicalBytes).toEqual(Buffer.from('title\n', 'utf8'));
     expect(result.sha256).toBe(expectedHash('title\n'));
   });
+
+  it('rejects a file containing only a UTF-8 BOM', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'web-chat2codex-canonical-text-'));
+    roots.push(root);
+    const path = join(root, 'empty-with-bom.md');
+    await writeFile(path, Buffer.from([0xef, 0xbb, 0xbf]));
+
+    await expect(readCanonicalGovernanceText(path)).rejects.toThrowError(
+      expect.objectContaining<Partial<GovernanceTextHashError>>({ code: 'EMPTY_OR_BINARY' }),
+    );
+  });
 });

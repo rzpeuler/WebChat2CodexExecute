@@ -42,6 +42,10 @@ function assertRegularText(bytes: Uint8Array, path: string): string {
     });
   }
 
+  if (text.replace(/^\uFEFF/, '').length === 0) {
+    throw new GovernanceTextHashError('EMPTY_OR_BINARY', `Governance text is empty or binary: ${path}`);
+  }
+
   return text;
 }
 
