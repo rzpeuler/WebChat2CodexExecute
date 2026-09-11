@@ -14,10 +14,12 @@ import {
   type GitCommandResult,
   type GitControllerOptions,
   type GitExecFile,
+  type GitManualCommitAndPushResult,
   type GitPendingPush,
   type GitPendingPushRecovery,
   type GitPendingPushRecord,
   type GitPendingPushState,
+  type GitRepositoryStatus,
   type GitSyncResult,
   type GovernanceSyncInput,
   type InitializationSyncInput,
@@ -28,6 +30,7 @@ const defaultExecFileCallback = promisify(execFileCallback);
 const DEFAULT_PROTECTED_PATHS = ['docs/superpowers', 'docs/superpowers/**'];
 const DEFAULT_EXCLUDED_PATHS = ['.web-chat2codex/backups', '.web-chat2codex/backups/**'];
 const BACKUP_ROOT = '.web-chat2codex/backups';
+const MANUAL_SYNC_COMMIT_MESSAGE = 'chore(web-chat2codex): sync project changes';
 
 interface GitSnapshot extends Omit<GitBaseline, 'remoteTip'> {
   worktree: string[];
@@ -256,6 +259,146 @@ export class GitController {
       });
     }
     return { ...current, remoteTip };
+  }
+
+  async readRepositoryStatus(repositoryPath: string): Promise<GitRepositoryStatus> {
+    const snapshot = await this.readSnapshot(repositoryPath, []);
+    const remoteTrackingHead = await this.queryRemote(repositoryPath, snapshot);
+    return {
+      repositoryRoot: snapshot.repositoryRoot,
+      branch: snapshot.branch,
+      remoteName: snapshot.remoteName,
+      remoteUrl: snapshot.remoteUrl,
+      head: snapshot.head,
+      remoteTrackingHead,
+      worktree: snapshot.worktree,
+      clean: snapshot.worktree.length === 0,
+    };
+  }
+
+  async commitAndPushProject(repositoryPath: string): Promise<GitManualCommitAndPushResult> {
+    const initial = await this.readRepositoryStatus(repositoryPath);
+    const changedPaths = [...initial.worktree];
+    await this.loadPendingPushState();
+    const baseline: GitBaseline = {
+      repositoryRoot: initial.repositoryRoot,
+      remoteName: initial.remoteName,
+      remoteUrl: initial.remoteUrl,
+      branch: initial.branch,
+      head: initial.head,
+      remoteTip: initial.remoteTrackingHead,
+      worktree: [],
+    };
+    const key = pendingPushKey(baseline);
+    const pending = await this.pendingPushState.read(key);
+    const pendingMatches =
+      pending !== null &&
+      pending.repositoryRoot === baseline.repositoryRoot &&
+      pending.remoteName === baseline.remoteName &&
+      pending.remoteUrl === baseline.remoteUrl &&
+      pending.branch === baseline.branch;
+
+    let localCommit = initial.head;
+    let createdCommit = false;
+    let expectedRemote = initial.remoteTrackingHead;
+
+    if (pendingMatches && pending!.commit === initial.head) {
+      localCommit = pending!.commit;
+      expectedRemote = pending!.baselineRemoteTip;
+    } else {
+      if (pending !== null) {
+        throw new GitControllerError('BASELINE_CHANGED', 'A different pending project commit exists', {
+          head: initial.head,
+          localCommit: pending.commit,
+        });
+      }
+      if (initial.clean) throw new GitControllerError('NO_CHANGES', 'Project worktree has no changes');
+      await this.run(['add', '-A'], initial.repositoryRoot);
+      const staged = await this.readRepositoryStatus(initial.repositoryRoot);
+      if (staged.clean) throw new GitControllerError('NO_CHANGES', 'Project worktree has no changes to commit');
+      localCommit = await this.commit(MANUAL_SYNC_COMMIT_MESSAGE, initial.repositoryRoot);
+      createdCommit = true;
+    }
+
+    const pushBaseline = { ...baseline, remoteTip: expectedRemote, head: localCommit };
+    let remoteCommit: string | null;
+    try {
+      remoteCommit = await this.queryRemoteAfterFetch(initial.repositoryRoot, pushBaseline);
+    } catch (error) {
+      await this.rememberPendingPush(key, pushBaseline, localCommit);
+      throw new GitControllerError(
+        'PUSH_FAILED',
+        'Project commit retained because remote state could not be verified',
+        {
+          localCommit,
+          createdCommit,
+          uncertain: true,
+        },
+        { cause: error },
+      );
+    }
+    if (remoteCommit === localCommit) {
+      await this.pendingPushState.clear(key, localCommit);
+      const confirmed = await this.readRepositoryStatus(initial.repositoryRoot);
+      if (confirmed.head !== localCommit || !confirmed.clean || confirmed.remoteTrackingHead !== localCommit) {
+        throw new GitControllerError('PUSH_FAILED', 'Project sync could not confirm a clean synchronized state', {
+          localCommit,
+          remoteCommit: confirmed.remoteTrackingHead,
+        });
+      }
+      return { phase: 'COMPLETED', localCommit, remoteCommit, createdCommit, pushed: true, changedPaths, clean: true };
+    }
+    if (remoteCommit !== expectedRemote) {
+      throw new GitControllerError('BASELINE_CHANGED', 'Remote branch advanced or diverged; project push was refused', {
+        expected: expectedRemote,
+        remoteCommit,
+        localCommit,
+        createdCommit,
+      });
+    }
+
+    try {
+      await this.pushOnce(initial.repositoryRoot, pushBaseline);
+      remoteCommit = await this.queryRemoteAfterFetch(initial.repositoryRoot, pushBaseline);
+      if (remoteCommit !== localCommit)
+        throw new GitControllerError('PUSH_FAILED', 'Project push could not be confirmed', {
+          localCommit,
+          remoteCommit,
+          createdCommit,
+          uncertain: true,
+        });
+      const confirmed = await this.readRepositoryStatus(initial.repositoryRoot);
+      if (confirmed.head !== localCommit || !confirmed.clean || confirmed.remoteTrackingHead !== localCommit) {
+        throw new GitControllerError('PUSH_FAILED', 'Project sync did not finish with a clean synchronized state', {
+          localCommit,
+          remoteCommit: confirmed.remoteTrackingHead,
+        });
+      }
+      await this.pendingPushState.clear(key, localCommit);
+      return { phase: 'COMPLETED', localCommit, remoteCommit, createdCommit, pushed: true, changedPaths, clean: true };
+    } catch (error) {
+      await this.rememberPendingPush(key, pushBaseline, localCommit);
+      if (error instanceof GitControllerError) {
+        if (error.details.createdCommit === undefined) {
+          throw new GitControllerError(
+            error.code,
+            error.message,
+            { ...error.details, createdCommit },
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+      throw new GitControllerError(
+        'PUSH_FAILED',
+        'Project push failed; the local commit remains pending',
+        {
+          localCommit,
+          createdCommit,
+        },
+        { cause: error },
+      );
+    }
   }
 
   async syncGovernance(input: GovernanceSyncInput): Promise<GitSyncResult> {
@@ -768,7 +911,10 @@ export class GitController {
     }
   }
 
-  private async readSnapshot(repositoryPath: string): Promise<GitSnapshot> {
+  private async readSnapshot(
+    repositoryPath: string,
+    excludedPaths: readonly string[] = DEFAULT_EXCLUDED_PATHS,
+  ): Promise<GitSnapshot> {
     const requestedPath = resolve(repositoryPath);
     try {
       const stats = await stat(requestedPath);
@@ -804,7 +950,7 @@ export class GitController {
       remoteUrl: normalizedRemote,
       branch: branch.trim(),
       head: head.trim(),
-      worktree: parseStatus(status, DEFAULT_EXCLUDED_PATHS),
+      worktree: parseStatus(status, excludedPaths),
     };
   }
 

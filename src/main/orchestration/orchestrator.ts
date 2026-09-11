@@ -6,7 +6,9 @@ import {
   type DashboardCommand,
   type DashboardCommandResult,
   type DashboardActions,
+  type DashboardBaselineSnapshot,
   type DashboardSnapshot,
+  type DashboardStaleTaskSnapshot,
   type LoopGraphNodeId,
   type LoopGraphNodeSnapshot,
   type LoopGraphNodeState,
@@ -22,6 +24,7 @@ import {
 import { resolve } from 'node:path';
 import type { EdgeSolObservation } from '../edge/types.js';
 import type { CodexRunResult } from '../codex/types.js';
+import type { GitManualOperationRecord } from '../git/types.js';
 import {
   type ArchitectureOrchestratorPort,
   type ContextRecoverySource,
@@ -103,6 +106,7 @@ export class MainOrchestrator implements Orchestrator {
   private readonly now: () => Date;
   private state: OrchestratorState = cloneState(DEFAULT_STATE);
   private baseline: Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>> | null = null;
+  private staleTask: DashboardStaleTaskSnapshot = emptyStaleTask();
   private pendingCodeSync: PendingCodeSync | null = null;
   /** Retained only in memory so a retryable reconciliation sync failure can resume its original flow. */
   private pendingReconciliationInput: GovernanceReconciliationRunInput | null = null;
@@ -187,6 +191,9 @@ export class MainOrchestrator implements Orchestrator {
       architectureRevisions: this.state.architectureRevisions,
       luna: this.state.luna,
       commits: this.state.commits,
+      currentBaseline: this.dashboardBaseline(),
+      staleTask: this.staleTask,
+      manualGitOperation: this.state.manualGitOperation ?? null,
       recentError: this.state.recentError,
       recovery: this.state.executionRecovery,
       loopGraph: this.state.loopGraph,
@@ -244,6 +251,16 @@ export class MainOrchestrator implements Orchestrator {
         : callbackAvailable('governanceConsistencyCheck')
           ? enabled()
           : disabled('治理一致性检查回调不可用。'),
+      'align-latest-baseline': operationBusy
+        ? disabled('已有操作正在处理中。', true)
+        : this.state.active
+          ? disabled('自动循环运行中，请先暂停后再对齐基线。')
+          : enabled(),
+      'commit-and-push': operationBusy
+        ? disabled('已有操作正在处理中。', true)
+        : this.state.active
+          ? disabled('自动循环运行中，请先暂停后再提交同步。')
+          : enabled(),
       'open-edge': this.dashboardNavigationPromises.has('open-edge')
         ? disabled('打开 Edge 操作正在处理中。', true)
         : callbackAvailable('openEdge')
@@ -365,6 +382,24 @@ export class MainOrchestrator implements Orchestrator {
     }
   }
 
+  async alignLatestBaseline(): Promise<OrchestratorResult> {
+    await this.initialize();
+    let completed: OrchestratorResult | undefined;
+    await this.runDashboardOperation(async () => {
+      completed = await this.withOrchestrationLock(() => this.performAlignLatestBaseline());
+    });
+    return completed ?? result('PAUSED', this.state, '基线对齐未返回结果。');
+  }
+
+  async commitAndPushProject(): Promise<OrchestratorResult> {
+    await this.initialize();
+    let completed: OrchestratorResult | undefined;
+    await this.runDashboardOperation(async () => {
+      completed = await this.withOrchestrationLock(() => this.performCommitAndPushProject());
+    });
+    return completed ?? result('PAUSED', this.state, 'Git 提交同步未返回结果。');
+  }
+
   async runRound(): Promise<OrchestratorResult> {
     await this.initialize();
     if (this.roundPromise !== null) return this.roundPromise;
@@ -435,7 +470,7 @@ export class MainOrchestrator implements Orchestrator {
   async executeCommand(command: DashboardCommand): Promise<DashboardCommandResult> {
     try {
       const validated = validateDashboardCommand(command);
-      const action = this.dashboardActions()[validated.command];
+      const action = this.dashboardActions()[validated.command]!;
       if (action.busy) return rejected('DASHBOARD_ACTION_BUSY', '该动作正在处理中，请稍候。');
       if (!action.enabled) return rejected('DASHBOARD_ACTION_UNAVAILABLE', action.reason ?? '该动作当前不可用。');
       switch (validated.command) {
@@ -463,6 +498,10 @@ export class MainOrchestrator implements Orchestrator {
           return await this.invokeCallback('rebind', '重新绑定回调不可用。');
         case 'governance-consistency-check':
           return await this.invokeCallback('governanceConsistencyCheck', '治理一致性检查回调不可用。');
+        case 'align-latest-baseline':
+          return accepted('BASELINE_ALIGN_ACCEPTED', (await this.alignLatestBaseline()).message);
+        case 'commit-and-push':
+          return accepted('GIT_SYNC_ACCEPTED', (await this.commitAndPushProject()).message);
         case 'open-edge':
           return await this.invokeCallback('openEdge', '打开 Edge 回调不可用。');
         case 'open-project':
@@ -472,6 +511,8 @@ export class MainOrchestrator implements Orchestrator {
             return rejected('VIEW_REPORT_UNAVAILABLE', '查看报告回调不可用。');
           await this.callbacks.viewReport(validated.reportPath ?? this.reportPath());
           return accepted('OK', '已请求打开任务报告。');
+        default:
+          return rejected('DASHBOARD_COMMAND_UNAVAILABLE', '该手动 Git 命令尚未接入执行器。');
       }
     } catch (error) {
       return rejected('DASHBOARD_COMMAND_FAILED', error instanceof Error ? error.message : '命令执行失败。');
@@ -489,6 +530,175 @@ export class MainOrchestrator implements Orchestrator {
       });
     this.dashboardOperationPromise = tracked;
     return tracked;
+  }
+
+  private async performAlignLatestBaseline(): Promise<OrchestratorResult> {
+    const wasIdle = this.state.status === 'IDLE' && this.state.phase === 'IDLE';
+    this.startManualGitOperation('align-latest-baseline', 'CHECKING_WORKTREE');
+    await this.persist();
+    try {
+      if (this.git.readRepositoryStatus === undefined)
+        throw new OrchestratorError('GIT_MAINTENANCE_UNAVAILABLE', '当前运行时不支持 Git 基线对齐。');
+      const status = await this.git.readRepositoryStatus(this.project.localPath);
+      if (!status.clean) {
+        throw new OrchestratorError(
+          'WORKTREE_DIRTY',
+          `工作区存在未提交变更，无法对齐基线：${status.worktree.slice(0, 20).join('、')}`,
+        );
+      }
+      this.updateManualGitOperation('ALIGNING_BASELINE');
+      await this.persist();
+      const previous = this.baseline;
+      const next = await this.captureConfiguredBaseline();
+      this.baseline = next;
+      this.state.commits = { local: next.head, remote: next.remoteTip };
+      this.invalidateStaleTask(previous, next);
+      this.state.executionRecovery = null;
+      this.state.recentError = null;
+      this.state.active = false;
+      this.state.status = wasIdle ? 'IDLE' : 'PAUSED';
+      this.state.phase = wasIdle ? 'IDLE' : 'PAUSED';
+      this.updateManualGitOperation('COMPLETED', {
+        phase: 'COMPLETED',
+        localCommit: next.head,
+        remoteCommit: next.remoteTip,
+        createdCommit: false,
+        pushed: false,
+        clean: true,
+      });
+      this.touchState();
+      await this.persist();
+      return result('COMPLETED', this.state, `已对齐最新 Git 基线：${next.head}`);
+    } catch (error) {
+      return this.finishManualGitFailure(error, '基线对齐失败，请检查 Git 状态后重试。');
+    }
+  }
+
+  private async performCommitAndPushProject(): Promise<OrchestratorResult> {
+    const wasIdle = this.state.status === 'IDLE' && this.state.phase === 'IDLE';
+    this.startManualGitOperation('commit-and-push', 'CHECKING_WORKTREE');
+    await this.persist();
+    try {
+      if (this.git.readRepositoryStatus === undefined || this.git.commitAndPushProject === undefined)
+        throw new OrchestratorError('GIT_MAINTENANCE_UNAVAILABLE', '当前运行时不支持 Git 提交同步。');
+      const before = await this.git.readRepositoryStatus(this.project.localPath);
+      const previous = this.baseline;
+      this.updateManualGitOperation(before.clean ? 'PUSHING' : 'COMMITTING');
+      await this.persist();
+      let synced;
+      try {
+        synced = await this.git.commitAndPushProject(this.project.localPath);
+      } catch (error) {
+        if (!before.clean || errorCode(error) !== 'NO_CHANGES') throw error;
+        const baseline = await this.captureConfiguredBaseline();
+        this.baseline = baseline;
+        this.state.commits = { local: baseline.head, remote: baseline.remoteTip };
+        this.updateManualGitOperation('COMPLETED', {
+          phase: 'COMPLETED',
+          localCommit: baseline.head,
+          remoteCommit: baseline.remoteTip,
+          createdCommit: false,
+          pushed: false,
+          changedPaths: [],
+          clean: true,
+        });
+        this.state.recentError = null;
+        this.state.status = wasIdle ? 'IDLE' : 'PAUSED';
+        this.state.phase = wasIdle ? 'IDLE' : 'PAUSED';
+        this.touchState();
+        await this.persist();
+        return result('COMPLETED', this.state, '工作区已干净，无需提交；软件基线已刷新。');
+      }
+      const next = await this.captureConfiguredBaseline();
+      this.baseline = next;
+      this.state.commits = { local: synced.localCommit, remote: synced.remoteCommit };
+      this.invalidateStaleTask(previous, next);
+      this.state.executionRecovery = null;
+      this.state.recentError = null;
+      this.state.active = false;
+      this.state.status = wasIdle ? 'IDLE' : 'PAUSED';
+      this.state.phase = wasIdle ? 'IDLE' : 'PAUSED';
+      this.updateManualGitOperation('COMPLETED', synced);
+      this.touchState();
+      await this.persist();
+      return result('COMPLETED', this.state, `已提交并同步 Git：${synced.localCommit ?? next.head}`);
+    } catch (error) {
+      return this.finishManualGitFailure(error, 'Git 提交或推送失败，请按阶段提示处理后重试。');
+    }
+  }
+
+  private startManualGitOperation(
+    operation: GitManualOperationRecord['operation'],
+    status: GitManualOperationRecord['status'],
+  ): void {
+    const now = this.now().toISOString();
+    this.state.manualGitOperation = {
+      operation,
+      status,
+      startedAt: now,
+      updatedAt: now,
+      result: null,
+      error: null,
+    };
+  }
+
+  private updateManualGitOperation(
+    status: GitManualOperationRecord['status'],
+    resultValue?: GitManualOperationRecord['result'],
+  ): void {
+    const current = this.state.manualGitOperation;
+    if (current === undefined) return;
+    current.status = status;
+    current.updatedAt = this.now().toISOString();
+    if (resultValue !== undefined) current.result = resultValue;
+  }
+
+  private async finishManualGitFailure(error: unknown, suggestion: string): Promise<OrchestratorResult> {
+    const code = errorCode(error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const details = errorDetails(error);
+    const localCommit = commitValue(details.localCommit);
+    const remoteCommit = commitValue(details.remoteCommit);
+    const current = this.state.manualGitOperation;
+    if (current !== undefined) {
+      current.status = 'FAILED';
+      current.updatedAt = this.now().toISOString();
+      if (current.operation === 'commit-and-push' && (localCommit !== null || remoteCommit !== null)) {
+        current.result = {
+          phase: 'FAILED',
+          localCommit,
+          remoteCommit,
+          createdCommit: details.createdCommit === true,
+          pushed: false,
+          changedPaths: Array.isArray(details.paths)
+            ? details.paths.filter((path): path is string => typeof path === 'string')
+            : [],
+          clean: false,
+        };
+      }
+      current.error = { code, message: errorMessage };
+    }
+    if (localCommit !== null) this.state.commits.local = localCommit;
+    if (remoteCommit !== null) this.state.commits.remote = remoteCommit;
+    this.state.active = false;
+    this.state.status = 'NEEDS_USER_ACTION';
+    this.state.phase = 'PAUSED';
+    this.state.recentError = { code, message: errorMessage };
+    this.touchState();
+    await this.persist();
+    try {
+      this.notifier?.notify({
+        project: this.project.name,
+        taskId: this.state.taskId,
+        phase: 'PAUSED',
+        suggestion,
+        error: { code, message: errorMessage },
+        level: 'NEEDS_USER',
+      });
+    } catch {
+      // Notification failures must not hide the Git maintenance diagnostic.
+    }
+    return result('PAUSED', this.state, errorMessage);
   }
 
   private async processRetryCurrentStage(): Promise<OrchestratorResult> {
@@ -961,10 +1171,40 @@ export class MainOrchestrator implements Orchestrator {
 
   private async ensureBaseline(): Promise<void> {
     if (this.baseline !== null) return;
-    this.baseline = await this.git.captureBaseline(this.project.localPath, {
+    this.baseline = await this.captureConfiguredBaseline();
+  }
+
+  private captureConfiguredBaseline(): Promise<Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>>> {
+    return this.git.captureBaseline(this.project.localPath, {
       ...(this.targetBranch === undefined ? {} : { expectedBranch: this.targetBranch }),
       ...(this.expectedRemoteUrl === undefined ? {} : { expectedRemoteUrl: this.expectedRemoteUrl }),
     });
+  }
+
+  private dashboardBaseline(): DashboardBaselineSnapshot | null {
+    if (this.baseline === null) return null;
+    return {
+      branch: this.baseline.branch,
+      localCommit: this.baseline.head,
+      remoteCommit: this.baseline.remoteTip,
+      remoteUrl: this.baseline.remoteUrl,
+      worktreeClean: this.baseline.worktree.length === 0,
+    };
+  }
+
+  private invalidateStaleTask(
+    previous: Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>> | null,
+    current: Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>>,
+  ): void {
+    if (previous === null || previous.head === current.head) return;
+    const hasTask = this.state.taskId !== null || this.state.executionRecovery !== null;
+    if (!hasTask) return;
+    this.staleTask = {
+      invalidated: true,
+      taskBaseCommit: previous.head,
+      currentCommit: current.head,
+      message: 'Git 基线已变化，旧任务书需要根据当前提交重新生成。',
+    };
   }
 
   private assertTaskBase(task: LunaTaskBlock | null): void {
@@ -975,6 +1215,7 @@ export class MainOrchestrator implements Orchestrator {
         'Luna task base_commit does not match the captured repository baseline.',
       );
     }
+    this.staleTask = emptyStaleTask();
   }
 
   private async applyUpdates(
@@ -1565,6 +1806,15 @@ function cloneState(state: OrchestratorState): OrchestratorState {
     pendingCodeSync: clonePendingCodeSync(state.pendingCodeSync),
     pendingReconciliationSync: clonePendingReconciliationSync(state.pendingReconciliationSync),
     executionRecovery: cloneExecutionRecovery(state.executionRecovery),
+    ...(state.manualGitOperation === undefined
+      ? {}
+      : {
+          manualGitOperation: {
+            ...state.manualGitOperation,
+            result: state.manualGitOperation.result === null ? null : { ...state.manualGitOperation.result },
+            error: state.manualGitOperation.error === null ? null : { ...state.manualGitOperation.error },
+          },
+        }),
     activeSolSession: state.activeSolSession === null ? null : { ...state.activeSolSession },
   };
 }
@@ -1929,6 +2179,18 @@ function errorCode(error: unknown): string {
   return 'ORCHESTRATION_FAILED';
 }
 
+function errorDetails(error: unknown): Record<string, unknown> {
+  if (typeof error !== 'object' || error === null || !('details' in error)) return {};
+  const details = (error as { details?: unknown }).details;
+  return typeof details === 'object' && details !== null && !Array.isArray(details)
+    ? (details as Record<string, unknown>)
+    : {};
+}
+
+function commitValue(value: unknown): string | null {
+  return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value) ? value : null;
+}
+
 const DASHBOARD_NON_RETRYABLE_ERROR_CODES = new Set([
   'ARCHITECTURE_FREEZE_CONTENT_TYPE_INVALID',
   'ARCHITECTURE_FREEZE_DUPLICATE_CONFLICT',
@@ -1992,6 +2254,10 @@ function safeSyncId(value: string): string {
 
 function result(status: OrchestratorResult['status'], state: OrchestratorState, message: string): OrchestratorResult {
   return { status, phase: state.phase, taskId: state.taskId, message };
+}
+
+function emptyStaleTask(): DashboardStaleTaskSnapshot {
+  return { invalidated: false, taskBaseCommit: null, currentCommit: null, message: null };
 }
 
 function reconciliationResult(

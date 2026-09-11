@@ -39,6 +39,9 @@ const dashboardTaskElement = document.querySelector<HTMLElement>('#dashboard-tas
 const dashboardRevisionsElement = document.querySelector<HTMLElement>('#dashboard-revisions');
 const dashboardLunaElement = document.querySelector<HTMLElement>('#dashboard-luna');
 const dashboardCommitsElement = document.querySelector<HTMLElement>('#dashboard-commits');
+const dashboardBaselineElement = document.querySelector<HTMLElement>('#dashboard-baseline');
+const dashboardStaleTaskElement = document.querySelector<HTMLElement>('#dashboard-stale-task');
+const dashboardGitOperationElement = document.querySelector<HTMLElement>('#dashboard-git-operation');
 const dashboardErrorElement = document.querySelector<HTMLElement>('#dashboard-error');
 const dashboardSuggestionElement = document.querySelector<HTMLElement>('#dashboard-suggestion');
 const dashboardActionFeedbackElement = document.querySelector<HTMLElement>('#dashboard-action-feedback');
@@ -70,7 +73,14 @@ let lastDashboardActionFeedback = '无';
 const loopGraphNodeButtons = new Map<LoopGraphNodeId, LoopGraphButtonParts>();
 const pendingDashboardCommands = new Set<DashboardCommandName>();
 
-const dangerousDashboardCommands = new Set<DashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
+const dangerousDashboardCommands = new Set<DashboardCommandName>([
+  'start',
+  'pause',
+  'retry-current-stage',
+  'rebind',
+  'align-latest-baseline',
+  'commit-and-push',
+]);
 const dashboardCommandNames: DashboardCommandName[] = [
   'start',
   'pause',
@@ -78,6 +88,8 @@ const dashboardCommandNames: DashboardCommandName[] = [
   'continue-interrupted',
   'rebind',
   'governance-consistency-check',
+  'align-latest-baseline',
+  'commit-and-push',
   'open-edge',
   'open-project',
   'view-report',
@@ -349,6 +361,7 @@ function actionReasonSuggestion(snapshot: DashboardSnapshot): string | null {
 }
 
 function getDashboardSuggestion(snapshot: DashboardSnapshot): string {
+  if (snapshot.staleTask.invalidated) return snapshot.staleTask.message ?? '请让 Sol 根据最新 Git 基线重新生成任务书。';
   if (snapshot.recentError?.code === 'EXECUTION_RECOVERY_CONFIRMATION_REQUIRED') {
     return '请查看解析任务书节点的执行摘要，确认无误后点击“继续执行”。';
   }
@@ -368,6 +381,22 @@ function getDashboardSuggestion(snapshot: DashboardSnapshot): string {
   if (snapshot.status === 'NEEDS_USER_ACTION') return '请完成登录、授权、API Key 或 OTP 等外部操作。';
   if (snapshot.status === 'IDLE') return '请先完成项目准备和 Web Chat 会话绑定。';
   return '当前没有需要用户处理的事项。';
+}
+
+function getManualGitOperationLabel(snapshot: DashboardSnapshot): string {
+  const operation = snapshot.manualGitOperation;
+  if (operation === null) return '无';
+  const operationLabel = operation.operation === 'commit-and-push' ? '提交并同步' : '对齐基线';
+  const statusLabels: Record<string, string> = {
+    IDLE: '待机',
+    CHECKING_WORKTREE: '检查工作区',
+    COMMITTING: '提交中',
+    PUSHING: '推送中',
+    ALIGNING_BASELINE: '刷新基线',
+    COMPLETED: '已完成',
+    FAILED: '失败',
+  };
+  return `${operationLabel} / ${statusLabels[operation.status] ?? operation.status}`;
 }
 
 function formatDashboardNode(snapshot: DashboardSnapshot): string {
@@ -610,6 +639,22 @@ function renderDashboard(snapshot: DashboardSnapshot): void {
   if (dashboardCommitsElement !== null) {
     dashboardCommitsElement.textContent = `本地 ${rendererSnapshot.commits.local ?? '—'} / 远端 ${rendererSnapshot.commits.remote ?? '—'}`;
   }
+  if (dashboardBaselineElement !== null) {
+    const baseline = rendererSnapshot.currentBaseline;
+    dashboardBaselineElement.textContent =
+      baseline === null
+        ? '未捕获'
+        : `${baseline.localCommit ?? '—'} / ${baseline.branch ?? '—'} / ${baseline.worktreeClean ? '干净' : '有变更'}`;
+    dashboardBaselineElement.title = baseline?.remoteUrl ?? '';
+  }
+  if (dashboardStaleTaskElement !== null) {
+    const stale = rendererSnapshot.staleTask;
+    dashboardStaleTaskElement.textContent = stale.invalidated ? (stale.message ?? '旧任务书已失效') : '无';
+    dashboardStaleTaskElement.className = stale.invalidated ? 'dashboard-error' : '';
+  }
+  if (dashboardGitOperationElement !== null) {
+    dashboardGitOperationElement.textContent = getManualGitOperationLabel(rendererSnapshot);
+  }
   if (dashboardErrorElement !== null) {
     dashboardErrorElement.textContent =
       rendererSnapshot.recentError === null
@@ -668,10 +713,13 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
       'retry-current-stage': '重试当前阶段',
       'continue-interrupted': '继续上次中断的执行',
       rebind: '重新绑定 Sol 会话',
+      'align-latest-baseline': '对齐最新 Git 基线',
+      'commit-and-push': '提交并同步 Git',
     };
     if (!window.confirm(`确认执行“${labels[command]}”？`)) return null;
     return {
-      command: command as 'start' | 'pause' | 'retry-current-stage' | 'rebind',
+      command: command as
+        'start' | 'pause' | 'retry-current-stage' | 'rebind' | 'align-latest-baseline' | 'commit-and-push',
       confirm: true,
     };
   }

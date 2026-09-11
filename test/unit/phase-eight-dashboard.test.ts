@@ -4,9 +4,11 @@ import {
   LOOP_GRAPH_MAX_DETAILS,
   LOOP_GRAPH_MAX_SOURCE_NODES,
   LOOP_GRAPH_NODE_DEFINITIONS,
+  createEmptyDashboardSnapshot,
   sanitizeDashboardSnapshot,
   validateDashboardCommand,
 } from '../../src/shared/contracts/dashboard.js';
+import type { DashboardCommand } from '../../src/shared/contracts/dashboard.js';
 
 describe('phase eight dashboard contract', () => {
   it('sanitizes the dashboard snapshot at the shared boundary', () => {
@@ -87,6 +89,8 @@ describe('phase eight dashboard contract', () => {
       'continue-interrupted',
       'rebind',
       'governance-consistency-check',
+      'align-latest-baseline',
+      'commit-and-push',
       'open-edge',
       'open-project',
       'view-report',
@@ -291,5 +295,66 @@ describe('phase eight dashboard contract', () => {
     });
     expect(() => validateDashboardCommand({ command: 'view-report', reportPath: '../secrets.txt' })).toThrow();
     expect(() => validateDashboardCommand({ command: 'open-project', projectId: 'other' })).toThrow();
+  });
+
+  it('requires confirmation for manual Git maintenance commands', () => {
+    expect(() => validateDashboardCommand({ command: 'align-latest-baseline' })).toThrow(/confirm: true/);
+    expect(validateDashboardCommand({ command: 'align-latest-baseline', confirm: true })).toEqual({
+      command: 'align-latest-baseline',
+      confirm: true,
+    });
+    expect(validateDashboardCommand({ command: 'commit-and-push', confirm: true })).toEqual({
+      command: 'commit-and-push',
+      confirm: true,
+    });
+
+    const commands: DashboardCommand[] = [
+      { command: 'align-latest-baseline', confirm: true },
+      { command: 'commit-and-push', confirm: true },
+    ];
+    expect(commands).toHaveLength(2);
+  });
+
+  it('sanitizes baseline and stale-task dashboard fields', () => {
+    const snapshot = sanitizeDashboardSnapshot({
+      currentBaseline: {
+        branch: 'main Token=secret',
+        localCommit: 'abcdef1234567',
+        remoteCommit: 'not-a-sha',
+        remoteUrl: 'https://user:password@example.test/repo.git',
+        worktreeClean: true,
+      },
+      staleTask: {
+        invalidated: true,
+        taskBaseCommit: '123456789abcd',
+        currentCommit: 'also-invalid',
+        message: 'Authorization=Bearer secret',
+      },
+    });
+
+    expect(snapshot.currentBaseline).toEqual({
+      branch: 'main [REDACTED]',
+      localCommit: 'abcdef1234567',
+      remoteCommit: null,
+      remoteUrl: 'https://[REDACTED]@example.test/repo.git',
+      worktreeClean: true,
+    });
+    expect(snapshot.staleTask).toEqual({
+      invalidated: true,
+      taskBaseCommit: '123456789abcd',
+      currentCommit: null,
+      message: '[REDACTED]',
+    });
+  });
+
+  it('keeps new snapshot fields safe and backwards compatible when omitted', () => {
+    const snapshot = createEmptyDashboardSnapshot();
+    expect(snapshot.currentBaseline).toBeNull();
+    expect(snapshot.staleTask).toEqual({
+      invalidated: false,
+      taskBaseCommit: null,
+      currentCommit: null,
+      message: null,
+    });
   });
 });

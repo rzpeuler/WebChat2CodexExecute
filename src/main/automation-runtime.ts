@@ -548,6 +548,14 @@ export async function createAutomationRuntime(
       assertRuntimeOperationAllowed();
       return git.captureBaseline(...args);
     },
+    readRepositoryStatus: (...args: Parameters<GitController['readRepositoryStatus']>) => {
+      assertRuntimeOperationAllowed();
+      return git.readRepositoryStatus(...args);
+    },
+    commitAndPushProject: (...args: Parameters<GitController['commitAndPushProject']>) => {
+      assertRuntimeOperationAllowed();
+      return git.commitAndPushProject(...args);
+    },
     syncGovernance: (...args: Parameters<GitController['syncGovernance']>) => {
       assertRuntimeOperationAllowed();
       return git.syncGovernance(...args);

@@ -18,6 +18,9 @@ import type {
   CaptureBaselineOptions,
   CodeSyncInput,
   GitBaseline,
+  GitManualCommitAndPushResult,
+  GitManualOperationRecord,
+  GitRepositoryStatus,
   GitSyncResult,
   GovernanceSyncInput,
 } from '../git/types.js';
@@ -102,6 +105,8 @@ export interface OrchestratorState {
   pendingCodeSync: PendingCodeSyncState | null;
   pendingReconciliationSync: PendingReconciliationSyncState | null;
   executionRecovery: ExecutionRecoveryRecord | null;
+  /** Optional for backwards compatibility with state files written before manual Git maintenance. */
+  manualGitOperation?: GitManualOperationRecord;
   activeSolSession: {
     sessionId: string;
     conversationId: string | null;
@@ -139,6 +144,8 @@ export interface ContextRecoverySource {
 
 export interface GitOrchestratorPort {
   captureBaseline(repositoryPath: string, options?: CaptureBaselineOptions): Promise<GitBaseline>;
+  readRepositoryStatus?(repositoryPath: string): Promise<GitRepositoryStatus>;
+  commitAndPushProject?(repositoryPath: string): Promise<GitManualCommitAndPushResult>;
   syncGovernance(input: GovernanceSyncInput): Promise<GitSyncResult>;
   syncCode(input: CodeSyncInput): Promise<GitSyncResult>;
 }
@@ -245,6 +252,8 @@ export interface Orchestrator {
   pause(): Promise<OrchestratorResult>;
   retryCurrentStage(): Promise<OrchestratorResult>;
   continueInterrupted(): Promise<OrchestratorResult>;
+  alignLatestBaseline(): Promise<OrchestratorResult>;
+  commitAndPushProject(): Promise<OrchestratorResult>;
   runRound(): Promise<OrchestratorResult>;
   beginGovernanceReconciliationWait(): Promise<void>;
   pauseGovernanceReconciliation(error: unknown): Promise<void>;

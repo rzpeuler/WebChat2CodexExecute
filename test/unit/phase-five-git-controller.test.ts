@@ -342,6 +342,89 @@ describe('GitController', () => {
     expect(pushCount).toBe(2);
   });
 
+  it('reads full repository state and commits every add, edit, delete, rename, and backup change', async () => {
+    const { root } = await repository();
+    const controller = new GitController();
+    await writeFile(join(root, 'added.md'), 'added\n', 'utf8');
+    await writeFile(join(root, 'README.md'), '# Changed\n', 'utf8');
+    await writeFile(join(root, 'deleted.md'), 'delete me\n', 'utf8');
+    await command(root, ['add', '--', 'deleted.md']);
+    await command(root, ['commit', '-m', 'seed deletion']);
+    await command(root, ['rm', '--', 'deleted.md']);
+    await command(root, ['mv', 'README.md', 'RENAMED.md']);
+    await mkdir(join(root, '.web-chat2codex', 'backups'), { recursive: true });
+    await writeFile(join(root, '.web-chat2codex', 'backups', 'recovery.txt'), 'keep\n', 'utf8');
+
+    const status = await controller.readRepositoryStatus(root);
+    expect(status.clean).toBe(false);
+    expect(status.worktree).toEqual(
+      expect.arrayContaining(['added.md', 'RENAMED.md', 'README.md', '.web-chat2codex/backups/recovery.txt']),
+    );
+
+    const result = await controller.commitAndPushProject(root);
+    expect(result).toMatchObject({
+      phase: 'COMPLETED',
+      createdCommit: true,
+      pushed: true,
+      clean: true,
+      remoteCommit: result.localCommit,
+    });
+    expect(await command(root, ['log', '-1', '--format=%s'])).toBe('chore(web-chat2codex): sync project changes');
+    expect(await command(root, ['show', '--format=', '--name-status', 'HEAD'])).toContain('D\tdeleted.md');
+    expect(await command(root, ['show', '--format=', '--name-status', 'HEAD'])).toContain(
+      'A\t.web-chat2codex/backups/recovery.txt',
+    );
+    await expect(controller.commitAndPushProject(root)).rejects.toMatchObject({ code: 'NO_CHANGES' });
+  });
+
+  it('retains a manual commit after push failure and retries push without another commit', async () => {
+    const { root } = await repository();
+    const statePath = join(dirname(root), 'pending-push-state', 'manual.json');
+    let failPush = true;
+    let commitCount = 0;
+    const executor: GitExecFile = async (file, args, options) => {
+      if (file === 'git' && args[0] === 'commit') commitCount += 1;
+      if (file === 'git' && args[0] === 'push' && failPush) {
+        failPush = false;
+        throw Object.assign(new Error('remote rejected'), { stderr: 'remote rejected', uncertain: false });
+      }
+      return realExecutor()(file, args, options);
+    };
+    const controller = new GitController({ execFile: executor, pendingPushStatePath: statePath });
+    await writeFile(join(root, 'pending.md'), 'pending\n', 'utf8');
+    await expect(controller.commitAndPushProject(root)).rejects.toMatchObject({ code: 'PUSH_FAILED' });
+    const localCommit = await command(root, ['rev-parse', 'HEAD']);
+    expect(commitCount).toBe(1);
+    expect(JSON.parse(await readFile(statePath, 'utf8')).pendingPushes).not.toEqual({});
+    const retry = await controller.commitAndPushProject(root);
+    expect(retry).toMatchObject({ localCommit, createdCommit: false, pushed: true, clean: true });
+    expect(commitCount).toBe(1);
+  });
+
+  it('refuses a remote advance before manual push and never force pushes', async () => {
+    const { root, remote } = await repository();
+    const external = join(dirname(root), 'manual-external');
+    await command(root, ['clone', remote, external]);
+    await command(external, ['switch', '-c', 'main', '--track', 'origin/main']);
+    await command(external, ['config', 'user.email', 'external@example.invalid']);
+    await command(external, ['config', 'user.name', 'External User']);
+    await writeFile(join(external, 'external.md'), 'external\n', 'utf8');
+    await command(external, ['add', '-A']);
+    await command(external, ['commit', '-m', 'external']);
+    await command(external, ['push', 'origin', 'main']);
+    await writeFile(join(root, 'local.md'), 'local\n', 'utf8');
+    let pushCount = 0;
+    const controller = new GitController({
+      execFile: async (file, args, options) => {
+        if (file === 'git' && args[0] === 'push') pushCount += 1;
+        return realExecutor()(file, args, options);
+      },
+    });
+    await expect(controller.commitAndPushProject(root)).rejects.toMatchObject({ code: 'BASELINE_CHANGED' });
+    expect(pushCount).toBe(0);
+    expect(await command(root, ['rev-parse', 'HEAD'])).not.toBe(await command(external, ['rev-parse', 'HEAD']));
+  });
+
   it('requires a report, passing tests, and an approved non-protected change set for code sync', async () => {
     const { root } = await repository();
     const controller = new GitController();

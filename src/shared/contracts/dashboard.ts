@@ -8,6 +8,8 @@ export const DASHBOARD_COMMANDS = [
   'continue-interrupted',
   'rebind',
   'governance-consistency-check',
+  'align-latest-baseline',
+  'commit-and-push',
   'open-edge',
   'open-project',
   'view-report',
@@ -15,6 +17,17 @@ export const DASHBOARD_COMMANDS = [
 
 export type DashboardCommandName = (typeof DASHBOARD_COMMANDS)[number];
 export type DangerousDashboardCommandName = 'start' | 'pause' | 'retry-current-stage' | 'rebind';
+export type ManualGitDashboardCommandName = 'align-latest-baseline' | 'commit-and-push';
+export type DashboardConfirmationCommandName = DangerousDashboardCommandName | ManualGitDashboardCommandName;
+
+export const DASHBOARD_CONFIRMATION_COMMANDS = [
+  'start',
+  'pause',
+  'retry-current-stage',
+  'rebind',
+  'align-latest-baseline',
+  'commit-and-push',
+] as const satisfies readonly DashboardConfirmationCommandName[];
 
 export interface DashboardActionState {
   enabled: boolean;
@@ -22,7 +35,11 @@ export interface DashboardActionState {
   reason: string | null;
 }
 
-export type DashboardActions = Record<DashboardCommandName, DashboardActionState>;
+export type DashboardActions = Record<
+  Exclude<DashboardCommandName, ManualGitDashboardCommandName>,
+  DashboardActionState
+> &
+  Partial<Record<ManualGitDashboardCommandName, DashboardActionState>>;
 
 export interface DashboardCommandBase {
   command: DashboardCommandName;
@@ -40,11 +57,16 @@ export interface ViewReportDashboardCommand extends DashboardCommandBase {
 
 export type DashboardCommand =
   | DangerousDashboardCommand
+  | ManualGitDashboardCommand
   | { command: 'continue-interrupted' }
   | { command: 'governance-consistency-check' }
   | { command: 'open-edge' }
   | { command: 'open-project' }
   | ViewReportDashboardCommand;
+
+/** Manual Git commands are declared here for the shared boundary and wired in a later task. */
+export type ManualGitDashboardCommand =
+  { command: 'align-latest-baseline'; confirm: true } | { command: 'commit-and-push'; confirm: true };
 
 export interface DashboardCommandResult {
   accepted: boolean;
@@ -82,6 +104,37 @@ export interface DashboardLunaSnapshot {
 export interface DashboardErrorSnapshot {
   code: string;
   message: string;
+}
+
+export interface DashboardBaselineSnapshot {
+  branch: string | null;
+  localCommit: string | null;
+  remoteCommit: string | null;
+  remoteUrl: string | null;
+  worktreeClean: boolean;
+}
+
+export interface DashboardStaleTaskSnapshot {
+  invalidated: boolean;
+  taskBaseCommit: string | null;
+  currentCommit: string | null;
+  message: string | null;
+}
+
+export interface DashboardManualGitOperationSnapshot {
+  operation: 'align-latest-baseline' | 'commit-and-push';
+  status: 'IDLE' | 'CHECKING_WORKTREE' | 'COMMITTING' | 'PUSHING' | 'ALIGNING_BASELINE' | 'COMPLETED' | 'FAILED';
+  startedAt: string;
+  updatedAt: string;
+  result: {
+    localCommit: string | null;
+    remoteCommit: string | null;
+    createdCommit: boolean;
+    pushed: boolean;
+    changedPaths: string[];
+    clean: boolean;
+  } | null;
+  error: DashboardErrorSnapshot | null;
 }
 
 export interface DashboardRecoverySnapshot {
@@ -163,6 +216,9 @@ export interface DashboardSnapshot {
     local: string | null;
     remote: string | null;
   };
+  currentBaseline: DashboardBaselineSnapshot | null;
+  staleTask: DashboardStaleTaskSnapshot;
+  manualGitOperation: DashboardManualGitOperationSnapshot | null;
   recentError: DashboardErrorSnapshot | null;
   recovery: DashboardRecoverySnapshot | null;
   loopGraph: LoopGraphSnapshot;
@@ -181,27 +237,28 @@ export interface DashboardSnapshotSource {
   architectureRevisions?: Array<string | number>;
   luna?: Partial<DashboardLunaSnapshot>;
   commits?: Partial<DashboardSnapshot['commits']>;
+  currentBaseline?: Partial<DashboardBaselineSnapshot> | null;
+  staleTask?: Partial<DashboardStaleTaskSnapshot>;
+  manualGitOperation?: unknown;
   recentError?: unknown;
   recovery?: unknown;
   loopGraph?: LoopGraphSnapshotSource | null;
   actions?: Partial<Record<DashboardCommandName, Partial<DashboardActionState>>>;
 }
 
-const DANGEROUS_COMMANDS = new Set<DangerousDashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
-
 export function validateDashboardCommand(value: unknown): DashboardCommand {
   if (!isRecord(value) || typeof value.command !== 'string' || !isDashboardCommandName(value.command)) {
     throw new DashboardCommandValidationError('command must be a supported dashboard command');
   }
   const command = value.command;
-  if (DANGEROUS_COMMANDS.has(command as DangerousDashboardCommandName)) {
+  if (isDashboardConfirmationCommandName(command)) {
     if (value.confirm !== true) {
       throw new DashboardCommandValidationError(`${command} requires confirm: true`);
     }
     if (Object.keys(value).some((key) => key !== 'command' && key !== 'confirm')) {
       throw new DashboardCommandValidationError(`${command} does not accept additional parameters`);
     }
-    return { command: command as DangerousDashboardCommandName, confirm: true };
+    return { command, confirm: true };
   }
   if (command === 'view-report') {
     if (Object.keys(value).some((key) => key !== 'command' && key !== 'reportPath')) {
@@ -263,10 +320,81 @@ export function sanitizeDashboardSnapshot(source: DashboardSnapshotSource): Dash
       local: sanitizeCommit(source.commits?.local),
       remote: sanitizeCommit(source.commits?.remote),
     },
+    currentBaseline: sanitizeDashboardBaseline(source.currentBaseline),
+    staleTask: sanitizeDashboardStaleTask(source.staleTask),
+    manualGitOperation: sanitizeManualGitOperation(source.manualGitOperation),
     recentError,
     recovery: sanitizeDashboardRecovery(source.recovery),
     loopGraph: sanitizeLoopGraph(source.loopGraph),
     actions: sanitizeDashboardActions(source.actions),
+  };
+}
+
+function sanitizeDashboardBaseline(
+  value: DashboardSnapshotSource['currentBaseline'],
+): DashboardBaselineSnapshot | null {
+  if (value === null || value === undefined) return null;
+  return {
+    branch: sanitizeSafeText(value.branch, 128) || null,
+    localCommit: sanitizeCommit(value.localCommit),
+    remoteCommit: sanitizeCommit(value.remoteCommit),
+    remoteUrl: sanitizeSafeText(value.remoteUrl, 260) || null,
+    worktreeClean: value.worktreeClean === true,
+  };
+}
+
+function sanitizeDashboardStaleTask(value: DashboardSnapshotSource['staleTask']): DashboardStaleTaskSnapshot {
+  const taskBaseCommit = sanitizeCommit(value?.taskBaseCommit);
+  const currentCommit = sanitizeCommit(value?.currentCommit);
+  return {
+    invalidated: value?.invalidated === true,
+    taskBaseCommit,
+    currentCommit,
+    message: sanitizeSafeText(value?.message, 240) || null,
+  };
+}
+
+function sanitizeManualGitOperation(value: unknown): DashboardManualGitOperationSnapshot | null {
+  if (!isRecord(value)) return null;
+  const operation = value.operation;
+  const status = value.status;
+  if (operation !== 'align-latest-baseline' && operation !== 'commit-and-push') return null;
+  if (
+    status !== 'IDLE' &&
+    status !== 'CHECKING_WORKTREE' &&
+    status !== 'COMMITTING' &&
+    status !== 'PUSHING' &&
+    status !== 'ALIGNING_BASELINE' &&
+    status !== 'COMPLETED' &&
+    status !== 'FAILED'
+  )
+    return null;
+  const startedAt = sanitizeTimestamp(value.startedAt);
+  const updatedAt = sanitizeTimestamp(value.updatedAt);
+  if (startedAt === null || updatedAt === null) return null;
+  const result = isRecord(value.result)
+    ? {
+        localCommit: sanitizeCommit(value.result.localCommit),
+        remoteCommit: sanitizeCommit(value.result.remoteCommit),
+        createdCommit: value.result.createdCommit === true,
+        pushed: value.result.pushed === true,
+        changedPaths: Array.isArray(value.result.changedPaths)
+          ? value.result.changedPaths
+              .filter((path): path is string => typeof path === 'string')
+              .map((path) => sanitizeSafeText(path, 260))
+              .filter((path) => path.length > 0)
+              .slice(0, 100)
+          : [],
+        clean: value.result.clean === true,
+      }
+    : null;
+  return {
+    operation,
+    status,
+    startedAt,
+    updatedAt,
+    result,
+    error: sanitizeDashboardError(value.error),
   };
 }
 
@@ -477,6 +605,10 @@ function assertSafeReportPath(value: unknown): asserts value is string {
 
 function isDashboardCommandName(value: string): value is DashboardCommandName {
   return (DASHBOARD_COMMANDS as readonly string[]).includes(value);
+}
+
+function isDashboardConfirmationCommandName(value: DashboardCommandName): value is DashboardConfirmationCommandName {
+  return (DASHBOARD_CONFIRMATION_COMMANDS as readonly string[]).includes(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

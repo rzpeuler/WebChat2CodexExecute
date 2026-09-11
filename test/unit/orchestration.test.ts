@@ -1678,4 +1678,108 @@ ${invalidTask}`),
       accepted: true,
     });
   });
+
+  it('aligns the latest baseline as an independent paused maintenance action', async () => {
+    const alignedBaseline = { ...baseline, head: 'a'.repeat(40), remoteTip: 'a'.repeat(40) };
+    const options = baseOptions({
+      git: {
+        captureBaseline: vi.fn(async () => alignedBaseline),
+        readRepositoryStatus: vi.fn(async () => ({
+          repositoryRoot: alignedBaseline.repositoryRoot,
+          branch: alignedBaseline.branch,
+          remoteName: alignedBaseline.remoteName,
+          remoteUrl: alignedBaseline.remoteUrl,
+          head: alignedBaseline.head,
+          remoteTrackingHead: alignedBaseline.remoteTip,
+          worktree: [],
+          clean: true,
+        })),
+        syncGovernance: vi.fn(async () => ({
+          kind: 'governance' as const,
+          commit: 'abcdef2',
+          pushed: true,
+          remoteCommit: 'abcdef2',
+          pushRetried: false,
+        })),
+        syncCode: vi.fn(async () => ({
+          kind: 'code' as const,
+          commit: 'abcdef3',
+          pushed: true,
+          remoteCommit: 'abcdef3',
+          pushRetried: false,
+        })),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await expect(
+      orchestrator.executeCommand({ command: 'align-latest-baseline', confirm: true }),
+    ).resolves.toMatchObject({ accepted: true, code: 'BASELINE_ALIGN_ACCEPTED' });
+
+    expect(options.edge.observe).not.toHaveBeenCalled();
+    expect(orchestrator.getDashboardSnapshot()).toMatchObject({
+      currentBaseline: {
+        localCommit: 'a'.repeat(40),
+        remoteCommit: 'a'.repeat(40),
+        worktreeClean: true,
+      },
+      staleTask: { invalidated: false },
+    });
+  });
+
+  it('commits and pushes all project changes without entering the loop', async () => {
+    const newCommit = 'b'.repeat(40);
+    const alignedBaseline = { ...baseline, head: newCommit, remoteTip: newCommit };
+    const sync = vi.fn(async () => ({
+      phase: 'COMPLETED' as const,
+      localCommit: newCommit,
+      remoteCommit: newCommit,
+      createdCommit: true,
+      pushed: true,
+      changedPaths: ['README.md', '.web-chat2codex/backups/recovery.md'],
+      clean: true,
+    }));
+    const options = baseOptions({
+      git: {
+        captureBaseline: vi.fn(async () => alignedBaseline),
+        readRepositoryStatus: vi.fn(async () => ({
+          repositoryRoot: baseline.repositoryRoot,
+          branch: baseline.branch,
+          remoteName: baseline.remoteName,
+          remoteUrl: baseline.remoteUrl,
+          head: baseline.head,
+          remoteTrackingHead: baseline.remoteTip,
+          worktree: ['README.md', '.web-chat2codex/backups/recovery.md'],
+          clean: false,
+        })),
+        commitAndPushProject: sync,
+        syncGovernance: vi.fn(async () => ({
+          kind: 'governance' as const,
+          commit: 'abcdef2',
+          pushed: true,
+          remoteCommit: 'abcdef2',
+          pushRetried: false,
+        })),
+        syncCode: vi.fn(async () => ({
+          kind: 'code' as const,
+          commit: 'abcdef3',
+          pushed: true,
+          remoteCommit: 'abcdef3',
+          pushRetried: false,
+        })),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await expect(orchestrator.executeCommand({ command: 'commit-and-push', confirm: true })).resolves.toMatchObject({
+      accepted: true,
+      code: 'GIT_SYNC_ACCEPTED',
+    });
+
+    expect(sync).toHaveBeenCalledOnce();
+    expect(options.edge.observe).not.toHaveBeenCalled();
+    expect(orchestrator.getDashboardSnapshot()).toMatchObject({
+      currentBaseline: { localCommit: newCommit, remoteCommit: newCommit, worktreeClean: true },
+    });
+  });
 });

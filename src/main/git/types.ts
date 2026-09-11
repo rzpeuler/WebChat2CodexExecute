@@ -15,6 +15,40 @@ export type GitErrorCode =
   | 'PUSH_FAILED'
   | 'COMMAND_FAILED';
 
+export type GitManualOperationName = 'align-latest-baseline' | 'commit-and-push';
+export type GitManualOperationStatus =
+  'IDLE' | 'CHECKING_WORKTREE' | 'COMMITTING' | 'PUSHING' | 'ALIGNING_BASELINE' | 'COMPLETED' | 'FAILED';
+
+export interface GitManualCommitAndPushResult {
+  phase: GitManualOperationStatus;
+  localCommit: string | null;
+  remoteCommit: string | null;
+  createdCommit: boolean;
+  pushed: boolean;
+  changedPaths?: string[];
+  clean?: boolean;
+}
+
+export interface GitRepositoryStatus {
+  repositoryRoot: string;
+  branch: string;
+  remoteName: string;
+  remoteUrl: string;
+  head: string;
+  remoteTrackingHead: string | null;
+  worktree: string[];
+  clean: boolean;
+}
+
+export interface GitManualOperationRecord {
+  operation: GitManualOperationName;
+  status: GitManualOperationStatus;
+  startedAt: string;
+  updatedAt: string;
+  result: GitManualCommitAndPushResult | null;
+  error: { code: string; message: string } | null;
+}
+
 export interface GitCommandResult {
   stdout: string;
   stderr: string;

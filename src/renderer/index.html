@@ -145,6 +145,18 @@
               <dd id="dashboard-commits">本地 — / 远端 —</dd>
             </div>
             <div>
+              <dt>当前基线</dt>
+              <dd id="dashboard-baseline">未捕获</dd>
+            </div>
+            <div>
+              <dt>任务基线</dt>
+              <dd id="dashboard-stale-task">无</dd>
+            </div>
+            <div>
+              <dt>Git 维护</dt>
+              <dd id="dashboard-git-operation">无</dd>
+            </div>
+            <div>
               <dt>最近异常</dt>
               <dd id="dashboard-error" class="dashboard-error">无</dd>
             </div>
@@ -197,6 +209,15 @@
             <button class="button-secondary" type="button" data-dashboard-command="open-project">打开项目</button>
             <button class="button-secondary" type="button" data-dashboard-command="view-report">查看报告</button>
           </div>
+          <div class="actions maintenance-git-actions" aria-label="人工 Git 阻塞处理">
+            <button class="button-secondary" type="button" data-dashboard-command="commit-and-push">
+              提交并同步 Git
+            </button>
+            <button class="button-secondary" type="button" data-dashboard-command="align-latest-baseline">
+              对齐最新基线
+            </button>
+          </div>
+          <p class="helper-text">遇到基线阻塞时使用：先提交并同步工作区，再对齐最新基线；不会自动启动下一轮。</p>
           <p class="helper-text">按钮的可用条件、处理中状态和禁用原因以后台快照为准。</p>
         </div>
       </section>
