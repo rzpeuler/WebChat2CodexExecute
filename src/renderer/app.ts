@@ -67,13 +67,7 @@ let lastCurrentLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
 const loopGraphNodeButtons = new Map<LoopGraphNodeId, LoopGraphButtonParts>();
 const pendingDashboardCommands = new Set<DashboardCommandName>();
 
-const dangerousDashboardCommands = new Set<DashboardCommandName>([
-  'start',
-  'pause',
-  'retry-current-stage',
-  'continue-interrupted',
-  'rebind',
-]);
+const dangerousDashboardCommands = new Set<DashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
 const dashboardCommandNames: DashboardCommandName[] = [
   'start',
   'pause',
@@ -651,11 +645,14 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
     };
     if (!window.confirm(`确认执行“${labels[command]}”？`)) return null;
     return {
-      command: command as 'start' | 'pause' | 'retry-current-stage' | 'continue-interrupted' | 'rebind',
+      command: command as 'start' | 'pause' | 'retry-current-stage' | 'rebind',
       confirm: true,
     };
   }
-  return { command: command as 'governance-consistency-check' | 'open-edge' | 'open-project' | 'view-report' };
+  return {
+    command: command as
+      'continue-interrupted' | 'governance-consistency-check' | 'open-edge' | 'open-project' | 'view-report',
+  };
 }
 
 async function executeDashboardCommandFromButton(button: HTMLButtonElement): Promise<void> {

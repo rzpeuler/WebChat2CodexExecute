@@ -69,9 +69,8 @@ describe('phase eight dashboard contract', () => {
       completedNodeIds: ['read-sol', 'parse-task'],
       error: { message: '[REDACTED]' },
     });
-    expect(validateDashboardCommand({ command: 'continue-interrupted', confirm: true })).toEqual({
+    expect(validateDashboardCommand({ command: 'continue-interrupted' })).toEqual({
       command: 'continue-interrupted',
-      confirm: true,
     });
   });
 

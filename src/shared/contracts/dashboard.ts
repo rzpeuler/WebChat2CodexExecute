@@ -14,8 +14,7 @@ export const DASHBOARD_COMMANDS = [
 ] as const;
 
 export type DashboardCommandName = (typeof DASHBOARD_COMMANDS)[number];
-export type DangerousDashboardCommandName =
-  'start' | 'pause' | 'retry-current-stage' | 'continue-interrupted' | 'rebind';
+export type DangerousDashboardCommandName = 'start' | 'pause' | 'retry-current-stage' | 'rebind';
 
 export interface DashboardActionState {
   enabled: boolean;
@@ -41,6 +40,7 @@ export interface ViewReportDashboardCommand extends DashboardCommandBase {
 
 export type DashboardCommand =
   | DangerousDashboardCommand
+  | { command: 'continue-interrupted' }
   | { command: 'governance-consistency-check' }
   | { command: 'open-edge' }
   | { command: 'open-project' }
@@ -187,13 +187,7 @@ export interface DashboardSnapshotSource {
   actions?: Partial<Record<DashboardCommandName, Partial<DashboardActionState>>>;
 }
 
-const DANGEROUS_COMMANDS = new Set<DangerousDashboardCommandName>([
-  'start',
-  'pause',
-  'retry-current-stage',
-  'continue-interrupted',
-  'rebind',
-]);
+const DANGEROUS_COMMANDS = new Set<DangerousDashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
 
 export function validateDashboardCommand(value: unknown): DashboardCommand {
   if (!isRecord(value) || typeof value.command !== 'string' || !isDashboardCommandName(value.command)) {
@@ -215,6 +209,12 @@ export function validateDashboardCommand(value: unknown): DashboardCommand {
     }
     if (value.reportPath !== undefined) assertSafeReportPath(value.reportPath);
     return value.reportPath === undefined ? { command } : { command, reportPath: value.reportPath };
+  }
+  if (command === 'continue-interrupted') {
+    if (Object.keys(value).length !== 1) {
+      throw new DashboardCommandValidationError(`${command} does not accept parameters`);
+    }
+    return { command };
   }
   if (command === 'governance-consistency-check') return { command };
   if (Object.keys(value).length !== 1) {
