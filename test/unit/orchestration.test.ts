@@ -668,6 +668,7 @@ describe('P0 main orchestration', () => {
     'GOVERNANCE_CHANGE_COMMIT_FAILED',
     'GOVERNANCE_RECONCILIATION_COMMIT_FAILED',
     'NETWORK_ERROR',
+    'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
   ])('marks %s as retryable in the dashboard', async (code) => {
     const options = baseOptions({
       edge: {
@@ -682,6 +683,11 @@ describe('P0 main orchestration', () => {
     await orchestrator.start();
     await orchestrator.runRound();
     expect(orchestrator.getDashboardSnapshot().actions['retry-current-stage']).toEqual({
+      enabled: true,
+      busy: false,
+      reason: null,
+    });
+    expect(orchestrator.getDashboardSnapshot().actions.start).toEqual({
       enabled: true,
       busy: false,
       reason: null,

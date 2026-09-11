@@ -212,7 +212,7 @@ export class MainOrchestrator implements Orchestrator {
           ? disabled('已有编排操作正在处理中。', operationBusy)
           : blockedBySol
             ? disabled('当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。')
-            : this.state.status === 'NEEDS_USER_ACTION'
+            : this.state.status === 'NEEDS_USER_ACTION' && !hasRecoverableError
               ? disabled('请先完成用户操作后再启动。')
               : enabled(),
       pause: reconciliationBusy
@@ -1632,6 +1632,7 @@ const DASHBOARD_NON_RETRYABLE_ERROR_CODES = new Set([
 
 function dashboardNeedsNewSol(error: { code: string; message: string } | null): boolean {
   if (error === null) return false;
+  if (error.code === 'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT') return false;
   return (
     DASHBOARD_NON_RETRYABLE_ERROR_CODES.has(error.code) ||
     /^(?:WRITING_BLOCK|PROTOCOL|SOL_BLOCKED|.*(?:CONFLICT|SCOPE))/.test(error.code) ||
@@ -1643,6 +1644,7 @@ function dashboardNeedsNewSol(error: { code: string; message: string } | null): 
 
 function isRetryableDashboardError(error: { code: string; message: string } | null): boolean {
   if (error === null || dashboardNeedsNewSol(error)) return false;
+  if (error.code === 'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT') return true;
   return /^(?:FAILED|TIMEOUT|NETWORK|SESSION|CLI|CODEX|LUNA|REPORT|TEST|GIT|PUSH|SYNC|CONTEXT|AUTH|PROCESS_|COMMAND_FAILED|DASHBOARD_COMMAND_FAILED|COMMIT_FAILED|GOVERNANCE_CHANGE_COMMIT_FAILED|GOVERNANCE_RECONCILIATION_COMMIT_FAILED|ARCHITECTURE_FREEZE_(?:FETCH_FAILED|CONTENT_UNREADABLE|COMMIT_FAILED)|EDGE_PROCESS_EXITED|GOVERNANCE_RECONCILIATION_(?:TIMEOUT|AUTH_REQUIRED|CONTEXT_LIMIT)|BLOCKED_EXTERNAL_SETUP)/i.test(
     error.code,
   );
