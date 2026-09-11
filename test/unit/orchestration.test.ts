@@ -476,6 +476,7 @@ describe('P0 main orchestration', () => {
     await running.start();
     const inFlight = running.runRound();
     await vi.waitFor(() => expect(options.edge.observe).toHaveBeenCalledOnce());
+    const releaseInitialObservation = releaseObservation;
 
     const restarted = new MainOrchestrator(options);
     await restarted.initialize();
@@ -487,13 +488,17 @@ describe('P0 main orchestration', () => {
     expect(options.codex.startTask).not.toHaveBeenCalled();
 
     await restarted.start();
-    expect(restarted.getState()).toMatchObject({ active: true, status: 'RUNNING', phase: 'WAITING_FOR_SOL' });
-    expect(restarted.getDashboardSnapshot().loopGraph).toMatchObject({ currentNodeId: 'wait-sol' });
-    expect(restarted.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+    expect(restarted.getState()).toMatchObject({ active: true, status: 'RUNNING', phase: 'READING_SOL' });
+    expect(restarted.getDashboardSnapshot().loopGraph).toMatchObject({ currentNodeId: 'read-sol' });
+    expect(restarted.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
       state: 'ACTIVE',
     });
 
-    releaseObservation(observation(''));
+    await vi.waitFor(() => expect(options.edge.observe).toHaveBeenCalledTimes(2));
+    const releaseRestartedObservation = releaseObservation;
+    releaseRestartedObservation(observation(''));
+    await restarted.runRound();
+    releaseInitialObservation(observation(''));
     await inFlight;
   });
 
@@ -512,12 +517,12 @@ describe('P0 main orchestration', () => {
     await orchestrator.start();
     expect(orchestrator.getDashboardSnapshot().loopGraph).toMatchObject({
       roundId,
-      currentNodeId: 'wait-sol',
+      currentNodeId: 'read-sol',
     });
-    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
       state: 'ACTIVE',
     });
-    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'WAITING' });
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'DUPLICATE' });
     expect(orchestrator.getDashboardSnapshot().loopGraph.roundId).toBe(roundId);
   });
 
@@ -636,7 +641,7 @@ describe('P0 main orchestration', () => {
     expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({ enabled: true, busy: false });
     await expect(orchestrator.start()).resolves.toMatchObject({
       status: 'WAITING',
-      message: '编排器已启动，等待 Sol 完成输出。',
+      message: '编排器已启动，正在读取 Sol。',
     });
     expect(orchestrator.getState()).toMatchObject({ active: true, status: 'RUNNING', recentError: null });
   });
@@ -769,7 +774,7 @@ describe('P0 main orchestration', () => {
       });
       await expect(orchestrator.start()).resolves.toMatchObject({
         status: 'WAITING',
-        message: '编排器已启动，等待 Sol 完成输出。',
+        message: '编排器已启动，正在读取 Sol。',
       });
     },
   );
@@ -851,6 +856,7 @@ describe('P0 main orchestration', () => {
     });
 
     await orchestrator.start();
+    await orchestrator.runRound();
     expect(orchestrator.getDashboardSnapshot().actions).toMatchObject({
       start: { enabled: false, busy: false },
       pause: { enabled: true, busy: false },
@@ -1376,7 +1382,6 @@ ${invalidTask}`),
         pushRetried: false,
       });
     const orchestrator = new MainOrchestrator(options);
-    await orchestrator.start();
 
     const first = await orchestrator.runGovernanceReconciliation({
       solOutput: reconciliation,
@@ -1592,7 +1597,6 @@ ${invalidTask}`),
       };
     });
     const orchestrator = new MainOrchestrator(options);
-    await orchestrator.start();
     const reconciliationRun = orchestrator.runGovernanceReconciliation({
       solOutput: `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
 {
@@ -1618,8 +1622,8 @@ ${invalidTask}`),
 
     releaseApply();
     await expect(reconciliationRun).resolves.toMatchObject({ status: 'COMPLETED' });
-    await expect(ordinaryRun).resolves.toMatchObject({ status: 'PAUSED' });
-    expect(events.indexOf('sync')).toBeLessThan(events.indexOf('edge'));
+    await expect(ordinaryRun).resolves.toMatchObject({ status: 'IDLE' });
+    expect(events).not.toContain('edge');
     expect(events.indexOf('apply:end')).toBeLessThan(events.indexOf('sync'));
   });
 

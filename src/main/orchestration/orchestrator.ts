@@ -263,6 +263,9 @@ export class MainOrchestrator implements Orchestrator {
 
   async start(): Promise<OrchestratorResult> {
     await this.initialize();
+    if (this.state.active || this.roundPromise !== null) {
+      return result('WAITING', this.state, '自动循环已经在运行中。');
+    }
     const hasInterruptedExecution =
       this.state.executionRecovery !== null ||
       this.state.loopGraph.nodes.some(
@@ -300,15 +303,13 @@ export class MainOrchestrator implements Orchestrator {
     this.state.active = true;
     this.state.status = 'RUNNING';
     this.state.retryCount = 0;
-    this.state.phase =
-      this.state.phase === 'IDLE' || this.state.phase === 'PAUSED' || this.state.phase === 'FAILED'
-        ? 'WAITING_FOR_SOL'
-        : this.state.phase;
-    if (this.state.phase === 'WAITING_FOR_SOL') this.resumeWaitingGraph();
+    if (this.state.loopGraph.roundId === null) await this.beginRound();
+    else await this.setPhase('READING_SOL', 'RUNNING', this.state.taskId);
     this.state.recentError = null;
     this.touchState();
     await this.persist();
-    return result('WAITING', this.state, '编排器已启动，等待 Sol 完成输出。');
+    void this.runRound();
+    return result('WAITING', this.state, '编排器已启动，正在读取 Sol。');
   }
 
   async pause(): Promise<OrchestratorResult> {
