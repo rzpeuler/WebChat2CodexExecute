@@ -81,8 +81,11 @@ export interface CodexSnapshots {
   git?: CodexRepositorySnapshot;
 }
 
+export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+
 export interface CodexExecutionConfig {
   model: string;
+  reasoningEffort: CodexReasoningEffort;
   sandbox: 'danger-full-access' | string;
   approvalPolicy: 'never' | string;
 }
@@ -227,5 +230,6 @@ export interface CodexRunnerOptions {
   captureRepositorySnapshot?: ((repositoryPath: string) => Promise<CodexRepositorySnapshot>) | undefined;
   logger?: (event: string, details: Record<string, unknown>) => void;
   defaultModel?: string;
+  defaultReasoningEffort?: CodexReasoningEffort;
   defaultTimeoutMs?: number;
 }

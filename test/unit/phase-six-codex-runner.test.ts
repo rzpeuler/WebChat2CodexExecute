@@ -160,13 +160,20 @@ describe('CodexRunner', () => {
     });
     const result = await runner.runTask(input(root, codex));
     expect(result.status).toBe('COMPLETED');
-    expect(result.config).toEqual({ model: 'gpt-5.6-luna', sandbox: 'danger-full-access', approvalPolicy: 'never' });
-    expect(processArgs.slice(0, 7)).toEqual([
+    expect(result.config).toEqual({
+      model: 'gpt-5.6-luna',
+      reasoningEffort: 'medium',
+      sandbox: 'danger-full-access',
+      approvalPolicy: 'never',
+    });
+    expect(processArgs.slice(0, 9)).toEqual([
       '--ask-for-approval',
       'never',
       'exec',
       '--model',
       'gpt-5.6-luna',
+      '--config',
+      'model_reasoning_effort=medium',
       '--sandbox',
       'danger-full-access',
     ]);

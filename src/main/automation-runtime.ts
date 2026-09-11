@@ -454,6 +454,7 @@ export async function createAutomationRuntime(
   const architecture = new ArchitectureFreezeDownloader(config.localPath);
   const codex = new CodexRunner({
     defaultModel: 'gpt-5.6-luna',
+    defaultReasoningEffort: 'medium',
     sessionStorePath: join(stateDirectory, `${config.projectId}-codex-sessions.json`),
     streamLogDirectory: join(userDataDirectory, 'streams', config.projectId),
   });

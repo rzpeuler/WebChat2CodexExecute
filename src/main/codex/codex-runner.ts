@@ -19,6 +19,7 @@ import {
   type CodexProcess,
   type CodexProcessRunner,
   type CodexRepositorySnapshot,
+  type CodexReasoningEffort,
   type CodexRunnerOptions,
   type CodexRunResult,
   type CodexSessionHandle,
@@ -36,6 +37,7 @@ import {
 
 const defaultExecFileCallback = promisify(execFileCallback);
 const DEFAULT_MODEL = 'gpt-5.6-luna';
+const DEFAULT_REASONING_EFFORT: CodexReasoningEffort = 'medium';
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_STREAM_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
@@ -391,6 +393,7 @@ export class CodexRunner {
     ((repositoryPath: string) => Promise<CodexRepositorySnapshot>) | undefined;
   private readonly logger: (event: string, details: Record<string, unknown>) => void;
   private readonly defaultModel: string;
+  private readonly defaultReasoningEffort: CodexReasoningEffort;
   private readonly defaultTimeoutMs: number;
   private readonly streamLogDirectory: string;
   private readonly maxStreamLogBytes: number;
@@ -408,6 +411,7 @@ export class CodexRunner {
     this.captureRepositorySnapshot = options.captureRepositorySnapshot;
     this.logger = options.logger ?? (() => undefined);
     this.defaultModel = options.defaultModel ?? DEFAULT_MODEL;
+    this.defaultReasoningEffort = options.defaultReasoningEffort ?? DEFAULT_REASONING_EFFORT;
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     const dataDirectory = defaultDataDirectory();
     this.streamLogDirectory = resolve(options.streamLogDirectory ?? join(dataDirectory, 'streams'));
@@ -454,8 +458,17 @@ export class CodexRunner {
     // exact non-interactive execution entrypoint instead. The `--help` probe
     // does not start a model run or consume a task, while a real entitlement
     // failure is still reported by the subsequent `codex exec` process.
-    await this.probe(executablePath, ['exec', '--model', model, '--help'], 'CLI_MODEL_UNAVAILABLE');
-    const execution: CodexExecutionConfig = { model, sandbox: 'danger-full-access', approvalPolicy: 'never' };
+    await this.probe(
+      executablePath,
+      ['exec', '--model', model, '--config', `model_reasoning_effort=${this.defaultReasoningEffort}`, '--help'],
+      'CLI_MODEL_UNAVAILABLE',
+    );
+    const execution: CodexExecutionConfig = {
+      model,
+      reasoningEffort: this.defaultReasoningEffort,
+      sandbox: 'danger-full-access',
+      approvalPolicy: 'never',
+    };
     const capabilities: CodexCapabilities = {
       executablePath,
       version: redact(version.stdout),
@@ -719,6 +732,7 @@ export class CodexRunner {
       events: [],
       config: {
         model: typeof input.model === 'string' && input.model.trim() !== '' ? input.model : this.defaultModel,
+        reasoningEffort: this.defaultReasoningEffort,
         sandbox: 'danger-full-access',
         approvalPolicy: 'never',
       },
@@ -941,6 +955,8 @@ export class CodexRunner {
       'exec',
       '--model',
       execution.model,
+      '--config',
+      `model_reasoning_effort=${execution.reasoningEffort}`,
       '--sandbox',
       execution.sandbox,
       '--json',

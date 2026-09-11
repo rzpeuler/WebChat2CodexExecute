@@ -92,7 +92,12 @@ function completedRun(task: LunaTaskBlock): CodexRunResult {
     stdoutSummary: '',
     stderrSummary: '',
     events: [],
-    config: { model: 'gpt-5.6-luna', sandbox: 'danger-full-access', approvalPolicy: 'never' },
+    config: {
+      model: 'gpt-5.6-luna',
+      reasoningEffort: 'medium',
+      sandbox: 'danger-full-access',
+      approvalPolicy: 'never',
+    },
     diagnostics: [],
   };
 }
