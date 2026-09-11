@@ -39,6 +39,18 @@ describe('canonical governance text hash', () => {
     expect(canonicalizeGovernanceText(withBom)).toMatchObject({ text: '\uFEFFtitle\n', canonicalText: 'title\n' });
   });
 
+  it('removes all consecutive leading UTF-8 BOMs before hashing', () => {
+    const withoutBom = Buffer.from('title\n', 'utf8');
+    const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+    const withTwoBoms = Buffer.concat([bom, bom, withoutBom]);
+
+    expect(hashCanonicalGovernanceText(withTwoBoms)).toBe(hashCanonicalGovernanceText(withoutBom));
+    expect(canonicalizeGovernanceText(withTwoBoms)).toMatchObject({
+      text: '\uFEFF\uFEFFtitle\n',
+      canonicalText: 'title\n',
+    });
+  });
+
   it.each([
     ['body changes', 'title\nbody\n', 'title\nchanged\n'],
     ['space changes', 'title\nbody\n', 'title\nbody \n'],
@@ -79,6 +91,17 @@ describe('canonical governance text hash', () => {
     roots.push(root);
     const path = join(root, 'empty-with-bom.md');
     await writeFile(path, Buffer.from([0xef, 0xbb, 0xbf]));
+
+    await expect(readCanonicalGovernanceText(path)).rejects.toThrowError(
+      expect.objectContaining<Partial<GovernanceTextHashError>>({ code: 'EMPTY_OR_BINARY' }),
+    );
+  });
+
+  it('rejects a file containing only consecutive UTF-8 BOMs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'web-chat2codex-canonical-text-'));
+    roots.push(root);
+    const path = join(root, 'empty-with-two-boms.md');
+    await writeFile(path, Buffer.from([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf]));
 
     await expect(readCanonicalGovernanceText(path)).rejects.toThrowError(
       expect.objectContaining<Partial<GovernanceTextHashError>>({ code: 'EMPTY_OR_BINARY' }),

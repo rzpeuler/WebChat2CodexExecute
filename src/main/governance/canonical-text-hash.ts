@@ -42,7 +42,7 @@ function assertRegularText(bytes: Uint8Array, path: string): string {
     });
   }
 
-  if (text.replace(/^\uFEFF/, '').length === 0) {
+  if (text.replace(/^\uFEFF+/, '').length === 0) {
     throw new GovernanceTextHashError('EMPTY_OR_BINARY', `Governance text is empty or binary: ${path}`);
   }
 
@@ -51,7 +51,7 @@ function assertRegularText(bytes: Uint8Array, path: string): string {
 
 export function normalizeGovernanceText(bytes: Uint8Array, path = '<content>'): string {
   const text = assertRegularText(bytes, path);
-  return text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  return text.replace(/^\uFEFF+/, '').replace(/\r\n?/g, '\n');
 }
 
 export function hashCanonicalGovernanceText(bytes: Uint8Array, path = '<content>'): string {
@@ -63,7 +63,7 @@ export function hashCanonicalGovernanceText(bytes: Uint8Array, path = '<content>
 export function canonicalizeGovernanceText(bytes: Uint8Array, path = '<content>'): CanonicalGovernanceText {
   const rawBytes = Buffer.from(bytes);
   const text = assertRegularText(rawBytes, path);
-  const canonicalText = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const canonicalText = text.replace(/^\uFEFF+/, '').replace(/\r\n?/g, '\n');
   const canonicalBytes = Buffer.from(canonicalText, 'utf8');
   return {
     rawBytes,
