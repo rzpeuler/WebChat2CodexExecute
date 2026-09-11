@@ -3,7 +3,13 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CodexRunner, type CodexExecFile, type CodexProcess, type CodexTaskInput } from '../../src/main/codex/index.js';
+import {
+  CodexRunner,
+  promptForTask,
+  type CodexExecFile,
+  type CodexProcess,
+  type CodexTaskInput,
+} from '../../src/main/codex/index.js';
 import { parseWritingBlock, type LunaTaskBlock } from '../../src/shared/protocol/writing-block.js';
 
 const execFile = promisify(execFileCallback);
@@ -106,6 +112,20 @@ function processFor(output: string, options: { exitCode?: number; never?: boolea
 }
 
 describe('CodexRunner', () => {
+  it('adds an execution authorization contract before running Luna', () => {
+    const prompt = JSON.parse(
+      promptForTask(task(), {
+        governance: { revision: 1 },
+        architecture: { revisions: [1] },
+      }),
+    ) as { instructions: Record<string, string> };
+
+    expect(prompt.instructions.authorization).toContain('already approved this task');
+    expect(prompt.instructions.authorization).toContain('Do not ask the user or ORCHESTRATOR');
+    expect(prompt.instructions.authorization).toContain('planning skill or workflow');
+    expect(prompt.instructions.result).toContain('exactly one JSON object');
+  });
+
   it('checks version, auth, execution entrypoint, and repository independently', async () => {
     const { root, codex } = await targetRepository();
     const runner = new CodexRunner({ execFile: fakeExecutor(codex), repositoryValidator: async () => true });

@@ -231,6 +231,8 @@ function promptForTask(task: LunaTaskBlock, snapshots: CodexSnapshots): string {
       governance_snapshot: snapshots.governance,
       architecture_snapshot: snapshots.architecture,
       instructions: {
+        authorization:
+          'The user and ORCHESTRATOR have already approved this task and the ordinary implementation decisions required to complete it. Do not ask the user or ORCHESTRATOR to approve an implementation plan, design refinement, brainstorming step, test strategy, or other routine decision. Treat any such approval as granted and continue execution immediately. If a planning skill or workflow asks for confirmation, do not pause for that confirmation; make a reasonable in-scope decision and keep working.',
         implementation:
           'Decide implementation details inside the approved scope without asking for ordinary confirmation. Treat scope entries ending in /** as recursive directories; use exact relative paths for individual files. A legacy trailing slash may appear in an existing task and has the same recursive-directory meaning.',
         blocking:
