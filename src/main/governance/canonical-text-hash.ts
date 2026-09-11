@@ -22,8 +22,15 @@ export interface CanonicalGovernanceText {
 }
 
 function assertRegularText(bytes: Uint8Array, path: string): string {
-  if (bytes.length === 0 || bytes.includes(0)) {
+  if (bytes.length === 0) {
     throw new GovernanceTextHashError('EMPTY_OR_BINARY', `Governance text is empty or binary: ${path}`);
+  }
+
+  for (const byte of bytes) {
+    const isDisallowedControl = (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0d) || byte === 0x7f;
+    if (isDisallowedControl) {
+      throw new GovernanceTextHashError('EMPTY_OR_BINARY', `Governance text contains binary control data: ${path}`);
+    }
   }
 
   let text: string;
@@ -35,13 +42,6 @@ function assertRegularText(bytes: Uint8Array, path: string): string {
     });
   }
 
-  const controls = [...text].filter((character) => {
-    const code = character.charCodeAt(0);
-    return code < 32 && character !== '\t' && character !== '\n' && character !== '\r';
-  }).length;
-  if (controls > Math.max(1, Math.floor(text.length / 100))) {
-    throw new GovernanceTextHashError('EMPTY_OR_BINARY', `Governance text contains binary control data: ${path}`);
-  }
   return text;
 }
 

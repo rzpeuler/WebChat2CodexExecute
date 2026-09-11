@@ -52,6 +52,8 @@ describe('canonical governance text hash', () => {
   it.each([
     ['empty', Buffer.alloc(0), 'EMPTY_OR_BINARY'],
     ['binary', Buffer.from('text\0text', 'utf8'), 'EMPTY_OR_BINARY'],
+    ['short binary control prefix', Buffer.from([0x01, 0x41]), 'EMPTY_OR_BINARY'],
+    ['DEL control byte', Buffer.from([0x41, 0x7f]), 'EMPTY_OR_BINARY'],
     ['invalid UTF-8', Buffer.from([0xc3, 0x28]), 'INVALID_UTF8' as const],
   ] as const)('rejects %s input', (_label, bytes, code: GovernanceTextHashErrorCode) => {
     expect(() => hashCanonicalGovernanceText(bytes)).toThrowError(
