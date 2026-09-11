@@ -8,6 +8,7 @@ export interface CdpConversationControllerOptions {
   targetId?: string;
   createConversation?: SolConversationController['createConversation'];
   commandTimeoutMs?: number;
+  submitButtonTimeoutMs?: number;
   submissionConfirmationTimeoutMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
 }
@@ -18,6 +19,7 @@ export class CdpConversationController implements SolConversationController {
   private readonly configuredTargetId: string | undefined;
   private readonly injectedCreate: SolConversationController['createConversation'] | undefined;
   private readonly commandTimeoutMs: number;
+  private readonly submitButtonTimeoutMs: number;
   private readonly submissionConfirmationTimeoutMs: number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
 
@@ -27,6 +29,7 @@ export class CdpConversationController implements SolConversationController {
     this.configuredTargetId = options.targetId;
     this.injectedCreate = options.createConversation;
     this.commandTimeoutMs = options.commandTimeoutMs ?? 10_000;
+    this.submitButtonTimeoutMs = options.submitButtonTimeoutMs ?? 10_000;
     this.submissionConfirmationTimeoutMs = options.submissionConfirmationTimeoutMs ?? 3_000;
     this.sleep = options.sleep ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   }
@@ -128,37 +131,34 @@ export class CdpConversationController implements SolConversationController {
       }
     }
 
-    const deadline = Date.now() + this.submissionConfirmationTimeoutMs;
-    let clicked = false;
-    while (Date.now() < deadline) {
-      if (!clicked) {
-        const submission = await this.transport.evaluate<{ clicked?: boolean; composerEmpty?: boolean }>(
-          input.conversation.targetId,
-          CLICK_SUBMIT_SCRIPT,
-        );
-        if (submission?.clicked !== true) {
-          await this.sleep(100);
-          continue;
-        }
-        clicked = true;
-        if (submission.composerEmpty === true) return;
-      } else {
-        const composer = await this.transport.evaluate<{ empty?: boolean }>(
-          input.conversation.targetId,
-          COMPOSER_STATE_SCRIPT,
-        );
-        if (composer?.empty === true) return;
-      }
+    const submitButtonDeadline = Date.now() + this.submitButtonTimeoutMs;
+    let submission: { clicked?: boolean; composerEmpty?: boolean } | null = null;
+    while (Date.now() < submitButtonDeadline) {
+      submission = await this.transport.evaluate<{ clicked?: boolean; composerEmpty?: boolean }>(
+        input.conversation.targetId,
+        CLICK_SUBMIT_SCRIPT,
+      );
+      if (submission?.clicked === true) break;
+      await this.sleep(100);
+    }
+    if (submission?.clicked !== true) {
+      throw solInputSubmissionError('Sol 输入未提交：可见编辑器已填充，但发送按钮未出现或仍不可用。');
+    }
+    if (submission.composerEmpty === true) return;
+
+    const confirmationDeadline = Date.now() + this.submissionConfirmationTimeoutMs;
+    while (Date.now() < confirmationDeadline) {
+      const composer = await this.transport.evaluate<{ empty?: boolean }>(
+        input.conversation.targetId,
+        COMPOSER_STATE_SCRIPT,
+      );
+      if (composer?.empty === true) return;
       const after = await this.adapter.sample(input.conversation.targetId);
       const assistantChanged = after.latestAssistantHash !== null && after.latestAssistantHash !== beforeAssistantHash;
       if (after.isThinking || assistantChanged) return;
       await this.sleep(100);
     }
-    throw solInputSubmissionError(
-      clicked
-        ? 'Sol 输入提交未得到确认：请检查专用 Edge 中是否出现了本条用户消息，然后重试。'
-        : 'Sol 输入未提交：可见编辑器已填充，但发送按钮未出现或仍不可用。',
-    );
+    throw solInputSubmissionError('Sol 输入提交未得到确认：请检查专用 Edge 中是否出现了本条用户消息，然后重试。');
   }
 }
 

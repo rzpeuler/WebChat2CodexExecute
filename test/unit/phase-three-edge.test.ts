@@ -355,6 +355,57 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     expect(transport.sendCommand).toHaveBeenCalledWith('target-1', 'Input.insertText', { text: 'hello' });
   });
 
+  it('waits for the send button to become available after the editor is populated', async () => {
+    let submitChecks = 0;
+    const evaluate = vi.fn(async <T = unknown>(_: string, expression: string): Promise<T> => {
+      if (expression.includes('const value')) {
+        return { prepared: true, inputHash: hashMessage('hello'), inputKind: 'contenteditable' } as T;
+      }
+      if (expression.includes('const submit')) {
+        submitChecks += 1;
+        return { clicked: submitChecks >= 2, composerEmpty: submitChecks >= 2 } as T;
+      }
+      return {
+        title: 'Sol',
+        url: 'https://chatgpt.com/g/project-1/c/conversation-1',
+        projectFingerprint: 'project-1',
+        accountFingerprint: 'account-1',
+        latestAssistantText: 'hello',
+        statusText: '',
+        errorText: '',
+        isThinking: false,
+      } as T;
+    });
+    const transport: CdpTransport = {
+      listTargets: vi.fn(async () => [
+        { id: 'target-1', type: 'page', title: 'Sol', url: 'https://chatgpt.com/g/project-1/c/conversation-1' },
+      ]),
+      evaluate: evaluate as CdpTransport['evaluate'],
+      sendCommand: vi.fn(async <T = unknown>() => ({}) as T) as CdpTransport['sendCommand'],
+    };
+    const controller = new CdpConversationController({
+      transport,
+      adapter: new EdgeStateAdapter(transport),
+      submitButtonTimeoutMs: 100,
+      sleep: async () => undefined,
+    });
+
+    await expect(
+      controller.sendMessage({
+        conversation: {
+          conversationId: 'conversation-1',
+          url: 'https://chatgpt.com/g/project-1/c/conversation-1',
+          title: 'Sol',
+          projectFingerprint: 'project-1',
+          accountFingerprint: 'account-1',
+          targetId: 'target-1',
+        },
+        text: 'hello',
+      }),
+    ).resolves.toBeUndefined();
+    expect(submitChecks).toBe(2);
+  });
+
   it('rejects an unconfirmed Sol submission instead of reporting it as sent', async () => {
     const evaluate = vi.fn(async <T = unknown>(_: string, expression: string): Promise<T> => {
       if (expression.includes('const value')) {
