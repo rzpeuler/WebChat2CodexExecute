@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import type { LunaTaskBlock } from '../../shared/protocol/writing-block.js';
+import type { LunaTaskBlock, LunaTestStatus } from '../../shared/protocol/writing-block.js';
 import { assertSafeProjectPath, realProjectRoot } from '../security/path-safety.js';
 import { AtomicJsonFileStore } from '../state/persistence.js';
 import { redactRemoteUrl } from '../project/config.js';
@@ -111,13 +111,25 @@ function parseTests(value: unknown): LunaTestResult[] | null {
   return tests;
 }
 
+function aggregateTestsStatus(tests: LunaTestResult[]): LunaTestStatus {
+  if (tests.some((test) => test.status === 'FAILED')) return 'FAILED';
+  if (tests.length === 0 || tests.some((test) => test.status === 'NOT_RUN')) return 'NOT_RUN';
+  return 'PASSED';
+}
+
+function testsStatusValue(value: unknown): LunaTestStatus | null {
+  return value === 'PASSED' || value === 'FAILED' || value === 'NOT_RUN' ? value : null;
+}
+
 function protocolFromRecord(value: unknown): LunaProtocolResult | null {
   if (!isRecord(value) || value.identifier !== 'LUNA_RESULT') return null;
   const status = statusValue(value.status);
   const reportPath = stringField(value, 'report_path');
   const summary = stringField(value, 'summary');
   const tests = parseTests(value.tests);
+  const testsStatus = value.tests_status === undefined ? null : testsStatusValue(value.tests_status);
   if (status === null || reportPath === null || summary === null || tests === null) return null;
+  if (value.tests_status !== undefined && testsStatus === null) return null;
   if (value.assumptions !== undefined && !Array.isArray(value.assumptions)) return null;
   if (value.changes !== undefined && !Array.isArray(value.changes)) return null;
   if (value.governance_gaps !== undefined && !Array.isArray(value.governance_gaps)) return null;
@@ -127,6 +139,7 @@ function protocolFromRecord(value: unknown): LunaProtocolResult | null {
     summary,
     reportPath,
     tests,
+    testsStatus: testsStatus ?? aggregateTestsStatus(tests),
     ...(Array.isArray(value.assumptions) ? { assumptions: value.assumptions } : {}),
     ...(Array.isArray(value.changes) ? { changes: value.changes } : {}),
     ...(Array.isArray(value.governance_gaps) ? { governanceGaps: value.governance_gaps } : {}),
@@ -238,7 +251,9 @@ function promptForTask(task: LunaTaskBlock, snapshots: CodexSnapshots): string {
         blocking:
           'Emit BLOCKED_EXTERNAL_SETUP for external credentials, conflicts, scope expansion, or high-risk operations.',
         result:
-          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, and a non-empty tests array. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED; use COMPLETED when implementation, report, and validation are finished even if the report says CTO acceptance is pending. Never invent a status value. tests[].status must be exactly PASSED, FAILED, or NOT_RUN, and report_path must equal the task report_path.',
+          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, tests_status, and a non-empty tests array. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED; use COMPLETED when implementation, report, and validation are finished even if the report says CTO acceptance is pending. For task_kind TEST, a test that executed and produced a valid report may use status COMPLETED with tests_status FAILED; this means the test task completed and found a defect, not that the product passed. For task_kind IMPLEMENTATION, tests_status FAILED or NOT_RUN means the task is not completed. Never invent a status value. tests_status and tests[].status must be exactly PASSED, FAILED, or NOT_RUN, and report_path must equal the task report_path.',
+        test_scope:
+          'When task_kind is TEST, only modify tests/** and the exact task report_path. Do not modify production code, arbitrary documentation, or any other path. A failed test is evidence for Sol; do not convert it to BLOCKED or ask for approval merely because the assertion failed.',
         git: 'The orchestrator owns commit, push, amend, rebase, and force-push. Do not run any of these Git synchronization operations. Leave implementation and report changes in the worktree for the orchestrator to validate, commit, and push.',
       },
     },
@@ -830,7 +845,12 @@ export class CodexRunner {
         };
       if (normalizePath(protocolResult.reportPath) !== normalizePath(input.task.fields.report_path))
         return { ...base, diagnostics: [...base.diagnostics, 'Luna report path does not match the task report path'] };
-      if (protocolResult.tests.some((test) => test.status !== 'PASSED'))
+      const testsStatus = protocolResult.testsStatus ?? aggregateTestsStatus(protocolResult.tests);
+      const testTaskAllowsFailedEvidence =
+        input.task.fields.task_kind === 'TEST' &&
+        testsStatus === 'FAILED' &&
+        protocolResult.tests.some((test) => test.status === 'FAILED');
+      if (testsStatus !== 'PASSED' && !testTaskAllowsFailedEvidence)
         return {
           ...base,
           status: 'FAILED',

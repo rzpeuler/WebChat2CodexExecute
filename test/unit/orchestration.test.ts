@@ -53,6 +53,7 @@ function taskText(): string {
   return `[WRITING_BLOCK type="LUNA_TASK"]
 {
   "task_id": "task-1",
+  "task_kind": "IMPLEMENTATION",
   "title": "Implement feature",
   "objective": "Implement the feature",
   "base_commit": "base-commit",
@@ -66,6 +67,12 @@ function taskText(): string {
   "remote_sync_policy": true
 }
 [/WRITING_BLOCK]`;
+}
+
+function testTaskText(): string {
+  return taskText()
+    .replace('"task_kind": "IMPLEMENTATION"', '"task_kind": "TEST"')
+    .replace('"scope": ["src/**", "docs/task-reports/**"]', '"scope": ["tests/**"]');
 }
 
 function governanceText(): string {
@@ -323,6 +330,57 @@ describe('P0 main orchestration', () => {
     await orchestrator.runRound();
 
     expect(baselineRefreshed).toHaveBeenCalledWith(expect.objectContaining({ head: 'abcdef3' }));
+  });
+
+  it('syncs a completed TEST task with failed validation evidence and notifies Sol', async () => {
+    const task = parseWritingBlocks(testTaskText()).lunaTask!;
+    const syncCode = vi.fn(async () => ({
+      kind: 'code' as const,
+      commit: 'test-commit',
+      pushed: true,
+      remoteCommit: 'test-commit',
+      pushRetried: false,
+    }));
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation(testTaskText())) },
+      git: { ...baseOptions().git, syncCode },
+      codex: {
+        startTask: vi.fn(async (input) => ({
+          sessionId: 'luna-test-1',
+          status: 'RUNNING' as const,
+          result: Promise.resolve({
+            ...completedRun(input.task),
+            protocolResult: {
+              identifier: 'LUNA_RESULT' as const,
+              status: 'COMPLETED' as const,
+              summary: 'Regression test found a defect.',
+              reportPath: task.fields.report_path,
+              testsStatus: 'FAILED' as const,
+              tests: [{ status: 'FAILED' as const, command: 'npm test -- gateway' }],
+            },
+          }),
+        })),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'COMPLETED' });
+    expect(syncCode).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: task.fields.task_id,
+        testsPassed: false,
+        allowFailedTests: true,
+        allowedPaths: ['tests/**'],
+      }),
+    );
+    expect(options.sol?.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining('测试证据已同步，但验收未通过') }),
+    );
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'sync-code')).toMatchObject({
+      state: 'COMPLETED',
+      details: expect.arrayContaining(['测试：未通过（证据已同步）']),
+    });
   });
 
   it('persists and restores the minimal pending code sync after Luna returns during a pause', async () => {

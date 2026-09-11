@@ -20,6 +20,7 @@ import {
   parseWritingBlocks,
   type GovernanceReconciliationBlock,
   type LunaTaskBlock,
+  type LunaTestStatus,
 } from '../../shared/protocol/writing-block.js';
 import { resolve } from 'node:path';
 import { compileSolAutoRepairPrompt } from '../sol/prompt-compiler.js';
@@ -1217,9 +1218,7 @@ export class MainOrchestrator implements Orchestrator {
     });
   }
 
-  private async adoptBaseline(
-    next: Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>>,
-  ): Promise<void> {
+  private async adoptBaseline(next: Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>>): Promise<void> {
     const previous = this.baseline;
     this.baseline = next;
     this.state.commits = { local: next.head, remote: next.remoteTip };
@@ -1404,6 +1403,7 @@ export class MainOrchestrator implements Orchestrator {
       taskId: pending.taskId,
       reportPath: pending.reportPath,
       testsPassed: pending.testsPassed,
+      allowFailedTests: pending.taskKind === 'TEST',
       allowedPaths: pending.allowedPaths,
       protectedPaths: pending.protectedPaths,
     });
@@ -1419,7 +1419,8 @@ export class MainOrchestrator implements Orchestrator {
       details: [
         `任务：${pending.taskId}`,
         `报告：${pending.reportPath}`,
-        '测试：已通过',
+        `任务类型：${pending.taskKind}`,
+        `测试：${pending.testsStatus === 'PASSED' ? '已通过' : pending.testsStatus === 'FAILED' ? '未通过（证据已同步）' : '未运行'}`,
         ...commitDetails(sync.commit, sync.remoteCommit),
       ],
     });
@@ -1430,13 +1431,20 @@ export class MainOrchestrator implements Orchestrator {
     await this.setPhase('NOTIFYING_SOL', 'RUNNING', pending.taskId);
     if (this.sol !== undefined) {
       if (observation === undefined) observation = await this.edge.observe();
+      const testFailureNotice = pending.taskKind === 'TEST' && pending.testsStatus === 'FAILED';
       await this.sol.sendMessage({
         observation,
-        text: `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。`,
+        text: testFailureNotice
+          ? `LUNA_TEST_RESULT task_id=${pending.taskId}\n测试证据已同步，但验收未通过。\n测试状态：FAILED\n报告：${pending.reportPath}\n最新提交：${sync.commit}\n请根据报告规划下一项生产代码修复任务。`
+          : `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。`,
       });
       this.updateGraphNode('notify-sol', {
-        summary: '已通知 Sol 可以开始验收。',
-        details: [`任务：${pending.taskId}`, ...commitDetails(sync.commit, sync.remoteCommit)],
+        summary: testFailureNotice ? '已通知 Sol 测试证据已同步但验收未通过。' : '已通知 Sol 可以开始验收。',
+        details: [
+          `任务：${pending.taskId}`,
+          ...(testFailureNotice ? ['测试任务已完成，但测试未通过。'] : []),
+          ...commitDetails(sync.commit, sync.remoteCommit),
+        ],
       });
     } else {
       this.markNodesNotApplicable(['notify-sol']);
@@ -2111,19 +2119,31 @@ function normalizeState(state: OrchestratorState): OrchestratorState {
   };
 }
 
+function testsStatusForRun(run: CodexRunResult): LunaTestStatus {
+  const protocol = run.protocolResult;
+  if (protocol === undefined) return run.status === 'COMPLETED' ? 'PASSED' : 'NOT_RUN';
+  if (protocol.testsStatus !== undefined) return protocol.testsStatus;
+  if (protocol.tests.some((test) => test.status === 'FAILED')) return 'FAILED';
+  if (protocol.tests.length === 0 || protocol.tests.some((test) => test.status === 'NOT_RUN')) return 'NOT_RUN';
+  return 'PASSED';
+}
+
 function createPendingCodeSync(
   task: LunaTaskBlock,
   run: CodexRunResult,
   baseline: PendingCodeSyncState['baseline'],
   outputKey: string,
 ): PendingCodeSync {
+  const testsStatus = testsStatusForRun(run);
   return {
     taskId: task.fields.task_id,
+    taskKind: task.fields.task_kind,
     reportPath: task.fields.report_path,
     allowedPaths: [...task.fields.scope],
     protectedPaths: [...task.fields.out_of_scope],
     baseline,
-    testsPassed: run.status === 'COMPLETED',
+    testsPassed: testsStatus === 'PASSED',
+    testsStatus,
     sessionId: run.sessionId,
     outputKey,
   };
@@ -2191,13 +2211,22 @@ function normalizePendingCodeSync(value: unknown): PendingCodeSyncState | null {
   if (taskId === null || reportPath === null || sessionId === null || outputKey === null || baseline === null)
     return null;
   if (typeof value.testsPassed !== 'boolean') return null;
+  const taskKind = value.taskKind === 'TEST' || value.taskKind === 'IMPLEMENTATION' ? value.taskKind : 'IMPLEMENTATION';
+  const testsStatus: LunaTestStatus =
+    value.testsStatus === 'PASSED' || value.testsStatus === 'FAILED' || value.testsStatus === 'NOT_RUN'
+      ? value.testsStatus
+      : value.testsPassed
+        ? 'PASSED'
+        : 'NOT_RUN';
   return {
     taskId,
+    taskKind,
     reportPath,
     allowedPaths: normalizePendingStringArray(value.allowedPaths, 512),
     protectedPaths: normalizePendingStringArray(value.protectedPaths, 512),
     baseline,
     testsPassed: value.testsPassed,
+    testsStatus,
     sessionId,
     outputKey,
   };

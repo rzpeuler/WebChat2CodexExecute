@@ -466,6 +466,40 @@ describe('GitController', () => {
     expect(await readFile(join(root, 'change.ts'), 'utf8')).toContain('value');
   });
 
+  it('syncs failed TEST evidence only within tests/** and the exact report path', async () => {
+    const { root } = await repository();
+    const controller = new GitController();
+    const baseline = await controller.captureBaseline(root);
+    await mkdir(join(root, 'tests'), { recursive: true });
+    await mkdir(join(root, 'docs', 'task-reports'), { recursive: true });
+    await writeFile(join(root, 'tests', 'gateway.test.ts'), 'failed assertion evidence\n', 'utf8');
+    await writeFile(join(root, 'docs', 'task-reports', 'test-task.md'), '# Failed\n', 'utf8');
+
+    await expect(
+      controller.syncCode({
+        baseline,
+        taskId: 'test-task',
+        reportPath: 'docs/task-reports/test-task.md',
+        testsPassed: false,
+        allowFailedTests: true,
+        allowedPaths: ['tests/**'],
+      }),
+    ).resolves.toMatchObject({ kind: 'code' });
+
+    const nextBaseline = await controller.captureBaseline(root);
+    await writeFile(join(root, 'src-production.ts'), 'must not be committed by a test task\n', 'utf8');
+    await expect(
+      controller.syncCode({
+        baseline: nextBaseline,
+        taskId: 'test-task-2',
+        reportPath: 'docs/task-reports/test-task.md',
+        testsPassed: false,
+        allowFailedTests: true,
+        allowedPaths: ['tests/**', 'src-production.ts'],
+      }),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED_CHANGE' });
+  });
+
   it('treats legacy trailing-slash directory scopes as recursive without widening exact file scopes', async () => {
     const { root } = await repository();
     const controller = new GitController();

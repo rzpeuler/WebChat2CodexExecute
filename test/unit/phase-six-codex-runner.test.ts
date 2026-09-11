@@ -19,10 +19,10 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-function task(reportPath = 'reports/task-1.md'): LunaTaskBlock {
+function task(reportPath = 'reports/task-1.md', taskKind: 'IMPLEMENTATION' | 'TEST' = 'IMPLEMENTATION'): LunaTaskBlock {
   return parseWritingBlock(
     `[WRITING_BLOCK type="LUNA_TASK"]
-{"task_id":"task-1","title":"Implement","objective":"Implement the task","base_commit":"BASE","scope":["src"],"out_of_scope":["docs/superpowers"],"deliverables":["code"],"validation_commands":["npm test"],"governance_revision":1,"architecture_revision_set":[1],"report_path":"${reportPath}","remote_sync_policy":"push"}
+{"task_id":"task-1","title":"Implement","objective":"Implement the task","base_commit":"BASE","task_kind":"${taskKind}","scope":["${taskKind === 'TEST' ? 'tests/**' : 'src'}"],"out_of_scope":["docs/superpowers"],"deliverables":["code"],"validation_commands":["npm test"],"governance_revision":1,"architecture_revision_set":[1],"report_path":"${reportPath}","remote_sync_policy":"push"}
 [/WRITING_BLOCK]`,
   ) as LunaTaskBlock;
 }
@@ -200,6 +200,40 @@ describe('CodexRunner', () => {
     expect(processArgs).toContain('--json');
     expect(processArgs).not.toContain('push');
     expect(result.stderrSummary).not.toContain('should-not-leak');
+  });
+
+  it('completes a TEST task with failed test evidence when the report is valid', async () => {
+    const { root, codex } = await targetRepository();
+    await mkdir(join(root, 'tests'), { recursive: true });
+    const testTask = task('reports/test-task.md', 'TEST');
+    const runner = new CodexRunner({
+      ...runnerOptions(root, codex),
+      gitStateCheck: async () => ({
+        valid: true,
+        changedPaths: ['tests/gateway.test.ts', 'reports/test-task.md'],
+      }),
+      processRunner: async (_file, args) => {
+        const outputPath = args[args.indexOf('--output-last-message') + 1]!;
+        await writeFile(join(root, 'reports', 'test-task.md'), '# Failed test evidence\n', 'utf8');
+        await writeFile(join(root, 'tests', 'gateway.test.ts'), 'test evidence\n', 'utf8');
+        await writeFile(
+          outputPath,
+          JSON.stringify({
+            identifier: 'LUNA_RESULT',
+            status: 'COMPLETED',
+            summary: 'The regression test exposed a defect.',
+            report_path: 'reports/test-task.md',
+            tests_status: 'FAILED',
+            tests: [{ command: 'npm test -- gateway', status: 'FAILED' }],
+          }),
+          'utf8',
+        );
+        return processFor(JSON.stringify({ type: 'progress', message: 'running' }));
+      },
+    });
+    const result = await runner.runTask({ ...input(root, codex), task: testTask });
+    expect(result.status).toBe('COMPLETED');
+    expect(result.protocolResult).toMatchObject({ testsStatus: 'FAILED' });
   });
 
   const classifications: Array<

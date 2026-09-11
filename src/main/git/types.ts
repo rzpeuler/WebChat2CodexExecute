@@ -173,6 +173,8 @@ export interface CodeSyncInput {
   taskId: string;
   reportPath: string;
   testsPassed: boolean;
+  /** Test tasks may sync failed-test evidence when the report is valid and scope is test-only. */
+  allowFailedTests?: boolean;
   allowedPaths: string[];
   protectedPaths?: string[];
 }

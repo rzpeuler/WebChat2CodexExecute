@@ -30,6 +30,14 @@ export type GovernanceReconciliationStatus = (typeof GOVERNANCE_RECONCILIATION_S
 export const LUNA_RESULT_STATUSES = ['COMPLETED', 'BLOCKED_EXTERNAL_SETUP', 'FAILED'] as const;
 export type LunaResultStatus = (typeof LUNA_RESULT_STATUSES)[number];
 
+/** The execution policy selected by Sol for a Luna task. */
+export const LUNA_TASK_KINDS = ['IMPLEMENTATION', 'TEST'] as const;
+export type LunaTaskKind = (typeof LUNA_TASK_KINDS)[number];
+
+/** Machine-readable aggregate status for the validation evidence in LUNA_RESULT. */
+export const LUNA_TEST_STATUSES = ['PASSED', 'FAILED', 'NOT_RUN'] as const;
+export type LunaTestStatus = (typeof LUNA_TEST_STATUSES)[number];
+
 /** Canonical governance operations used by the governance applier. */
 export const GOVERNANCE_CHANGE_OPERATIONS = [
   'add_document',
@@ -109,6 +117,7 @@ export const DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS =
 
 export interface LunaTaskFields {
   schema_version?: typeof WRITING_BLOCK_SCHEMA_VERSION;
+  task_kind: LunaTaskKind;
   task_id: string;
   title: string;
   objective: string;
@@ -246,6 +255,7 @@ export const WRITING_BLOCK_JSON_SCHEMAS = {
     required: [...LUNA_TASK_REQUIRED_FIELDS],
     properties: {
       schema_version: { type: 'integer', const: WRITING_BLOCK_SCHEMA_VERSION },
+      task_kind: { type: 'string', enum: [...LUNA_TASK_KINDS] },
       task_id: { type: 'string' },
       title: { type: 'string' },
       objective: { type: 'string' },
@@ -740,6 +750,15 @@ function buildBlock(
       for (const field of LUNA_TASK_REQUIRED_FIELDS) {
         assertFieldPresent(fields, field, blockIndex);
       }
+      const taskKind = fields.task_kind === undefined ? 'IMPLEMENTATION' : fields.task_kind;
+      if (!(LUNA_TASK_KINDS as readonly string[]).includes(String(taskKind))) {
+        throw new WritingBlockProtocolError(
+          'WRITING_BLOCK_INVALID_FIELD',
+          `task_kind must be one of ${LUNA_TASK_KINDS.join(', ')}`,
+          { blockIndex, field: 'task_kind' },
+        );
+      }
+      normalizedTask.task_kind = taskKind;
       normalizedTask.task_id = assertStringField(fields, 'task_id', blockIndex);
       normalizedTask.title = assertStringField(fields, 'title', blockIndex);
       normalizedTask.objective = assertStringField(fields, 'objective', blockIndex);
@@ -882,7 +901,10 @@ function buildBlock(
             ? ARCHITECTURE_FREEZE_REQUIRED_FIELDS
             : BLOCKED_REQUIRED_FIELDS;
   for (const field of requiredFields) knownFields.add(field);
-  if (type === 'LUNA_TASK') knownFields.add('execution_semantics');
+  if (type === 'LUNA_TASK') {
+    knownFields.add('task_kind');
+    knownFields.add('execution_semantics');
+  }
   if (type === 'GOVERNANCE_RECONCILIATION') {
     knownFields.add('baseline_commit');
     knownFields.add('files');

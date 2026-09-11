@@ -4,6 +4,8 @@ import {
   GOVERNANCE_CHANGE_RISK_LEVELS,
   LUNA_REMOTE_SYNC_POLICY,
   LUNA_RESULT_STATUSES,
+  LUNA_TASK_KINDS,
+  LUNA_TEST_STATUSES,
   WRITING_BLOCK_SCHEMA_VERSION,
   type ArchitectureFreezeFields,
   type BlockedFields,
@@ -70,6 +72,7 @@ const multilineContentExample =
 const writingBlockTemplates = {
   LUNA_TASK: {
     schema_version: WRITING_BLOCK_TEMPLATE_VERSION,
+    task_kind: 'IMPLEMENTATION',
     task_id: '<填写唯一任务 ID>',
     title: '<填写任务标题>',
     objective: '<填写任务目标>',
@@ -86,11 +89,18 @@ const writingBlockTemplates = {
     result_contract: {
       identifier: 'LUNA_RESULT',
       status_options: LUNA_RESULT_STATUSES,
-      tests_status_options: ['PASSED', 'FAILED', 'NOT_RUN'],
+      tests_status_options: LUNA_TEST_STATUSES,
       completed_status: 'COMPLETED',
       report_path_rule: 'must_equal_report_path',
       git_owner: 'ORCHESTRATOR',
       luna_must_not_commit_or_push: true,
+    },
+    task_kind_options: LUNA_TASK_KINDS,
+    test_task_contract: {
+      allowed_changes: ['tests/**', '<the exact report_path>'],
+      production_paths_forbidden: true,
+      failed_tests_with_valid_report_are_completed: true,
+      not_run_or_missing_report_is_failed: true,
     },
   },
   GOVERNANCE_CHANGE: {

@@ -557,7 +557,8 @@ export class GitController {
   }
 
   async syncCode(input: CodeSyncInput): Promise<GitSyncResult> {
-    if (!input.testsPassed) throw new GitControllerError('TESTS_NOT_PASSED', 'Code sync requires passing tests');
+    if (!input.testsPassed && input.allowFailedTests !== true)
+      throw new GitControllerError('TESTS_NOT_PASSED', 'Code sync requires passing tests');
     const allowedPaths = assertSafePathList(input.allowedPaths, 'Code paths');
     const protectedPaths = assertSafePathList(
       [...DEFAULT_PROTECTED_PATHS, ...(input.protectedPaths ?? [])],
@@ -567,7 +568,21 @@ export class GitController {
     if (!isValidRelativePath(reportPath)) {
       throw new GitControllerError('REPORT_MISSING', 'Report path is outside the repository', { paths: [reportPath] });
     }
-    if (!allowedPaths.some((pattern) => matchesPath(reportPath, pattern))) {
+    const syncAllowedPaths = input.allowFailedTests === true ? [...allowedPaths, reportPath] : allowedPaths;
+    if (input.allowFailedTests === true) {
+      const invalidTestScope = allowedPaths.filter((pattern) => {
+        const normalized = normalizePath(pattern);
+        return normalized !== reportPath && !normalized.startsWith('tests/');
+      });
+      if (invalidTestScope.length > 0) {
+        throw new GitControllerError(
+          'UNAUTHORIZED_CHANGE',
+          'Test evidence sync may modify only tests/** and the exact report path',
+          { paths: invalidTestScope },
+        );
+      }
+    }
+    if (!syncAllowedPaths.some((pattern) => matchesPath(reportPath, pattern))) {
       throw new GitControllerError('UNAUTHORIZED_CHANGE', 'Report path is outside the approved code scope', {
         paths: [reportPath],
       });
@@ -592,7 +607,7 @@ export class GitController {
     const existing = await this.findExistingCommit(input.baseline, current, message);
     let commit = existing;
     if (commit === null) {
-      this.assertWorktreePaths(current.worktree, allowedPaths, protectedPaths);
+      this.assertWorktreePaths(current.worktree, syncAllowedPaths, protectedPaths);
       if (!current.worktree.some((path) => path === reportRelativePath)) {
         throw new GitControllerError('REPORT_MISSING', 'Luna report exists but was not produced in this run', {
           paths: [reportRelativePath],

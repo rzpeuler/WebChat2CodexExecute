@@ -1,4 +1,4 @@
-import type { LunaTaskBlock } from '../../shared/protocol/writing-block.js';
+import type { LunaTaskBlock, LunaTestStatus } from '../../shared/protocol/writing-block.js';
 import type { StateSnapshotStore } from '../state/persistence.js';
 
 export const CODEX_RUN_STATUSES = [
@@ -113,6 +113,8 @@ export interface LunaProtocolResult {
   summary: string;
   reportPath: string;
   tests: LunaTestResult[];
+  /** Optional on legacy Luna output; the runner derives it from tests when absent. */
+  testsStatus?: LunaTestStatus;
   assumptions?: unknown[];
   changes?: unknown[];
   governanceGaps?: unknown[];

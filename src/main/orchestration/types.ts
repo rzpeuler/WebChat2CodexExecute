@@ -11,6 +11,8 @@ import type {
   GovernanceChangeBlock,
   GovernanceReconciliationBlock,
   LunaTaskBlock,
+  LunaTaskKind,
+  LunaTestStatus,
 } from '../../shared/protocol/writing-block.js';
 import type { EdgeSolObservation } from '../edge/types.js';
 import type { CodexSnapshots, CodexTaskHandle } from '../codex/types.js';
@@ -52,11 +54,13 @@ export interface OrchestratorSnapshots extends CodexSnapshots {
 /** Minimal JSON-safe context required to resume a completed Luna run before code sync. */
 export interface PendingCodeSyncState {
   taskId: string;
+  taskKind: LunaTaskKind;
   reportPath: string;
   allowedPaths: string[];
   protectedPaths: string[];
   baseline: GitBaseline;
   testsPassed: boolean;
+  testsStatus: LunaTestStatus;
   sessionId: string;
   outputKey: string;
 }
