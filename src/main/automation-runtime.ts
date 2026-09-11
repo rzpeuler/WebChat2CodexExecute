@@ -24,6 +24,7 @@ import type { NotificationService } from './notify/index.js';
 import { SolPromptCompiler } from './sol/prompt-compiler.js';
 import { assertFixedGovernanceManifestPath } from './project/config.js';
 import { assertWritingBlockTemplatesValid } from './project/writing-block-templates.js';
+import { parseWritingBlocks } from '../shared/protocol/writing-block.js';
 import { createHash } from 'node:crypto';
 
 const CHATGPT_URL = 'https://chatgpt.com/';
@@ -31,6 +32,21 @@ const DEFAULT_EDGE_PORT = 9227;
 export const GOVERNANCE_RECONCILIATION_POLL_INTERVAL_MS = 2_000;
 export const GOVERNANCE_RECONCILIATION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 export const GOVERNANCE_RECONCILIATION_MAX_WAIT_MS = 30 * 60 * 1000;
+
+function isGovernanceReconciliationCandidate(observation: EdgeSolObservation): boolean {
+  if (observation.status !== 'COMPLETED_CANDIDATE') return false;
+  try {
+    const parsed = parseWritingBlocks(observation.latestAssistantText);
+    return parsed.blocks.length === 1 && parsed.governanceReconciliation !== null;
+  } catch {
+    return false;
+  }
+}
+
+function outputKeyForObservation(observation: EdgeSolObservation): string {
+  const source = `${observation.projectFingerprint ?? ''}\n${observation.url}\n${observation.latestAssistantHash ?? observation.latestAssistantText}`;
+  return createHash('sha256').update(source).digest('hex');
+}
 
 export interface ReconciliationOutputWaitOptions {
   before: EdgeSolObservation;
@@ -604,6 +620,17 @@ export async function createAutomationRuntime(
                     ...(config.targetBranch === 'HEAD' ? {} : { expectedBranch: config.targetBranch }),
                     ...(config.remoteUrl === null ? {} : { expectedRemoteUrl: config.remoteUrl }),
                   });
+                  if (isGovernanceReconciliationCandidate(before)) {
+                    assertRuntimeOperationAllowed();
+                    const result = await orchestrator.runGovernanceReconciliation({
+                      solOutput: before.latestAssistantText,
+                      baseline,
+                      outputKey: outputKeyForObservation(before),
+                    });
+                    if (result.status === 'PAUSED') throw new Error(result.message);
+                    if (resumeLoop && !stopRequested) await orchestrator.start();
+                    return;
+                  }
                   const prompt = promptCompiler.compileGovernanceReconciliationPrompt({
                     project: config,
                     baselineCommit: baseline.head,
@@ -620,6 +647,7 @@ export async function createAutomationRuntime(
                   const result = await orchestrator.runGovernanceReconciliation({
                     solOutput: completed.latestAssistantText,
                     baseline,
+                    outputKey: outputKeyForObservation(completed),
                   });
                   if (result.status === 'PAUSED') {
                     throw new Error(result.message);

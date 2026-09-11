@@ -1091,25 +1091,46 @@ ${invalidTask}`),
     expect(options.codex.startTask).not.toHaveBeenCalled();
   });
 
-  it('requires the dedicated entry point for governance reconciliation output', async () => {
+  it('routes governance reconciliation output from the ordinary loop to the dedicated applier', async () => {
     const reconciliation = `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
 {
   "schema_version": 1,
-  "status": "PASS"
+  "status": "CHANGES_REQUIRED",
+  "baseline_commit": "base-commit",
+  "files": [{
+    "path": "docs/governance/policy.md",
+    "action": "replace",
+    "reason": "clarify policy",
+    "sha256_before": "0000000000000000000000000000000000000000000000000000000000000000",
+    "content": "Updated policy"
+  }]
 }
 [/WRITING_BLOCK]`;
-    const options = baseOptions({ edge: { observe: vi.fn(async () => observation(reconciliation)) } });
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation(reconciliation)) },
+      reconciliation: {
+        apply: vi.fn(async () => ({
+          runId: 'reconciliation-loop',
+          changedPaths: ['docs/governance/policy.md'],
+          backupPaths: ['.web-chat2codex/backups/reconciliation/reconciliation-loop/docs/governance/policy.md'],
+        })),
+      },
+    });
     const orchestrator = new MainOrchestrator(options);
     await orchestrator.start();
     const result = await orchestrator.runRound();
 
-    expect(result.status).toBe('PAUSED');
+    expect(result.status).toBe('COMPLETED');
     expect(orchestrator.getState()).toMatchObject({
-      status: 'NEEDS_USER_ACTION',
-      recentError: { code: 'GOVERNANCE_RECONCILIATION_WRONG_ENTRYPOINT' },
+      status: 'RUNNING',
+      phase: 'WAITING_FOR_SOL',
+      recentError: null,
     });
     expect(options.codex.startTask).not.toHaveBeenCalled();
-    expect(options.git.syncGovernance).not.toHaveBeenCalled();
+    expect(options.reconciliation?.apply).toHaveBeenCalledOnce();
+    expect(options.git.syncGovernance).toHaveBeenCalledOnce();
+    expect((await orchestrator.runRound()).status).toBe('WAITING');
+    expect(options.reconciliation?.apply).toHaveBeenCalledOnce();
   });
 
   it('retries only governance sync after the real applier has already changed files', async () => {

@@ -206,6 +206,8 @@ export interface OrchestratorResult {
 export interface GovernanceReconciliationRunInput {
   solOutput: string;
   baseline: GitBaseline;
+  /** Stable observation key when the block came from the ordinary loop. */
+  outputKey?: string;
 }
 
 export type GovernanceReconciliationRunStatus = 'PASS' | 'COMPLETED' | 'DUPLICATE' | 'PAUSED';

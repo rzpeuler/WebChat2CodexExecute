@@ -593,7 +593,7 @@ export class MainOrchestrator implements Orchestrator {
     input: GovernanceReconciliationRunInput,
   ): Promise<GovernanceReconciliationRunResult> {
     const wasActive = this.state.active;
-    const outputKey = reconciliationOutputKey(input.solOutput, input.baseline.head);
+    const outputKey = input.outputKey ?? reconciliationOutputKey(input.solOutput, input.baseline.head);
     if (this.state.processedOutputKey === outputKey) {
       return reconciliationResult(
         'DUPLICATE',
@@ -606,6 +606,7 @@ export class MainOrchestrator implements Orchestrator {
         this.state.commits.remote,
       );
     }
+    if (this.baseline === null) this.baseline = { ...input.baseline, worktree: [...input.baseline.worktree] };
 
     await this.setPhase('PARSING', 'RUNNING', null);
     const parsed = parseWritingBlocks(input.solOutput);
@@ -741,7 +742,12 @@ export class MainOrchestrator implements Orchestrator {
         await this.enterWaiting(message);
         return result('WAITING', this.state, message);
       }
-      if (this.state.processedOutputKey === outputKeyFor(observation)) {
+      if (
+        this.state.processedOutputKey === outputKeyFor(observation) ||
+        (this.baseline !== null &&
+          this.state.processedOutputKey ===
+            reconciliationOutputKey(observation.latestAssistantText, this.baseline.head))
+      ) {
         const message = '等待 Sol 产生新的未处理输出。';
         await this.enterWaiting(message);
         return result('WAITING', this.state, message);
@@ -841,14 +847,6 @@ export class MainOrchestrator implements Orchestrator {
     } catch (error) {
       return this.pauseFor(error, 'Writing Block 协议无效，已拒绝启动 Luna。');
     }
-    if (parsed.governanceReconciliation !== null) {
-      return this.pauseForCode(
-        'GOVERNANCE_RECONCILIATION_WRONG_ENTRYPOINT',
-        'GOVERNANCE_RECONCILIATION 只能通过治理一致性检查入口处理。',
-        true,
-        '请使用治理一致性检查按钮重新发起该检查。',
-      );
-    }
     if (parsed.blocked.length > 0) {
       return this.pauseForCode('SOL_BLOCKED', parsed.blocked.map((block) => block.fields.reason).join('\n'), true);
     }
@@ -856,6 +854,14 @@ export class MainOrchestrator implements Orchestrator {
 
     try {
       await this.ensureBaseline();
+      if (parsed.governanceReconciliation !== null) {
+        const reconciliation = await this.processGovernanceReconciliation({
+          solOutput: observation.latestAssistantText,
+          baseline: this.baseline!,
+          outputKey,
+        });
+        return reconciliationOrchestratorResult(reconciliation);
+      }
       this.assertTaskBase(parsed.lunaTask);
       const updated = await this.applyUpdates(parsed.governanceChanges, parsed.architectureFreezes);
       if (!this.state.active) return result('PAUSED', this.state, '编排器已暂停。');
@@ -1430,6 +1436,7 @@ function cloneGovernanceReconciliationInput(input: GovernanceReconciliationRunIn
   return {
     solOutput: input.solOutput,
     baseline: { ...input.baseline, worktree: [...input.baseline.worktree] },
+    ...(input.outputKey === undefined ? {} : { outputKey: input.outputKey }),
   };
 }
 
