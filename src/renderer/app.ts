@@ -811,7 +811,11 @@ previewButton?.addEventListener('click', () => {
       if (promptElement === null) throw new Error('提示词预览区域不可用');
       const preview = await window.desktopApi.previewSolPrompt(getConfigInput());
       promptElement.textContent = preview.initializationPrompt;
-      openContentDialog('Sol 初始化提示词', preview.initializationPrompt, previewButton);
+      openContentDialog(
+        `Sol 初始化提示词（${preview.initializationPromptLength} / ${preview.initializationPromptMaxLength} 字符）`,
+        preview.initializationPrompt,
+        previewButton,
+      );
       return preview;
     },
     successMessage: () => 'Sol 初始化提示词预览已生成。',

@@ -3,6 +3,7 @@ import { indexGovernanceManifest } from '../../src/main/governance/manifest.js';
 import {
   compileSolGovernanceReconciliationPrompt,
   compileSolInitializationPrompt,
+  compileSolRoundContext,
   compileWritingBlock,
   SolPromptCompiler,
 } from '../../src/main/sol/prompt-compiler.js';
@@ -61,15 +62,29 @@ describe('Sol initialization prompt compiler', () => {
     const second = compiler.compile(input);
 
     expect(first).toEqual(second);
-    expect(first.initializationPrompt).toContain('current_commit: 0123456789012345678901234567890123456789');
-    expect(first.initializationPrompt).toContain('governance_active');
-    expect(first.initializationPrompt).toContain('governance_candidate');
-    expect(first.initializationPrompt).toContain('governance_history');
-    expect(first.initializationPrompt).toContain('architecture_revisions');
-    expect(first.initializationPrompt).toContain('[WRITING_BLOCK type="LUNA_TASK"]');
+    expect(first.initializationPrompt).toContain('local_path: C:\\Projects\\demo');
+    expect(first.initializationPrompt).not.toContain('current_commit:');
+    expect(first.initializationPrompt).not.toContain('governance_active');
+    expect(first.initializationPrompt).not.toContain('governance_candidate');
+    expect(first.initializationPrompt).not.toContain('governance_history');
+    expect(first.initializationPrompt).not.toContain('architecture_revisions');
     expect(first.initializationPrompt).toContain('ARCHITECTURE_FREEZE');
     expect(first.initializationPrompt).toContain('Luna must not execute an architecture freeze');
+    expect(first.initializationPromptLength).toBe(first.initializationPrompt.length);
+    expect(first.initializationPromptLength).toBeLessThanOrEqual(first.initializationPromptMaxLength);
+    expect(first.dynamicContext).toContain('current_commit: 0123456789012345678901234567890123456789');
+    expect(first.dynamicContext).toContain('governance_active');
+    expect(first.dynamicContext).toContain('architecture_revisions');
     expect(first.dynamicContext).toContain('[WRITING_BLOCK type="LUNA_TASK"]');
+  });
+
+  it('rejects an initialization prompt that exceeds the hard character budget', () => {
+    expect(() =>
+      new SolPromptCompiler().compile({
+        project: { ...project, localPath: `C:\\${'a'.repeat(8000)}` },
+        governance,
+      }),
+    ).toThrowError(/SOL_INITIALIZATION_PROMPT_TOO_LONG|初始化提示词过长/);
   });
 
   it('redacts credentials and keeps only protocol-safe task blocks', () => {
@@ -83,13 +98,23 @@ describe('Sol initialization prompt compiler', () => {
         objective: 'Use https://a:b@host.example/path?token=hidden',
       },
     });
+    const roundContext = compileSolRoundContext({
+      project,
+      governance,
+      recentLunaReportSummary: 'authorization: Bearer ghp_very-secret-value',
+      taskBook: {
+        task_id: 'task-2',
+        title: 'Do not leak password=hidden-value',
+        objective: 'Use https://a:b@host.example/path?token=hidden',
+      },
+    });
 
     expect(prompt).not.toContain('super-secret');
     expect(prompt).not.toContain('never-log');
-    expect(prompt).not.toContain('hidden-value');
-    expect(prompt).not.toContain('ghp_very-secret-value');
-    expect(prompt).toContain('[REDACTED]');
-    expect(prompt).toContain('[WRITING_BLOCK type="LUNA_TASK"]');
+    expect(roundContext).not.toContain('hidden-value');
+    expect(roundContext).not.toContain('ghp_very-secret-value');
+    expect(roundContext).toContain('[REDACTED]');
+    expect(roundContext).toContain('[WRITING_BLOCK type="LUNA_TASK"]');
     expect(prompt).toContain('More than one LUNA_TASK is a protocol error');
     expect(prompt).toContain('multiple governance changes and architecture freezes are allowed');
     expect(prompt).toContain('[USER_MESSAGE]');
@@ -98,7 +123,7 @@ describe('Sol initialization prompt compiler', () => {
 
   it('redacts sensitive assignments through comma, semicolon, and Chinese punctuation', () => {
     const secret = 'password=leakA,leakB;leakC；leakD。';
-    const prompt = compileSolInitializationPrompt({
+    const prompt = compileSolRoundContext({
       project,
       governance,
       recentLunaReportSummary: `diagnostic: ${secret}`,
@@ -112,7 +137,7 @@ describe('Sol initialization prompt compiler', () => {
   });
 
   it('redacts prefixed sensitive assignment keys without consuming unrelated sentences', () => {
-    const prompt = compileSolInitializationPrompt({
+    const prompt = compileSolRoundContext({
       project,
       governance,
       recentLunaReportSummary: [
@@ -166,7 +191,7 @@ describe('Sol initialization prompt compiler', () => {
     expect(parsed?.fields.content).toBe(content);
     expect(typeof parsed?.fields.content).toBe('string');
 
-    const prompt = compileSolInitializationPrompt({
+    const prompt = compileSolRoundContext({
       project,
       governance,
       recentLunaReportSummary: '{}',
@@ -251,7 +276,7 @@ describe('Sol initialization prompt compiler', () => {
   });
 
   it('redacts expanded sensitive keys while preserving unknown extension structure', () => {
-    const prompt = compileSolInitializationPrompt({
+    const prompt = compileSolRoundContext({
       project,
       governance: {
         version: 10,
@@ -296,7 +321,7 @@ describe('Sol initialization prompt compiler', () => {
   });
 
   it('parses and recursively redacts nested JSON strings, including malformed JSON-like text', () => {
-    const prompt = compileSolInitializationPrompt({
+    const prompt = compileSolRoundContext({
       project,
       governance,
       recentLunaReportSummary: JSON.stringify({
@@ -321,7 +346,7 @@ describe('Sol initialization prompt compiler', () => {
     expect(prompt).toContain('password');
     expect(prompt).toContain('[REDACTED]');
 
-    const malformedPrompt = compileSolInitializationPrompt({
+    const malformedPrompt = compileSolRoundContext({
       project,
       governance,
       recentLunaReportSummary: '{"authorization":"malformed-secret","safe": }',
@@ -342,8 +367,8 @@ describe('Sol initialization prompt compiler', () => {
       { accessKey: 'array-access-key-secret' },
     ]);
     const input = { project, governance, recentLunaReportSummary };
-    const first = compileSolInitializationPrompt(input);
-    const second = compileSolInitializationPrompt(input);
+    const first = compileSolRoundContext(input);
+    const second = compileSolRoundContext(input);
 
     expect(first).toEqual(second);
     for (const secret of [

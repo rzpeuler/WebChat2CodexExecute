@@ -21,7 +21,9 @@ describe('renderer UI layout', () => {
   it('wires both configuration and prompt content to the shared dialog', async () => {
     const app = await readRendererFile('app.ts');
     expect(app).toContain("openContentDialog('当前项目配置'");
-    expect(app).toContain("openContentDialog('Sol 初始化提示词'");
+    expect(app).toContain(
+      'Sol 初始化提示词（${preview.initializationPromptLength} / ${preview.initializationPromptMaxLength} 字符）',
+    );
     expect(app).toContain('navigator.clipboard?.writeText');
     expect(app).toContain('closeContentDialog');
   });

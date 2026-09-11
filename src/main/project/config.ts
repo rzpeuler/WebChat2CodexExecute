@@ -16,7 +16,7 @@ import {
   GovernanceManifestStore,
   type GovernanceManifestDocument,
 } from '../governance/manifest.js';
-import { SolPromptCompiler, type SolPromptCompilation } from '../sol/prompt-compiler.js';
+import { SolPromptCompilationError, SolPromptCompiler, type SolPromptCompilation } from '../sol/prompt-compiler.js';
 import {
   assertSafeFilePath,
   assertSafeProjectPath,
@@ -38,7 +38,8 @@ export type ProjectConfigErrorCode =
   | 'NO_HEAD_COMMIT'
   | 'PATH_OUTSIDE_PROJECT'
   | 'INVALID_PROJECT_CONFIG'
-  | 'CREDENTIAL_FIELD_FORBIDDEN';
+  | 'CREDENTIAL_FIELD_FORBIDDEN'
+  | 'SOL_INITIALIZATION_PROMPT_TOO_LONG';
 
 export class ProjectConfigError extends Error {
   readonly code: ProjectConfigErrorCode;
@@ -588,11 +589,18 @@ export class ProjectConfigService {
         `Writing Block 模板校验失败：${writingBlockTemplates.error?.message ?? '未找到可用模板状态'}。模板路径=${writingBlockTemplates.directory}，manifest=${writingBlockTemplates.error?.manifestPath ?? project.governanceManifestPath}。`,
       );
     }
-    return new SolPromptCompiler().compile({
-      project,
-      governance: manifest ?? { version: 1, documents: [] },
-      writingBlockTemplates,
-    });
+    try {
+      return new SolPromptCompiler().compile({
+        project,
+        governance: manifest ?? { version: 1, documents: [] },
+        writingBlockTemplates,
+      });
+    } catch (error) {
+      if (error instanceof SolPromptCompilationError) {
+        throw new ProjectConfigError(error.code, error.message, { cause: error });
+      }
+      throw error;
+    }
   }
 }
 

@@ -40,11 +40,26 @@ export interface SolPromptInput {
 export interface SolPromptCompilation {
   initializationPrompt: string;
   dynamicContext: string;
+  initializationPromptLength: number;
+  initializationPromptMaxLength: number;
 }
 
 export interface GovernanceReconciliationPromptInput {
   project: ProjectConfig;
   baselineCommit: string;
+}
+
+export const SOL_INITIALIZATION_PROMPT_MAX_CHARACTERS = 8000;
+
+export class SolPromptCompilationError extends Error {
+  readonly code = 'SOL_INITIALIZATION_PROMPT_TOO_LONG';
+
+  constructor(length: number) {
+    super(
+      `Sol 初始化提示词过长：当前 ${length} 个字符，不能超过 ${SOL_INITIALIZATION_PROMPT_MAX_CHARACTERS} 个字符。请缩短项目路径或联系开发者精简固定提示词。`,
+    );
+    this.name = 'SolPromptCompilationError';
+  }
 }
 
 const WRITING_BLOCK_TEMPLATE_REFERENCE = [
@@ -94,7 +109,7 @@ SAFETY AND GOVERNANCE
 OUTPUT RULE
 Decide the audience of every response. If the task or architecture plan is clear and the orchestrator can continue, address ORCHESTRATOR: return only valid WRITING_BLOCK blocks. A valid Writing Block is the machine-readable ORCHESTRATOR output; include no more than one LUNA_TASK in a round, while multiple governance changes and architecture freezes are allowed and must remain separate blocks. After Luna acceptance, if the next architecture or task planning step does not require user discussion, do not add a summary or ask the user to start the next round; think through the next step and return its Writing Block directly. If a decision, clarification, or discussion with the user is required, address USER instead: return exactly one [USER_MESSAGE]...[/USER_MESSAGE] block with concise plain text and no surrounding prose or Writing Block. The orchestrator will notify the user and wait for the user's response.
 
-The following project snapshot is authoritative for this initialization:`;
+The project binding below identifies the repository and fixed governance paths. Read changing project state from the repository and the orchestrator's current-round context.`;
 
 const GOVERNANCE_RECONCILIATION_TEMPLATE = `You are Sol performing a governance consistency check for the project.
 
@@ -222,6 +237,19 @@ function taskBookFields(value: Record<string, unknown> | string): Record<string,
   return { task_book: value };
 }
 
+function formatInitializationBinding(project: ProjectConfig): string {
+  const remoteUrl = redactRemoteUrl(project.remoteUrl);
+  return [
+    'PROJECT BINDING',
+    `project_id: ${sanitizeText(project.projectId)}`,
+    `local_path: ${sanitizeText(project.localPath)}`,
+    `remote_url: ${sanitizeText(remoteUrl ?? '[none]')}`,
+    `target_branch: ${sanitizeText(project.targetBranch)}`,
+    `report_directory: ${sanitizeText(project.reportDirectory)}`,
+    `governance_manifest: ${sanitizeText(project.governanceManifestPath)}`,
+  ].join('\n');
+}
+
 export function compileWritingBlock(type: WritingBlockType, fields: Record<string, unknown>): string {
   const sanitized = sanitizeValue({ schema_version: WRITING_BLOCK_SCHEMA_VERSION, ...fields });
   assertWritingBlockFieldsSafe(sanitized);
@@ -263,8 +291,16 @@ export class SolPromptCompiler {
       `recent_governance_gaps: ${stableJson(input.recentGovernanceGaps ?? [])}`,
       ...(input.taskBook === undefined ? [] : ['', compileWritingBlock('LUNA_TASK', taskBookFields(input.taskBook))]),
     ].join('\n');
-    const initializationPrompt = `${INITIALIZATION_TEMPLATE}\n\n${dynamicContext}`;
-    return { initializationPrompt, dynamicContext };
+    const initializationPrompt = `${INITIALIZATION_TEMPLATE}\n\n${formatInitializationBinding(input.project)}`;
+    if (initializationPrompt.length > SOL_INITIALIZATION_PROMPT_MAX_CHARACTERS) {
+      throw new SolPromptCompilationError(initializationPrompt.length);
+    }
+    return {
+      initializationPrompt,
+      dynamicContext,
+      initializationPromptLength: initializationPrompt.length,
+      initializationPromptMaxLength: SOL_INITIALIZATION_PROMPT_MAX_CHARACTERS,
+    };
   }
 
   compileInitializationPrompt(input: SolPromptInput): string {

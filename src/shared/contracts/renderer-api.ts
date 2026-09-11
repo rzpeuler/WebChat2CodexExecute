@@ -15,6 +15,8 @@ import type { DashboardCommand, DashboardCommandResult, DashboardSnapshot } from
 export interface SolPromptPreview {
   initializationPrompt: string;
   dynamicContext: string;
+  initializationPromptLength: number;
+  initializationPromptMaxLength: number;
 }
 
 export interface RendererApi {
