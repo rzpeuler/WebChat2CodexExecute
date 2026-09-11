@@ -110,29 +110,55 @@ export class CdpConversationController implements SolConversationController {
       throw conversationIdentityChanged('The active ChatGPT target no longer matches the bound conversation.');
     }
     const beforeAssistantHash = current.latestAssistantHash;
-    const result = await this.transport.evaluate<{
-      sent?: boolean;
+    const prepared = await this.transport.evaluate<{
+      prepared?: boolean;
       inputHash?: string;
-      composerEmpty?: boolean;
-    }>(input.conversation.targetId, sendMessageScript(input.text));
-    if (result?.sent !== true || result.inputHash !== hashMessage(input.text)) {
-      throw solInputSubmissionError('Sol 输入未提交：未找到可用的提交控件或输入内容未按预期提交。');
+      inputKind?: 'contenteditable' | 'textarea';
+    }>(input.conversation.targetId, prepareMessageScript(input.text));
+    if (prepared?.prepared !== true || prepared.inputHash !== hashMessage(input.text)) {
+      throw solInputSubmissionError('Sol 输入未提交：未找到可见的 ChatGPT 编辑器。');
     }
-    if (result.composerEmpty === true) return;
+    if (prepared.inputKind === 'contenteditable') {
+      try {
+        await this.transport.sendCommand(input.conversation.targetId, 'Input.insertText', { text: input.text });
+      } catch (error) {
+        throw solInputSubmissionError(
+          `Sol 输入未提交：无法写入可见编辑器${error instanceof Error ? `：${error.message}` : ''}`,
+        );
+      }
+    }
 
     const deadline = Date.now() + this.submissionConfirmationTimeoutMs;
+    let clicked = false;
     while (Date.now() < deadline) {
-      const composer = await this.transport.evaluate<{ empty?: boolean }>(
-        input.conversation.targetId,
-        COMPOSER_STATE_SCRIPT,
-      );
-      if (composer?.empty === true) return;
+      if (!clicked) {
+        const submission = await this.transport.evaluate<{ clicked?: boolean; composerEmpty?: boolean }>(
+          input.conversation.targetId,
+          CLICK_SUBMIT_SCRIPT,
+        );
+        if (submission?.clicked !== true) {
+          await this.sleep(100);
+          continue;
+        }
+        clicked = true;
+        if (submission.composerEmpty === true) return;
+      } else {
+        const composer = await this.transport.evaluate<{ empty?: boolean }>(
+          input.conversation.targetId,
+          COMPOSER_STATE_SCRIPT,
+        );
+        if (composer?.empty === true) return;
+      }
       const after = await this.adapter.sample(input.conversation.targetId);
       const assistantChanged = after.latestAssistantHash !== null && after.latestAssistantHash !== beforeAssistantHash;
       if (after.isThinking || assistantChanged) return;
       await this.sleep(100);
     }
-    throw solInputSubmissionError('Sol 输入提交未得到确认：请检查专用 Edge 中是否出现了本条用户消息，然后重试。');
+    throw solInputSubmissionError(
+      clicked
+        ? 'Sol 输入提交未得到确认：请检查专用 Edge 中是否出现了本条用户消息，然后重试。'
+        : 'Sol 输入未提交：可见编辑器已填充，但发送按钮未出现或仍不可用。',
+    );
   }
 }
 
@@ -162,35 +188,81 @@ export const NEW_CHAT_SCRIPT = `(() => {
   return true;
 })()`;
 
-function sendMessageScript(text: string): string {
+export function prepareMessageScript(text: string): string {
   return `(() => {
     const value = ${JSON.stringify(text)};
-    const input = document.querySelector('textarea, [contenteditable="true"]');
-    if (!(input instanceof HTMLElement)) return { sent: false, inputHash: null };
+    const isVisible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const preferred = document.querySelector('#prompt-textarea[contenteditable="true"]');
+    const input = preferred instanceof HTMLElement && isVisible(preferred)
+      ? preferred
+      : [...document.querySelectorAll('[contenteditable="true"], textarea')]
+          .find((element) => element instanceof HTMLElement && isVisible(element));
+    if (!(input instanceof HTMLElement)) return { prepared: false, inputHash: null };
+    input.focus();
+    if (input.isContentEditable) {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      return {
+        prepared: true,
+        inputKind: 'contenteditable',
+        inputHash: ${JSON.stringify(hashMessage(text))}
+      };
+    }
     if (input instanceof HTMLTextAreaElement) {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
       setter?.call(input, value);
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+      return {
+        prepared: true,
+        inputKind: 'textarea',
+        inputHash: ${JSON.stringify(hashMessage(text))}
+      };
     } else {
-      input.textContent = value;
+      return { prepared: false, inputHash: null };
     }
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
-    const form = input.closest('form');
-    const submit = form?.querySelector('button[type="submit"], button[aria-label*="Send"], button[aria-label*="发送"]');
-    if (submit instanceof HTMLElement) submit.click();
-    else if (form instanceof HTMLFormElement) form.requestSubmit();
-    else return { sent: false, inputHash: null };
-    const composerText = input instanceof HTMLTextAreaElement ? input.value : input.textContent ?? '';
-    return {
-      sent: true,
-      inputHash: ${JSON.stringify(hashMessage(text))},
-      composerEmpty: composerText.trim() === ''
-    };
   })()`;
 }
 
-const COMPOSER_STATE_SCRIPT = `(() => {
-  const input = document.querySelector('textarea, [contenteditable="true"]');
-  if (!(input instanceof HTMLElement)) return { empty: true };
+export const CLICK_SUBMIT_SCRIPT = `(() => {
+  const isVisible = (element) => {
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  };
+  const input = document.querySelector('#prompt-textarea[contenteditable="true"], textarea');
+  if (!(input instanceof HTMLElement) || !isVisible(input)) return { clicked: false };
+  const form = input.closest('form');
+  if (!(form instanceof HTMLFormElement)) return { clicked: false };
+  const submit = [...form.querySelectorAll('button')].find((button) => {
+    const label = ((button.getAttribute('aria-label') ?? '') + ' ' + (button.getAttribute('data-testid') ?? '')).toLowerCase();
+    return (
+      isVisible(button) &&
+      !button.disabled &&
+      !/voice|听写|语音|mic|microphone/.test(label) &&
+      (/send|发送|submit/.test(label) || button.type === 'submit' || /composer-submit/.test(label))
+    );
+  });
+  if (!(submit instanceof HTMLElement)) return { clicked: false };
+  submit.click();
+  const text = input instanceof HTMLTextAreaElement ? input.value : input.textContent ?? '';
+  return { clicked: true, composerEmpty: text.trim() === '' };
+})()`;
+
+export const COMPOSER_STATE_SCRIPT = `(() => {
+  const isVisible = (element) => {
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  };
+  const input = document.querySelector('#prompt-textarea[contenteditable="true"], textarea');
+  if (!(input instanceof HTMLElement) || !isVisible(input)) return { empty: true };
   const text = input instanceof HTMLTextAreaElement ? input.value : input.textContent ?? '';
   return { empty: text.trim() === '' };
 })()`;

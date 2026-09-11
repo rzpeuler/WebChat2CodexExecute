@@ -13,7 +13,11 @@ import {
 } from '../../src/main/edge/state-adapter.js';
 import { SolBindingError, SolSessionBindingStore } from '../../src/main/edge/session-binding.js';
 import { CdpTransportError, HttpCdpTransport } from '../../src/main/edge/cdp.js';
-import { CdpConversationController } from '../../src/main/edge/cdp-conversation.js';
+import {
+  CLICK_SUBMIT_SCRIPT,
+  CdpConversationController,
+  prepareMessageScript,
+} from '../../src/main/edge/cdp-conversation.js';
 import type { CdpTransport, EdgeProcess, EdgeSolObservation, SolSessionState } from '../../src/main/edge/types.js';
 
 class MemoryStore {
@@ -309,7 +313,10 @@ describe('dedicated Edge profile and CDP state adapter', () => {
   it('confirms a Sol message after the DOM submission before returning success', async () => {
     const evaluate = vi.fn(async <T = unknown>(_: string, expression: string): Promise<T> => {
       if (expression.includes('const value')) {
-        return { sent: true, inputHash: hashMessage('hello'), composerEmpty: true } as T;
+        return { prepared: true, inputHash: hashMessage('hello'), inputKind: 'contenteditable' } as T;
+      }
+      if (expression.includes('const submit')) {
+        return { clicked: true, composerEmpty: true } as T;
       }
       return {
         title: 'Sol',
@@ -345,12 +352,16 @@ describe('dedicated Edge profile and CDP state adapter', () => {
       }),
     ).resolves.toBeUndefined();
     expect(evaluate).toHaveBeenCalledWith('target-1', expect.stringContaining('const value'));
+    expect(transport.sendCommand).toHaveBeenCalledWith('target-1', 'Input.insertText', { text: 'hello' });
   });
 
   it('rejects an unconfirmed Sol submission instead of reporting it as sent', async () => {
     const evaluate = vi.fn(async <T = unknown>(_: string, expression: string): Promise<T> => {
       if (expression.includes('const value')) {
-        return { sent: true, inputHash: hashMessage('hello'), composerEmpty: false } as T;
+        return { prepared: true, inputHash: hashMessage('hello'), inputKind: 'contenteditable' } as T;
+      }
+      if (expression.includes('const submit')) {
+        return { clicked: true, composerEmpty: false } as T;
       }
       if (expression.includes('return { empty')) return { empty: false } as T;
       return {
@@ -390,6 +401,11 @@ describe('dedicated Edge profile and CDP state adapter', () => {
         text: 'hello',
       }),
     ).rejects.toMatchObject({ code: 'SOL_INPUT_SUBMIT_UNCONFIRMED' });
+  });
+
+  it('targets the visible composer and never falls back to submitting an empty form', () => {
+    expect(prepareMessageScript('hello')).toContain('#prompt-textarea[contenteditable="true"]');
+    expect(CLICK_SUBMIT_SCRIPT).not.toContain('requestSubmit');
   });
 
   it('locates configured Edge and starts with an isolated profile and shell:false', async () => {
