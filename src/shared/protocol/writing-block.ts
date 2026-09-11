@@ -1,6 +1,8 @@
 import { parse as parseYaml } from 'yaml';
 
 export const WRITING_BLOCK_SCHEMA_VERSION = 1 as const;
+export const USER_MESSAGE_OPEN_MARKER = '[USER_MESSAGE]';
+export const USER_MESSAGE_CLOSE_MARKER = '[/USER_MESSAGE]';
 
 export const WRITING_BLOCK_TYPES = [
   'LUNA_TASK',
@@ -10,6 +12,16 @@ export const WRITING_BLOCK_TYPES = [
   'BLOCKED',
 ] as const;
 export type WritingBlockType = (typeof WRITING_BLOCK_TYPES)[number];
+
+export function extractUserMessage(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim();
+  if (!trimmed.startsWith(USER_MESSAGE_OPEN_MARKER) || !trimmed.endsWith(USER_MESSAGE_CLOSE_MARKER)) return null;
+  const message = trimmed.slice(USER_MESSAGE_OPEN_MARKER.length, -USER_MESSAGE_CLOSE_MARKER.length).trim();
+  if (message === '' || message.includes(USER_MESSAGE_OPEN_MARKER) || message.includes(USER_MESSAGE_CLOSE_MARKER))
+    return null;
+  return message;
+}
 
 export const GOVERNANCE_RECONCILIATION_STATUSES = ['PASS', 'CHANGES_REQUIRED', 'BLOCKED'] as const;
 export type GovernanceReconciliationStatus = (typeof GOVERNANCE_RECONCILIATION_STATUSES)[number];

@@ -91,7 +91,9 @@ describe('Sol initialization prompt compiler', () => {
     expect(prompt).toContain('[REDACTED]');
     expect(prompt).toContain('[WRITING_BLOCK type="LUNA_TASK"]');
     expect(prompt).toContain('More than one LUNA_TASK is a protocol error');
-    expect(prompt).toContain('Multiple governance changes and architecture freezes are allowed');
+    expect(prompt).toContain('multiple governance changes and architecture freezes are allowed');
+    expect(prompt).toContain('[USER_MESSAGE]');
+    expect(prompt).toContain('do not add a summary or ask the user to start the next round');
   });
 
   it('redacts sensitive assignments through comma, semicolon, and Chinese punctuation', () => {

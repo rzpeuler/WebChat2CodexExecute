@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ARCHITECTURE_FREEZE_REQUIRED_FIELDS,
   DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS,
+  extractUserMessage,
   normalizeWritingBlockMarkers,
   parseWritingBlocks,
   WRITING_BLOCK_JSON_SCHEMAS,
@@ -39,6 +40,11 @@ const task = {
 };
 
 describe('Writing Block protocol', () => {
+  it('extracts a strictly wrapped user-facing message', () => {
+    expect(extractUserMessage('[USER_MESSAGE]\n需要确认产品取舍。\n[/USER_MESSAGE]')).toBe('需要确认产品取舍。');
+    expect(extractUserMessage('说明\n[USER_MESSAGE]需要确认[/USER_MESSAGE]')).toBeNull();
+    expect(extractUserMessage('[USER_MESSAGE]\n[/USER_MESSAGE]')).toBeNull();
+  });
   it('accepts the angle-bracket wrapper emitted by the ChatGPT DOM as a compatibility alias', () => {
     const parsed = parseWritingBlocks(
       '<WRITING_BLOCK type="BLOCKED">\n{"code":"BLOCKED","reason":"external setup"}\n</WRITING_BLOCK>',

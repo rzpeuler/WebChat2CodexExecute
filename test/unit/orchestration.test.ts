@@ -158,6 +158,35 @@ function baseOptions(overrides: Partial<OrchestratorOptions> = {}): Orchestrator
 }
 
 describe('P0 main orchestration', () => {
+  it('notifies the user and keeps waiting when Sol emits a user-facing message', async () => {
+    const notifier = { notify: vi.fn() };
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation('[USER_MESSAGE]\n请确认产品取舍。\n[/USER_MESSAGE]')) },
+      notifier,
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    const result = await orchestrator.runRound();
+
+    expect(result).toMatchObject({ status: 'WAITING', message: 'Sol 已发送用户消息，已通知用户并等待回复。' });
+    expect(orchestrator.getState()).toMatchObject({
+      active: true,
+      status: 'RUNNING',
+      phase: 'WAITING_FOR_SOL',
+      recentError: null,
+    });
+    expect(notifier.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: 'WAITING_FOR_USER',
+        suggestion: '请确认产品取舍。',
+        level: 'NEEDS_USER',
+        error: expect.objectContaining({ code: 'SOL_USER_MESSAGE' }),
+      }),
+    );
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+  });
+
   it('publishes reconciliation waiting state and pauses with a diagnostic on failure', async () => {
     const orchestrator = new MainOrchestrator(baseOptions());
 

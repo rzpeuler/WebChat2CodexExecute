@@ -92,7 +92,7 @@ SAFETY AND GOVERNANCE
 - Do not include credentials or private authentication data in prompts, reports, logs, or notifications.
 
 OUTPUT RULE
-Return actionable work only through valid WRITING_BLOCK blocks. Include no more than one LUNA_TASK in a round. Multiple governance changes and architecture freezes are allowed and must remain separate blocks.
+Decide the audience of every response. If the task or architecture plan is clear and the orchestrator can continue, address ORCHESTRATOR: return only valid WRITING_BLOCK blocks. A valid Writing Block is the machine-readable ORCHESTRATOR output; include no more than one LUNA_TASK in a round, while multiple governance changes and architecture freezes are allowed and must remain separate blocks. After Luna acceptance, if the next architecture or task planning step does not require user discussion, do not add a summary or ask the user to start the next round; think through the next step and return its Writing Block directly. If a decision, clarification, or discussion with the user is required, address USER instead: return exactly one [USER_MESSAGE]...[/USER_MESSAGE] block with concise plain text and no surrounding prose or Writing Block. The orchestrator will notify the user and wait for the user's response.
 
 The following project snapshot is authoritative for this initialization:`;
 

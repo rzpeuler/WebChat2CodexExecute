@@ -14,6 +14,7 @@ import {
 } from '../../shared/contracts/dashboard.js';
 import { sanitizeSafeText } from '../../shared/contracts/safe-text.js';
 import {
+  extractUserMessage,
   parseWritingBlocks,
   type GovernanceReconciliationBlock,
   type LunaTaskBlock,
@@ -798,6 +799,33 @@ export class MainOrchestrator implements Orchestrator {
     }
     if (observation.projectFingerprint === null)
       return this.pauseForCode('SOL_PROJECT_UNKNOWN', '无法确认 Sol 输出属于绑定 Project。');
+
+    const userMessage = extractUserMessage(observation.latestAssistantText);
+    if (userMessage !== null) {
+      this.state.processedOutputKey = outputKey;
+      this.markNodesNotApplicable([
+        'parse-task',
+        'apply-updates',
+        'sync-governance',
+        'run-luna',
+        'sync-code',
+        'notify-sol',
+      ]);
+      await this.enterWaiting('Sol 已发送用户消息，等待用户处理。');
+      try {
+        this.notifier?.notify({
+          project: this.project.name,
+          taskId: this.state.taskId,
+          phase: 'WAITING_FOR_USER',
+          suggestion: userMessage,
+          error: new OrchestratorError('SOL_USER_MESSAGE', userMessage),
+          level: 'NEEDS_USER',
+        });
+      } catch {
+        // Notification failures must not turn a valid user message into a loop failure.
+      }
+      return result('WAITING', this.state, 'Sol 已发送用户消息，已通知用户并等待回复。');
+    }
 
     let parsed: ReturnType<typeof parseWritingBlocks>;
     try {
