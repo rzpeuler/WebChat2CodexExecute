@@ -213,6 +213,124 @@ describe('governance reconciliation', () => {
     await expect(access(join(root, '.web-chat2codex/backups'))).resolves.toBeUndefined();
   });
 
+  it('fails closed when the target changes after validation and is moved to backup', async () => {
+    const root = await project();
+    const original = '# Legacy\nKeep feature notes.\n';
+    const concurrent = '# Changed during rename window\n';
+
+    await expect(
+      new GovernanceReconciliationApplier(root, {
+        runId: () => 'run-backup-race',
+        beforeBackup: async () => writeFile(join(root, 'AGENTS.md'), concurrent, 'utf8'),
+      }).apply(
+        block({
+          status: 'CHANGES_REQUIRED',
+          baseline_commit: 'base',
+          files: [
+            {
+              path: 'AGENTS.md',
+              action: 'replace',
+              reason: 'stale',
+              sha256_before: canonicalSha(original),
+              content: '# Updated\n',
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'GOVERNANCE_RECONCILIATION_SHA_CONFLICT' });
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toBe(concurrent);
+    await expect(
+      access(join(root, '.web-chat2codex/backups/reconciliation/run-backup-race/AGENTS.md')),
+    ).rejects.toThrow();
+  });
+
+  it('retains an installed target changed externally while rolling back a later failure', async () => {
+    const root = await project();
+    const second = 'second legacy\n';
+    const third = 'third legacy\n';
+    await writeFile(join(root, 'SECOND.md'), second, 'utf8');
+    await writeFile(join(root, 'THIRD.md'), third, 'utf8');
+    const external = '# External edit after install\n';
+
+    await expect(
+      new GovernanceReconciliationApplier(root, {
+        runId: () => 'run-rollback-race',
+        beforeReplace: async (_path, index) => {
+          if (index === 2) {
+            await writeFile(join(root, 'AGENTS.md'), external, 'utf8');
+            await writeFile(join(root, 'THIRD.md'), 'third concurrent\n', 'utf8');
+          }
+        },
+      }).apply(
+        block({
+          status: 'CHANGES_REQUIRED',
+          baseline_commit: 'base',
+          files: [
+            {
+              path: 'AGENTS.md',
+              action: 'replace',
+              reason: 'update first',
+              sha256_before: canonicalSha('# Legacy\nKeep feature notes.\n'),
+              content: '# Updated\n',
+            },
+            {
+              path: 'SECOND.md',
+              action: 'replace',
+              reason: 'update second',
+              sha256_before: canonicalSha(second),
+              content: 'second updated\n',
+            },
+            {
+              path: 'THIRD.md',
+              action: 'replace',
+              reason: 'force rollback',
+              sha256_before: canonicalSha(third),
+              content: 'third updated\n',
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'GOVERNANCE_RECONCILIATION_SHA_CONFLICT' });
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toBe(external);
+    await expect(
+      access(join(root, '.web-chat2codex/backups/reconciliation/run-rollback-race/AGENTS.md')),
+    ).resolves.toBeUndefined();
+    expect(await readFile(join(root, 'SECOND.md'), 'utf8')).toBe(second);
+    expect(await readFile(join(root, 'THIRD.md'), 'utf8')).toBe('third concurrent\n');
+  });
+
+  it('uses commit-stage BOM and line endings when formatting drift follows planning', async () => {
+    const root = await project();
+    const original = '# Legacy\nKeep feature notes.\n';
+    const commitStage = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from('# Legacy\r\nKeep feature notes.\r\n', 'utf8'),
+    ]);
+
+    await new GovernanceReconciliationApplier(root, {
+      runId: () => 'run-commit-format',
+      beforeReplace: async () => writeFile(join(root, 'AGENTS.md'), commitStage),
+    }).apply(
+      block({
+        status: 'CHANGES_REQUIRED',
+        baseline_commit: 'base',
+        files: [
+          {
+            path: 'AGENTS.md',
+            action: 'replace',
+            reason: 'format drift',
+            sha256_before: canonicalSha(original),
+            content: '# Updated\nKeep feature notes.\n',
+          },
+        ],
+      }),
+    );
+
+    expect(await readFile(join(root, 'AGENTS.md'))).toEqual(
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('# Updated\r\nKeep feature notes.\r\n', 'utf8')]),
+    );
+  });
+
   it('does not accept a reconciliation block as an ordinary Luna round output', () => {
     const parsed = block({ status: 'PASS' });
     expect(parsed.type).toBe('GOVERNANCE_RECONCILIATION');

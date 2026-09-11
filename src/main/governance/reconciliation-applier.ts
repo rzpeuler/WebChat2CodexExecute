@@ -55,19 +55,21 @@ export interface GovernanceReconciliationApplyResult {
 export interface GovernanceReconciliationApplierOptions {
   runId?: () => string;
   beforeReplace?: (path: string, index: number) => void | Promise<void>;
+  /** Test-only seam for exercising the validation-to-rename race. */
+  beforeBackup?: (path: string, index: number) => void | Promise<void>;
 }
 
 interface PlannedReplacement {
   input: GovernanceReconciliationFile;
   relativePath: string;
   absolutePath: string;
-  original: Buffer;
-  replacement: Buffer;
+  replacementText: CanonicalGovernanceText;
   backupPath: string;
   backupRelativePath: string;
   stagePath: string;
   movedToBackup: boolean;
   installed: boolean;
+  installedBytes: Buffer | null;
 }
 
 function normalizeRelativePath(projectRoot: string, absolutePath: string): string {
@@ -195,11 +197,13 @@ export class GovernanceReconciliationApplier {
   private readonly projectRoot: string;
   private readonly runIdFactory: () => string;
   private readonly beforeReplace: GovernanceReconciliationApplierOptions['beforeReplace'];
+  private readonly beforeBackup: GovernanceReconciliationApplierOptions['beforeBackup'];
 
   constructor(projectRoot: string, options: GovernanceReconciliationApplierOptions = {}) {
     this.projectRoot = resolve(projectRoot);
     this.runIdFactory = options.runId ?? randomUUID;
     this.beforeReplace = options.beforeReplace;
+    this.beforeBackup = options.beforeBackup;
   }
 
   async apply(block: GovernanceReconciliationBlock): Promise<GovernanceReconciliationApplyResult> {
@@ -267,19 +271,18 @@ export class GovernanceReconciliationApplier {
         }
         throw error;
       }
-      const replacement = formatReplacement(original, replacementText);
       const backupRelativePath = `.web-chat2codex/backups/reconciliation/${runIdFrom(backupRoot)}/${relativePath}`;
       planned.push({
         input,
         relativePath,
         absolutePath,
-        original: original.rawBytes,
-        replacement,
+        replacementText,
         backupPath: resolve(backupRoot, relativePath),
         backupRelativePath,
         stagePath: resolve(stageRoot, `file-${index}.stage`),
         movedToBackup: false,
         installed: false,
+        installedBytes: null,
       });
     }
     return planned;
@@ -306,7 +309,6 @@ export class GovernanceReconciliationApplier {
       await mkdir(stageRoot, { recursive: true });
       for (const item of planned) {
         await mkdir(dirname(item.backupPath), { recursive: true });
-        await writeFile(item.stagePath, item.replacement, { flag: 'wx', mode: 0o600 });
       }
 
       for (const item of planned) {
@@ -331,10 +333,24 @@ export class GovernanceReconciliationApplier {
             { path: item.relativePath },
           );
         }
+        // Formatting is deliberately selected from the bytes observed at the
+        // last commit-stage check, rather than from the plan-stage snapshot.
+        const replacement = formatReplacement(current, item.replacementText);
+        await writeFile(item.stagePath, replacement, { flag: 'wx', mode: 0o600 });
+        await this.beforeBackup?.(item.relativePath, index);
         await rename(item.absolutePath, item.backupPath);
         item.movedToBackup = true;
+        const backup = await readRegularTextFile(item.backupPath, item.relativePath);
+        if (backup.sha256 !== item.input.sha256_before.toLowerCase()) {
+          throw new GovernanceReconciliationError(
+            'GOVERNANCE_RECONCILIATION_SHA_CONFLICT',
+            `Reconciliation target changed during backup: ${item.relativePath}`,
+            { path: item.relativePath },
+          );
+        }
         await rename(item.stagePath, item.absolutePath);
         item.installed = true;
+        item.installedBytes = replacement;
       }
       await rm(stageRoot, { recursive: true, force: true });
       return {
@@ -345,8 +361,18 @@ export class GovernanceReconciliationApplier {
     } catch (error) {
       for (const item of [...planned].reverse()) {
         try {
-          if (item.installed) await rm(item.absolutePath, { force: true });
-          if (item.movedToBackup) await rename(item.backupPath, item.absolutePath);
+          let restoreBackup = item.movedToBackup;
+          if (item.installed) {
+            const installed = await readRegularTextFile(item.absolutePath, item.relativePath);
+            // Compare exact installed bytes here: formatting-only external
+            // edits are still external edits and must be retained.
+            if (item.installedBytes !== null && installed.rawBytes.equals(item.installedBytes)) {
+              await rm(item.absolutePath, { force: true });
+            } else {
+              restoreBackup = false;
+            }
+          }
+          if (restoreBackup) await rename(item.backupPath, item.absolutePath);
         } catch {
           // Keep the original commit error. Any remaining backup is recoverable under backupRoot.
         }
