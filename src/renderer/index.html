@@ -69,8 +69,11 @@
             <button id="preview" class="button-secondary" type="button">预览 Sol 提示词</button>
           </div>
         </form>
-        <pre id="project-details" class="preview" aria-live="polite"></pre>
-        <pre id="prompt-preview" class="preview" aria-live="polite"></pre>
+        <div class="preview-actions">
+          <button id="view-project-details" class="button-secondary" type="button" disabled>查看当前配置</button>
+        </div>
+        <pre id="project-details" class="preview-data" aria-hidden="true" hidden></pre>
+        <pre id="prompt-preview" class="preview-data" aria-hidden="true" hidden></pre>
       </section>
 
       <section id="web-chat-connection" class="workflow-section" aria-labelledby="web-chat-connection-title">
@@ -232,6 +235,29 @@
           <h3>按钮可用条件</h3>
           <p>每个动作的启用条件、处理中状态和禁用原因由后端快照提供。按钮显示“处理中”时不会重复提交同一动作。</p>
         </div>
+      </section>
+    </div>
+
+    <div
+      id="content-dialog"
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="content-dialog-title"
+      hidden
+    >
+      <section class="modal content-modal" tabindex="-1">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">READ-ONLY DETAILS</p>
+            <h2 id="content-dialog-title">详情</h2>
+          </div>
+          <div class="modal-actions">
+            <button id="content-copy" class="button-secondary" type="button">一键复制</button>
+            <button id="content-close" class="icon-button" type="button" aria-label="关闭详情">×</button>
+          </div>
+        </div>
+        <pre id="content-dialog-body" class="modal-code" tabindex="0"></pre>
       </section>
     </div>
 

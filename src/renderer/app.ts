@@ -20,6 +20,7 @@ const targetBranchElement = document.querySelector<HTMLInputElement>('#target-br
 const reportDirectoryElement = document.querySelector<HTMLInputElement>('#report-directory');
 const detailsElement = document.querySelector<HTMLElement>('#project-details');
 const promptElement = document.querySelector<HTMLElement>('#prompt-preview');
+const viewProjectDetailsButton = document.querySelector<HTMLButtonElement>('#view-project-details');
 const scanButton = document.querySelector<HTMLButtonElement>('#scan');
 const selectDirectoryButton = document.querySelector<HTMLButtonElement>('#select-directory');
 const checkGitAccessButton = document.querySelector<HTMLButtonElement>('#check-git-access');
@@ -49,11 +50,17 @@ const loopGraphDetailsListElement = document.querySelector<HTMLUListElement>('#l
 const helpButton = document.querySelector<HTMLButtonElement>('#help-button');
 const helpDialog = document.querySelector<HTMLElement>('#help-dialog');
 const helpCloseButton = document.querySelector<HTMLButtonElement>('#help-close');
+const contentDialog = document.querySelector<HTMLElement>('#content-dialog');
+const contentDialogTitleElement = document.querySelector<HTMLElement>('#content-dialog-title');
+const contentDialogBodyElement = document.querySelector<HTMLElement>('#content-dialog-body');
+const contentCopyButton = document.querySelector<HTMLButtonElement>('#content-copy');
+const contentCloseButton = document.querySelector<HTMLButtonElement>('#content-close');
 
 let scanResult: ProjectScanResult | null = null;
 let currentSnapshot: DashboardSnapshot | null = null;
 let refreshInFlight: Promise<void> | null = null;
 let helpPreviouslyFocused: HTMLElement | null = null;
+let contentPreviouslyFocused: HTMLElement | null = null;
 let selectedLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
 let lastCurrentLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
 const loopGraphNodeButtons = new Map<LoopGraphNodeId, LoopGraphButtonParts>();
@@ -169,6 +176,7 @@ async function scanSelectedProject(): Promise<void> {
   if (remoteUrlElement !== null) remoteUrlElement.value = scanResult.remoteUrl ?? '';
   if (targetBranchElement !== null) targetBranchElement.value = scanResult.currentBranch;
   detailsElement.textContent = JSON.stringify(scanResult, null, 2);
+  if (viewProjectDetailsButton !== null) viewProjectDetailsButton.disabled = false;
 }
 
 async function initializeProject(mode: 'clone' | 'adopt'): Promise<void> {
@@ -656,11 +664,92 @@ previewButton?.addEventListener('click', () => {
       if (promptElement === null) throw new Error('提示词预览区域不可用');
       const preview = await window.desktopApi.previewSolPrompt(getConfigInput());
       promptElement.textContent = preview.initializationPrompt;
+      openContentDialog('Sol 初始化提示词', preview.initializationPrompt, previewButton);
       return preview;
     },
     successMessage: () => 'Sol 初始化提示词预览已生成。',
     errorFallback: '提示词预览失败',
   });
+});
+
+function closeContentDialog(): void {
+  if (contentDialog === null || contentDialog.hidden) return;
+  contentDialog.hidden = true;
+  contentPreviouslyFocused?.focus();
+  contentPreviouslyFocused = null;
+}
+
+function openContentDialog(title: string, content: string, returnFocus: HTMLElement | null): void {
+  if (contentDialog === null || contentDialogTitleElement === null || contentDialogBodyElement === null) return;
+  contentPreviouslyFocused = returnFocus;
+  contentDialogTitleElement.textContent = title;
+  contentDialogBodyElement.textContent = content;
+  contentDialog.hidden = false;
+  contentCopyButton?.focus();
+}
+
+async function copyContentDialog(): Promise<void> {
+  const content = contentDialogBodyElement?.textContent ?? '';
+  if (content.trim() === '') {
+    setStatus('当前没有可复制的内容。');
+    return;
+  }
+  try {
+    if (navigator.clipboard?.writeText !== undefined) {
+      await navigator.clipboard.writeText(content);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = content;
+      textarea.setAttribute('readonly', 'true');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.append(textarea);
+      textarea.focus();
+      textarea.select();
+      if (!document.execCommand('copy')) throw new Error('浏览器拒绝复制操作');
+      textarea.remove();
+    }
+    setStatus(`${contentDialogTitleElement?.textContent ?? '内容'}已复制到剪贴板。`);
+  } catch (error) {
+    setStatus(`复制失败：${errorMessage(error, '剪贴板不可用')} 请手动选择并复制。`);
+  }
+}
+
+viewProjectDetailsButton?.addEventListener('click', () => {
+  const details = detailsElement?.textContent ?? '';
+  if (details.trim() === '') {
+    setStatus('请先扫描项目，再查看当前配置。');
+    return;
+  }
+  openContentDialog('当前项目配置', details, viewProjectDetailsButton);
+});
+
+contentCopyButton?.addEventListener('click', () => void copyContentDialog());
+contentCloseButton?.addEventListener('click', closeContentDialog);
+contentDialog?.addEventListener('click', (event) => {
+  if (event.target === contentDialog) closeContentDialog();
+});
+contentDialog?.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeContentDialog();
+    return;
+  }
+  if (event.key !== 'Tab' || contentDialog === null) return;
+  const focusable = Array.from(contentDialog.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex="0"]'));
+  if (focusable.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const first = focusable[0]!;
+  const last = focusable[focusable.length - 1]!;
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 });
 
 function closeHelp(): void {

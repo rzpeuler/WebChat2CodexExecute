@@ -23,6 +23,7 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  padding-bottom: 82px;
   background:
     radial-gradient(circle at 12% 0%, #24385d 0, transparent 34rem),
     radial-gradient(circle at 90% 20%, #172747 0, transparent 28rem), var(--bg);
@@ -85,7 +86,7 @@ button.icon-button {
 }
 
 .shell {
-  width: min(1120px, 100%);
+  width: min(1360px, 100%);
   margin: 0 auto;
   padding: 38px 28px 72px;
 }
@@ -149,9 +150,20 @@ h3 {
 }
 
 .status-message {
+  position: fixed;
+  z-index: 20;
+  right: 16px;
+  bottom: 16px;
+  left: 16px;
+  width: min(900px, calc(100% - 32px));
   min-height: 1.5em;
-  margin-bottom: 0;
+  margin: 0 auto;
+  padding: 11px 15px;
+  border: 1px solid #405579;
+  border-radius: 10px;
   color: #d9e4fc;
+  background: rgb(16 26 42 / 96%);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 30%);
 }
 
 .muted,
@@ -296,6 +308,16 @@ input::placeholder {
     SFMono-Regular,
     Consolas,
     monospace;
+}
+
+.preview-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.preview-data {
+  display: none;
 }
 
 .dashboard {
@@ -596,6 +618,34 @@ input::placeholder {
 
 .modal-heading h2 {
   margin-bottom: 0;
+}
+
+.modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.content-modal {
+  width: min(980px, 100%);
+}
+
+.modal-code {
+  max-height: min(680px, 68vh);
+  overflow: auto;
+  margin: 18px 0 0;
+  padding: 15px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid #2f4262;
+  border-radius: 10px;
+  color: #d7e0f5;
+  background: #090f19;
+  font:
+    0.82rem/1.55 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
 }
 
 .modal-content {
