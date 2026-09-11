@@ -236,7 +236,8 @@ function promptForTask(task: LunaTaskBlock, snapshots: CodexSnapshots): string {
         blocking:
           'Emit BLOCKED_EXTERNAL_SETUP for external credentials, conflicts, scope expansion, or high-risk operations.',
         result:
-          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, and a non-empty tests array.',
+          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, and a non-empty tests array. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED; use COMPLETED when implementation, report, and validation are finished even if the report says CTO acceptance is pending. Never invent a status value. tests[].status must be exactly PASSED, FAILED, or NOT_RUN, and report_path must equal the task report_path.',
+        git: 'The orchestrator owns commit, push, amend, rebase, and force-push. Do not run any of these Git synchronization operations. Leave implementation and report changes in the worktree for the orchestrator to validate, commit, and push.',
       },
     },
     null,

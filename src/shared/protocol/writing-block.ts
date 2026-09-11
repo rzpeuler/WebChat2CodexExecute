@@ -26,6 +26,33 @@ export function extractUserMessage(input: unknown): string | null {
 export const GOVERNANCE_RECONCILIATION_STATUSES = ['PASS', 'CHANGES_REQUIRED', 'BLOCKED'] as const;
 export type GovernanceReconciliationStatus = (typeof GOVERNANCE_RECONCILIATION_STATUSES)[number];
 
+/** Exact machine-readable result values accepted from Luna. */
+export const LUNA_RESULT_STATUSES = ['COMPLETED', 'BLOCKED_EXTERNAL_SETUP', 'FAILED'] as const;
+export type LunaResultStatus = (typeof LUNA_RESULT_STATUSES)[number];
+
+/** Canonical governance operations used by the governance applier. */
+export const GOVERNANCE_CHANGE_OPERATIONS = [
+  'add_document',
+  'update_document',
+  'append_section',
+  'deprecate_document',
+  'record_decision',
+] as const;
+export type GovernanceChangeOperation = (typeof GOVERNANCE_CHANGE_OPERATIONS)[number];
+
+export const GOVERNANCE_CHANGE_RISK_LEVELS = ['low', 'normal', 'medium', 'high', 'critical'] as const;
+export type GovernanceChangeRiskLevel = (typeof GOVERNANCE_CHANGE_RISK_LEVELS)[number];
+
+/** Luna changes files; the orchestrator owns all Git synchronization. */
+export const LUNA_REMOTE_SYNC_POLICY = {
+  owner: 'ORCHESTRATOR',
+  commit: false,
+  push: false,
+  amend: false,
+  rebase: false,
+  force_push: false,
+} as const;
+
 export const GOVERNANCE_RECONCILIATION_ACTIONS = ['replace'] as const;
 export type GovernanceReconciliationAction = (typeof GOVERNANCE_RECONCILIATION_ACTIONS)[number];
 
