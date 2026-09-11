@@ -315,6 +315,7 @@ export class MainOrchestrator implements Orchestrator {
       this.state.retryCount = 0;
       this.touchState();
       await this.persist();
+      void this.runRound();
       return result('WAITING', this.state, '已恢复代码同步，等待继续执行。');
     }
     this.state.active = true;
