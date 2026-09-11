@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { EdgeProfileManager, locateEdgeExecutable } from '../../src/main/edge/profile.js';
 import {
   accountFingerprintFromStorageKeys,
+  domSnapshotScript,
   EdgeStateAdapter,
   hasIncompleteWritingBlock,
   hashMessage,
@@ -606,6 +607,25 @@ describe('dedicated Edge profile and CDP state adapter', () => {
       await expect(adapter.sample('target-1')).resolves.toMatchObject({ status });
       transport.value = { ...transport.value, [field]: false };
     }
+  });
+
+  it('does not infer auth from hidden login templates or status text', async () => {
+    const transport = new FakeTransport();
+    transport.value = {
+      ...transport.value,
+      loginWall: false,
+      statusText: 'input[type="email"] template retained by the page',
+    };
+    const adapter = new EdgeStateAdapter(transport);
+    await expect(adapter.readPage('target-1')).resolves.toMatchObject({ loginWall: false });
+  });
+
+  it('extracts a visible complete Writing Block candidate inside the assistant message', () => {
+    const script = domSnapshotScript();
+    expect(script).toContain("const OPEN_MARKER = '[WRITING_BLOCK';");
+    expect(script).toContain('const assistantCandidates = assistantNode === null');
+    expect(script).toContain('const finalAssistant = assistantCandidates.at(-1)?.value || text(assistantNode);');
+    expect(script).toContain('const loginWall = authPath || explicitLoginNodes.length > 0');
   });
 
   it('does not infer Project identity from an untrusted hostname and selects only known identities', async () => {

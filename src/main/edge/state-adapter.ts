@@ -22,9 +22,32 @@ export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
 
 export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER_RULES): string {
   return `(() => {
-  const text = (node) => node instanceof HTMLElement ? (node.innerText || node.textContent || '').trim() : '';
-  const all = (selectors) => selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));
-  const assistant = all(${JSON.stringify(rules.assistantSelectors)}).map(text).filter(Boolean).at(-1) || '';
+  const OPEN_MARKER = '[WRITING_BLOCK';
+  const CLOSE_MARKER = '[/WRITING_BLOCK]';
+  const isVisible = (node) => {
+    if (!(node instanceof HTMLElement)) return false;
+    const style = window.getComputedStyle(node);
+    const rect = node.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse' &&
+      style.opacity !== '0' && rect.width > 0 && rect.height > 0;
+  };
+  const text = (node) => isVisible(node) ? (node.innerText || node.textContent || '').trim() : '';
+  const all = (selectors, root = document) => selectors.flatMap((selector) => Array.from(root.querySelectorAll(selector)));
+  const visibleAll = (selectors, root = document) => all(selectors, root).filter(isVisible);
+  const assistantNodes = visibleAll(${JSON.stringify(rules.assistantSelectors)});
+  const assistantNode = assistantNodes.at(-1) || null;
+  const assistantCandidates = assistantNode === null
+    ? []
+    : [assistantNode, ...Array.from(assistantNode.querySelectorAll('*'))]
+        .filter(isVisible)
+        .map((node) => ({ node, value: text(node) }))
+        .filter(({ value }) => value.includes(OPEN_MARKER) && value.includes(CLOSE_MARKER))
+        .filter(({ node }) => !Array.from(node.children).some((child) => {
+          if (!isVisible(child)) return false;
+          const childText = text(child);
+          return childText.includes(OPEN_MARKER) && childText.includes(CLOSE_MARKER);
+        }));
+  const finalAssistant = assistantCandidates.at(-1)?.value || text(assistantNode);
   const errors = all(${JSON.stringify(rules.errorSelectors)}).map(text).filter(Boolean).join('\\n');
   const status = all(['[aria-live="polite"]', '[role="status"]', 'button[aria-label]']).map(text).filter(Boolean).join('\\n');
   const project = document.querySelector('[data-project-id], meta[name="chatgpt-project-id"]');
@@ -38,15 +61,24 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
     const accountKey = Object.keys(localStorage).find((key) => /(?:^|\\/)user-[a-zA-Z0-9_-]{8,}(?:\\/|$)/.test(key));
     accountFromStorage = accountKey?.match(/(?:^|\\/)user-([a-zA-Z0-9_-]{8,})(?:\\/|$)/)?.[1] || '';
   } catch {}
+  const authPath = /\\/(?:auth|login|signin)(?:\\/|$)/i.test(location.pathname);
+  const visibleLoginNodes = visibleAll(${JSON.stringify(rules.loginSelectors)});
+  const visibleEmailFields = visibleAll(['input[type="email"]']);
+  const visiblePasswordFields = visibleAll(['input[type="password"]']);
+  const explicitLoginNodes = visibleLoginNodes.filter((node) => {
+    return !(node instanceof HTMLInputElement && (node.type || '').toLowerCase() === 'email');
+  });
+  const loginWall = authPath || explicitLoginNodes.length > 0 ||
+    (visibleEmailFields.length > 0 && visiblePasswordFields.length > 0);
   return {
     title: document.title,
     url: location.href,
     projectFingerprint: projectValue || projectFromUrl || null,
     accountFingerprint: accountValue || (accountFromStorage ? 'user-' + accountFromStorage : null),
-    latestAssistantText: assistant,
+    latestAssistantText: finalAssistant,
     statusText: status,
     errorText: errors,
-    loginWall: all(${JSON.stringify(rules.loginSelectors)}).length > 0,
+    loginWall,
     sessionMissing: false,
     contextLimit: false,
     networkError: false,
@@ -119,7 +151,7 @@ export class EdgeStateAdapter {
     const combined = `${errorText}\n${statusText}`;
     const url = stringOrNull(raw.url) ?? '';
     const projectFingerprint = isAllowedChatGptUrl(url)
-      ? stringOrNull(raw.projectFingerprint) ?? projectFingerprintFromChatGptUrl(url)
+      ? (stringOrNull(raw.projectFingerprint) ?? projectFingerprintFromChatGptUrl(url))
       : null;
     const accountFingerprint = isAllowedChatGptUrl(url) ? stringOrNull(raw.accountFingerprint) : null;
     return {
@@ -132,12 +164,7 @@ export class EdgeStateAdapter {
       latestAssistantHash: hashMessage(text),
       statusText,
       errorText,
-      loginWall:
-        booleanOrFalse(raw.loginWall) ||
-        matchesAny(
-          combined,
-          this.rules.loginSelectors.map((value) => new RegExp(value, 'i')),
-        ),
+      loginWall: booleanOrFalse(raw.loginWall),
       sessionMissing: booleanOrFalse(raw.sessionMissing) || matchesAny(combined, this.rules.sessionLostPatterns),
       contextLimit: booleanOrFalse(raw.contextLimit) || matchesAny(combined, this.rules.contextLimitPatterns),
       networkError: booleanOrFalse(raw.networkError) || matchesAny(combined, this.rules.networkErrorPatterns),
