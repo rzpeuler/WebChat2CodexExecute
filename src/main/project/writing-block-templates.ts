@@ -70,6 +70,15 @@ function sameFileIdentity(left: { dev: number; ino: number }, right: { dev: numb
   return left.dev !== 0 && left.ino !== 0 && left.dev === right.dev && left.ino === right.ino;
 }
 
+class InvalidUtf8Error extends Error {
+  readonly code = 'WRITING_BLOCK_TEMPLATE_INVALID_UTF8';
+
+  constructor(path: string, cause: unknown) {
+    super(`模板文件 ${path} 不是合法 UTF-8，无法可靠读取或计算 canonical-text-v1。`, { cause });
+    this.name = 'InvalidUtf8Error';
+  }
+}
+
 async function readSafeTemplateFile(projectRoot: string, relativePath: string): Promise<string> {
   const templatePath = fixedPath(projectRoot, relativePath);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -102,7 +111,13 @@ async function readSafeTemplateFile(projectRoot: string, relativePath: string): 
     if (!isSafeRegularFile(opened) || !isSafeRegularFile(pathAfterOpen) || !sameFileIdentity(opened, pathAfterOpen)) {
       throw new PathSafetyError('PROJECT_PATH_UNSAFE', `打开的模板文件不是安全的普通文件：${relativePath}`);
     }
-    const source = await handle.readFile({ encoding: 'utf8' });
+    const bytes = await handle.readFile();
+    let source: string;
+    try {
+      source = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (error) {
+      throw new InvalidUtf8Error(relativePath, error);
+    }
     const finalStats = await handle.stat();
     const pathAfterRead = await lstat(templatePath);
     if (
@@ -492,6 +507,12 @@ async function inspectTemplateFile(
           path,
           manifestPath,
         ),
+      };
+    }
+    if (error instanceof InvalidUtf8Error) {
+      return {
+        file,
+        error: failure(error.code, `${error.message}；必须返回 BLOCKED。`, path, manifestPath),
       };
     }
     const detail = error instanceof Error ? error.message : String(error);

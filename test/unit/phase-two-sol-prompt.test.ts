@@ -403,11 +403,15 @@ describe('Sol initialization prompt compiler', () => {
 
     expect(prompt).toContain('canonical-text-v1');
     expect(prompt).toContain('UTF-8');
+    expect(prompt).toContain('strictly decode');
+    expect(prompt).toContain('fatal error handling');
+    expect(prompt).toContain('invalid UTF-8');
+    expect(prompt).toContain('replacement character');
     expect(prompt).toContain('remove all leading BOMs');
     expect(prompt).toContain('convert CRLF and CR to LF');
     expect(prompt).toContain('do not trim');
     expect(prompt).toContain('actual complete file content');
     expect(prompt).toContain('Never guess');
-    expect(prompt).toContain('return BLOCKED instead of CHANGES_REQUIRED');
+    expect(prompt).toContain('status BLOCKED, not CHANGES_REQUIRED');
   });
 });

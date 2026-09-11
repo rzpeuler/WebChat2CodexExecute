@@ -110,6 +110,24 @@ describe('Writing Block template validation', () => {
     });
   });
 
+  it('strictly decodes template bytes and blocks invalid UTF-8 instead of using replacement characters', async () => {
+    const repository = await initializedRepository();
+    const relativePath = WRITING_BLOCK_TEMPLATE_PATHS.BLOCKED;
+    const absolutePath = join(repository, ...relativePath.split('/'));
+    await writeFile(absolutePath, Buffer.from([0x7b, 0x22, 0x73, 0xc3, 0x28, 0x22, 0x3a, 0x31, 0x7d]));
+
+    const scan = await scanGitProject(repository);
+
+    expect(scan.writingBlockTemplates.status).toBe('invalid');
+    expect(scan.writingBlockTemplates.error).toMatchObject({
+      code: 'WRITING_BLOCK_TEMPLATE_INVALID_UTF8',
+      path: relativePath,
+    });
+    expect(scan.writingBlockTemplates.error?.message).toContain('无法可靠读取或计算 canonical-text-v1');
+    expect(scan.writingBlockTemplates.error?.message).toContain('BLOCKED');
+    expect(scan.writingBlockTemplates.error?.message).not.toContain('�');
+  });
+
   it('fails closed when a template is not registered with the required manifest metadata', async () => {
     const repository = await initializedRepository();
     const manifestPath = join(repository, 'docs', 'governance', 'governance-manifest.yaml');
