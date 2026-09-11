@@ -19,6 +19,9 @@ export type EdgeProfileErrorCode =
   | 'EDGE_PROFILE_INVALID'
   | 'EDGE_DEBUG_PORT_UNAVAILABLE'
   | 'EDGE_PROFILE_OWNERSHIP_INVALID'
+  | 'EDGE_OWNERSHIP_TIMEOUT'
+  | 'EDGE_OWNERSHIP_DISCONNECTED'
+  | 'EDGE_OWNERSHIP_INVALID_RESPONSE'
   | 'EDGE_PROCESS_EXITED'
   | 'EDGE_LOGIN_REQUIRED';
 
@@ -76,19 +79,24 @@ export async function locateEdgeExecutable(options: EdgeExecutableLocatorOptions
 const defaultProcessRunner: EdgeProcessRunner = (file, args, options) =>
   spawn(file, [...args], options) as unknown as EdgeProcess;
 
-async function defaultPortProbe(port: number): Promise<boolean> {
+async function defaultPortProbe(port: number, timeoutMs = 2_000): Promise<boolean> {
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | null = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+    const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: controller.signal });
     return response.ok;
   } catch {
     return false;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
   }
 }
 
 async function defaultWaitForPort(port: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   do {
-    if (await defaultPortProbe(port)) return true;
+    if (await defaultPortProbe(port, Math.min(2_000, Math.max(1, timeoutMs)))) return true;
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
   } while (Date.now() < deadline);
   return false;
@@ -144,12 +152,30 @@ async function defaultOwnershipProbe(
   ownership: EdgeProfileOwnership,
   fetchImpl: typeof fetch = fetch,
   webSocketFactory: (url: string) => WebSocket = (url) => new WebSocket(url),
+  timeoutMs = 10_000,
 ): Promise<boolean> {
   try {
-    const response = await fetchImpl(`http://127.0.0.1:${port}/json/version`);
+    const controller = new AbortController();
+    const response = await ownershipFetchWithTimeout(
+      fetchImpl(`http://127.0.0.1:${port}/json/version`, { signal: controller.signal }),
+      timeoutMs,
+      () => controller.abort(),
+    );
+    if (
+      typeof response !== 'object' ||
+      response === null ||
+      typeof response.ok !== 'boolean' ||
+      typeof response.json !== 'function'
+    ) {
+      throw new EdgeProfileError('EDGE_OWNERSHIP_INVALID_RESPONSE', 'Edge ownership HTTP response is invalid.');
+    }
     if (!response.ok) return false;
-    const value: unknown = await response.json();
-    if (typeof value !== 'object' || value === null) return false;
+    const value: unknown = await ownershipPromiseWithTimeout(response.json(), timeoutMs, 'response', () =>
+      controller.abort(),
+    );
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new EdgeProfileError('EDGE_OWNERSHIP_INVALID_RESPONSE', 'Edge ownership probe returned invalid JSON.');
+    }
     const record = value as Record<string, unknown>;
     if (typeof record.Browser !== 'string' || !/microsoft edge|\bedg(?:e)?\//i.test(record.Browser)) return false;
     if (
@@ -158,51 +184,142 @@ async function defaultOwnershipProbe(
     ) {
       return false;
     }
-    const socket = webSocketFactory(record.webSocketDebuggerUrl);
-    const commandLine = await browserCommandLine(socket);
+    let socket: WebSocket;
+    try {
+      socket = webSocketFactory(record.webSocketDebuggerUrl);
+    } catch (error) {
+      throw new EdgeProfileError('EDGE_OWNERSHIP_DISCONNECTED', 'Edge ownership WebSocket could not be created.', {
+        cause: error,
+      });
+    }
+    const commandLine = await browserCommandLine(socket, timeoutMs);
     return ownershipArgsMatch(commandLine, ownership);
-  } catch {
-    return false;
+  } catch (error) {
+    if (error instanceof EdgeProfileError) throw error;
+    throw new EdgeProfileError('EDGE_OWNERSHIP_DISCONNECTED', 'Edge ownership probe could not be completed.', {
+      cause: error,
+    });
   }
 }
 
-function browserCommandLine(socket: WebSocket): Promise<readonly string[]> {
+function browserCommandLine(socket: WebSocket, timeoutMs: number): Promise<readonly string[]> {
   return new Promise<readonly string[]>((resolveResult, reject) => {
+    let timer: NodeJS.Timeout | null = setTimeout(() => {
+      cleanup();
+      reject(new EdgeProfileError('EDGE_OWNERSHIP_TIMEOUT', 'Edge ownership command line probe timed out.'));
+    }, timeoutMs);
     const onOpen = (): void => {
-      socket.send(JSON.stringify({ id: 1, method: 'Browser.getBrowserCommandLine' }));
+      if (socket.readyState === 3) {
+        cleanup();
+        reject(new EdgeProfileError('EDGE_OWNERSHIP_DISCONNECTED', 'Edge ownership WebSocket is closed.'));
+        return;
+      }
+      try {
+        socket.send(JSON.stringify({ id: 1, method: 'Browser.getBrowserCommandLine' }));
+      } catch (error) {
+        cleanup();
+        reject(
+          new EdgeProfileError('EDGE_OWNERSHIP_DISCONNECTED', 'Edge ownership command could not be sent.', {
+            cause: error,
+          }),
+        );
+      }
     };
     const onMessage = (event: MessageEvent): void => {
       try {
-        const value = JSON.parse(String(event.data)) as BrowserCommandLineResponse;
-        if (value.id !== 1) return;
-        const args = value.result?.arguments;
+        const value: unknown = JSON.parse(String(event.data));
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+          cleanup();
+          reject(
+            new EdgeProfileError('EDGE_OWNERSHIP_INVALID_RESPONSE', 'Edge ownership command line response is invalid.'),
+          );
+          return;
+        }
+        const response = value as BrowserCommandLineResponse;
+        if (!Object.prototype.hasOwnProperty.call(response, 'id')) return;
+        if (response.id !== 1) {
+          cleanup();
+          reject(new EdgeProfileError('EDGE_OWNERSHIP_INVALID_RESPONSE', 'Edge ownership command line id is invalid.'));
+          return;
+        }
+        const args = response.result?.arguments;
         if (!Array.isArray(args) || !args.every((arg) => typeof arg === 'string')) {
           cleanup();
-          reject(new Error('Edge did not return its command line.'));
+          reject(new EdgeProfileError('EDGE_OWNERSHIP_INVALID_RESPONSE', 'Edge did not return its command line.'));
           return;
         }
         cleanup();
         resolveResult(args);
       } catch (error) {
         cleanup();
-        reject(error);
+        reject(
+          error instanceof EdgeProfileError
+            ? error
+            : new EdgeProfileError('EDGE_OWNERSHIP_INVALID_RESPONSE', 'Edge ownership response was not valid JSON.', {
+                cause: error,
+              }),
+        );
       }
     };
-    const onError = (): void => {
+    const onError = (event: Event): void => {
       cleanup();
-      reject(new Error('Edge ownership probe failed.'));
+      reject(new EdgeProfileError('EDGE_OWNERSHIP_DISCONNECTED', 'Edge ownership probe failed.', { cause: event }));
+    };
+    const onClose = (): void => {
+      cleanup();
+      reject(new EdgeProfileError('EDGE_OWNERSHIP_DISCONNECTED', 'Edge ownership WebSocket disconnected.'));
     };
     const cleanup = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
       socket.removeEventListener('open', onOpen);
       socket.removeEventListener('message', onMessage);
       socket.removeEventListener('error', onError);
+      socket.removeEventListener('close', onClose);
       socket.close();
     };
     socket.addEventListener('open', onOpen);
     socket.addEventListener('message', onMessage);
     socket.addEventListener('error', onError);
+    socket.addEventListener('close', onClose);
+    if (socket.readyState === 3) onClose();
     if (socket.readyState === 1) onOpen();
   });
+}
+
+function finiteOwnershipTimeout(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 10_000;
+}
+
+async function ownershipFetchWithTimeout(
+  response: Promise<Response>,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<Response> {
+  return ownershipPromiseWithTimeout(response, timeoutMs, 'fetch', onTimeout);
+}
+
+async function ownershipPromiseWithTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  operationName: string,
+  onTimeout: () => void,
+): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  const boundedTimeout = finiteOwnershipTimeout(timeoutMs);
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          onTimeout();
+          reject(new EdgeProfileError('EDGE_OWNERSHIP_TIMEOUT', `Edge ownership ${operationName} probe timed out.`));
+        }, boundedTimeout);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 }
 
 export class EdgeProfileManager {
@@ -250,6 +367,7 @@ export class EdgeProfileManager {
               ownership,
               this.options.ownershipFetchImpl,
               this.options.ownershipWebSocketFactory,
+              this.options.ownershipTimeoutMs,
             )
           : await this.options.ownershipProbe(this.options.remoteDebuggingPort, ownership);
       if (!owned) {

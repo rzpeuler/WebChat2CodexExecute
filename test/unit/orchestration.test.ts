@@ -1,8 +1,13 @@
+import { createHash } from 'node:crypto';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import type { EdgeSolObservation } from '../../src/main/edge/types.js';
 import type { CodexRunResult } from '../../src/main/codex/types.js';
 import type { GitBaseline } from '../../src/main/git/types.js';
 import { parseWritingBlocks, type LunaTaskBlock } from '../../src/shared/protocol/writing-block.js';
+import { applyGovernanceReconciliation } from '../../src/main/governance/reconciliation-applier.js';
 import {
   MainOrchestrator,
   type OrchestratorOptions,
@@ -27,7 +32,7 @@ function observation(text: string, status: EdgeSolObservation['status'] = 'COMPL
     projectFingerprint: 'p1',
     accountFingerprint: 'a1',
     latestAssistantText: text,
-    latestAssistantHash: `hash-${text.length}`,
+    latestAssistantHash: createHash('sha256').update(text, 'utf8').digest('hex'),
     statusText: '',
     errorText: '',
     loginWall: false,
@@ -288,6 +293,8 @@ describe('P0 main orchestration', () => {
     const restoredLegacy = new MainOrchestrator(baseOptions({ stateStore: legacyStore }));
     await restoredLegacy.initialize();
     expect(restoredLegacy.getState().pendingCodeSync).toBeNull();
+    expect(restoredLegacy.getState().pendingReconciliationSync).toBeNull();
+    expect(restoredLegacy.getState().retryCount).toBe(0);
 
     const malformedStored = {
       ...initial,
@@ -780,6 +787,46 @@ describe('P0 main orchestration', () => {
     expect(blocked.getDashboardSnapshot().actions['retry-current-stage'].reason).toContain('新的 Sol 输出');
   });
 
+  it('stops ordinary retries after three persisted attempts', async () => {
+    const observe = vi.fn(async () => {
+      const error = new Error('network unavailable');
+      Object.assign(error, { code: 'NETWORK_ERROR' });
+      throw error;
+    });
+    let saved: OrchestratorState | null = null;
+    const orchestrator = new MainOrchestrator(
+      baseOptions({
+        edge: { observe },
+        stateStore: {
+          load: vi.fn(async () => saved),
+          save: vi.fn(async (state) => {
+            saved = state;
+          }),
+        },
+      }),
+    );
+    await orchestrator.start();
+    await orchestrator.runRound();
+    await orchestrator.retryCurrentStage();
+    await orchestrator.retryCurrentStage();
+    await orchestrator.retryCurrentStage();
+
+    expect(observe).toHaveBeenCalledTimes(4);
+    expect(orchestrator.getState()).toMatchObject({ retryCount: 3, recentError: { code: 'NETWORK_ERROR' } });
+    expect((saved as OrchestratorState | null)?.retryCount).toBe(3);
+
+    const exhausted = await orchestrator.retryCurrentStage();
+
+    expect(exhausted).toMatchObject({ status: 'PAUSED', message: expect.stringContaining('最多 3 次重试') });
+    expect(orchestrator.getState()).toMatchObject({
+      active: false,
+      status: 'NEEDS_USER_ACTION',
+      retryCount: 3,
+      recentError: { code: 'RETRY_LIMIT_EXCEEDED' },
+    });
+    expect(observe).toHaveBeenCalledTimes(4);
+  });
+
   it('runs governance sync, Luna, code sync, and Sol acknowledgement in order', async () => {
     const options = baseOptions({
       edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${taskText()}`)) },
@@ -912,6 +959,62 @@ describe('P0 main orchestration', () => {
     expect(options.git.syncGovernance).not.toHaveBeenCalled();
   });
 
+  it('validates every block before applying an earlier governance block or starting Luna', async () => {
+    const invalidTask = taskText().replace('"validation_commands": ["npm test"]', '"validation_commands": "npm test"');
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${invalidTask}`)) },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+
+    const result = await orchestrator.runRound();
+
+    expect(result.status).toBe('PAUSED');
+    expect(orchestrator.getState().recentError).toMatchObject({ code: 'WRITING_BLOCK_INVALID_FIELD' });
+    expect(orchestrator.getState().recentError?.message).toContain('第 1 个 Writing Block');
+    expect(orchestrator.getState().recentError?.message).toContain('类型 LUNA_TASK');
+    expect(orchestrator.getState().recentError?.message).toContain('字段 validation_commands');
+    expect(options.git.captureBaseline).not.toHaveBeenCalled();
+    expect(options.governance?.applyAll).not.toHaveBeenCalled();
+    expect(options.architecture?.download).not.toHaveBeenCalled();
+    expect(options.git.syncGovernance).not.toHaveBeenCalled();
+    expect(options.git.syncCode).not.toHaveBeenCalled();
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+  });
+
+  it('refuses retry when the previous output requires new Sol output', async () => {
+    const invalidTask = taskText().replace('"validation_commands": ["npm test"]', '"validation_commands": "npm test"');
+    const observe = vi.fn(async () =>
+      observation(`${governanceText()}
+${invalidTask}`),
+    );
+    const options = baseOptions({ edge: { observe } });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    await orchestrator.runRound();
+
+    const retry = await orchestrator.retryCurrentStage();
+
+    expect(retry).toMatchObject({
+      status: 'PAUSED',
+      phase: 'PAUSED',
+      message: '当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。',
+    });
+    expect(orchestrator.getState()).toMatchObject({
+      active: false,
+      status: 'PAUSED',
+      phase: 'PAUSED',
+      recentError: { code: 'WRITING_BLOCK_INVALID_FIELD' },
+    });
+    expect(observe).toHaveBeenCalledOnce();
+    expect(options.git.captureBaseline).not.toHaveBeenCalled();
+    expect(options.governance?.applyAll).not.toHaveBeenCalled();
+    expect(options.architecture?.download).not.toHaveBeenCalled();
+    expect(options.git.syncGovernance).not.toHaveBeenCalled();
+    expect(options.git.syncCode).not.toHaveBeenCalled();
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+  });
+
   it('applies a governance-only round and does not invoke Luna', async () => {
     const options = baseOptions({ edge: { observe: vi.fn(async () => observation(governanceText())) } });
     const orchestrator = new MainOrchestrator(options);
@@ -942,6 +1045,331 @@ describe('P0 main orchestration', () => {
     });
     expect(options.codex.startTask).not.toHaveBeenCalled();
     expect(options.git.syncGovernance).not.toHaveBeenCalled();
+  });
+
+  it('retries only governance sync after the real applier has already changed files', async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), 'web-chat2codex-reconciliation-'));
+    const policyPath = join(repositoryRoot, 'docs', 'governance', 'policy.md');
+    await mkdir(join(repositoryRoot, 'docs', 'governance'), { recursive: true });
+    await writeFile(policyPath, 'Original policy', 'utf8');
+    const originalSha = createHash('sha256').update('Original policy', 'utf8').digest('hex');
+    const reconciliation = `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
+{
+  "schema_version": 1,
+  "status": "CHANGES_REQUIRED",
+  "baseline_commit": "base-commit",
+  "files": [
+    {
+      "path": "docs/governance/policy.md",
+      "action": "replace",
+      "reason": "clarify policy",
+      "sha256_before": "${originalSha}",
+      "content": "Updated policy"
+    }
+  ]
+}
+[/WRITING_BLOCK]`;
+    const apply = vi.fn(async (block) =>
+      applyGovernanceReconciliation(repositoryRoot, block, { runId: () => 'reconciliation-1' }),
+    );
+    let saved: OrchestratorState | null = null;
+    const options = baseOptions({
+      project: { ...baseOptions().project, localPath: repositoryRoot },
+      git: {
+        ...baseOptions().git,
+        captureBaseline: vi.fn(async () => ({ ...baseline, repositoryRoot })),
+      },
+      reconciliation: { apply },
+      stateStore: {
+        load: vi.fn(async () => saved),
+        save: vi.fn(async (state) => {
+          saved = state;
+        }),
+      },
+    });
+    vi.mocked(options.git.syncGovernance)
+      .mockRejectedValueOnce(
+        Object.assign(new Error('reconciliation commit failed'), {
+          code: 'GOVERNANCE_RECONCILIATION_COMMIT_FAILED',
+        }),
+      )
+      .mockResolvedValueOnce({
+        kind: 'governance',
+        commit: 'reconciliation-commit',
+        pushed: true,
+        remoteCommit: 'reconciliation-commit',
+        pushRetried: false,
+      });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+
+    const first = await orchestrator.runGovernanceReconciliation({
+      solOutput: reconciliation,
+      baseline: { ...baseline, repositoryRoot },
+    });
+
+    expect(first.status).toBe('PAUSED');
+    expect(orchestrator.getState()).toMatchObject({
+      active: false,
+      status: 'PAUSED',
+      phase: 'PAUSED',
+      recentError: { code: 'GOVERNANCE_RECONCILIATION_COMMIT_FAILED' },
+    });
+    expect(await readFile(policyPath, 'utf8')).toBe('Updated policy');
+    expect(apply).toHaveBeenCalledOnce();
+    expect(orchestrator.getState().pendingReconciliationSync).toMatchObject({
+      runId: 'reconciliation-1',
+      changedPaths: ['docs/governance/policy.md'],
+      outputKey: expect.any(String),
+      baseline: { repositoryRoot },
+    });
+    expect((saved as OrchestratorState | null)?.pendingReconciliationSync).toMatchObject({
+      runId: 'reconciliation-1',
+      changedPaths: ['docs/governance/policy.md'],
+    });
+    const pendingSnapshot = saved as unknown as OrchestratorState;
+    expect(JSON.stringify((saved as OrchestratorState | null)?.pendingReconciliationSync)).not.toContain(
+      'Updated policy',
+    );
+    expect(options.git.syncGovernance).toHaveBeenCalledOnce();
+    expect(options.governance?.applyAll).not.toHaveBeenCalled();
+    expect(options.git.syncCode).not.toHaveBeenCalled();
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+
+    const started = new MainOrchestrator({
+      ...options,
+      stateStore: {
+        load: vi.fn(async () => saved),
+        save: vi.fn(async () => undefined),
+      },
+    });
+    await started.start();
+    expect(started.getState()).toMatchObject({
+      active: true,
+      status: 'RUNNING',
+      phase: 'SYNCING_GOVERNANCE',
+      retryCount: 0,
+      pendingReconciliationSync: { runId: 'reconciliation-1' },
+    });
+    expect(options.git.syncGovernance).toHaveBeenCalledOnce();
+
+    const exhausted = new MainOrchestrator({
+      ...options,
+      stateStore: {
+        load: vi.fn(async () => ({ ...pendingSnapshot, retryCount: 3 })),
+        save: vi.fn(async () => undefined),
+      },
+    });
+    const exhaustedStart = await exhausted.start();
+    expect(exhaustedStart).toMatchObject({ status: 'PAUSED', message: expect.stringContaining('最多 3 次重试') });
+    expect(exhausted.getState()).toMatchObject({
+      active: false,
+      status: 'NEEDS_USER_ACTION',
+      retryCount: 3,
+      pendingReconciliationSync: { runId: 'reconciliation-1' },
+    });
+    expect(options.git.syncGovernance).toHaveBeenCalledOnce();
+
+    const restored = new MainOrchestrator(options);
+    await restored.initialize();
+    const retried = await restored.retryCurrentStage();
+
+    expect(retried).toMatchObject({ status: 'COMPLETED', phase: 'WAITING_FOR_SOL', taskId: null });
+    expect(apply).toHaveBeenCalledOnce();
+    expect(options.git.syncGovernance).toHaveBeenCalledTimes(2);
+    expect(options.git.syncGovernance).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        changeId: 'reconciliation-reconciliation-1',
+        changedPaths: ['docs/governance/policy.md'],
+        baseline: expect.objectContaining({ repositoryRoot }),
+      }),
+    );
+    expect(options.edge.observe).not.toHaveBeenCalled();
+    expect(options.governance?.applyAll).not.toHaveBeenCalled();
+    expect(options.git.syncCode).not.toHaveBeenCalled();
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+    expect(restored.getState()).toMatchObject({
+      active: true,
+      status: 'RUNNING',
+      phase: 'WAITING_FOR_SOL',
+      recentError: null,
+      commits: { local: 'reconciliation-commit', remote: 'reconciliation-commit' },
+    });
+    expect(restored.getState().pendingReconciliationSync).toBeNull();
+    expect((restored as unknown as { pendingReconciliationInput: unknown }).pendingReconciliationInput).toBeNull();
+    await rm(repositoryRoot, { recursive: true, force: true });
+  });
+
+  it('pauses safely when persisted reconciliation retry context is incomplete', async () => {
+    const initial = new MainOrchestrator(baseOptions()).getState();
+    const stored = {
+      ...initial,
+      active: false,
+      status: 'PAUSED',
+      phase: 'PAUSED',
+      recentError: { code: 'GOVERNANCE_RECONCILIATION_COMMIT_FAILED', message: 'sync failed' },
+      pendingReconciliationSync: { runId: 'reconciliation-1', changedPaths: [] },
+    } as never;
+    const syncGovernance = vi.fn(async () => ({
+      kind: 'governance' as const,
+      commit: 'should-not-run',
+      pushed: true,
+      remoteCommit: 'should-not-run',
+      pushRetried: false,
+    }));
+    const options = baseOptions({
+      git: { ...baseOptions().git, syncGovernance },
+      stateStore: {
+        load: vi.fn(async () => stored),
+        save: vi.fn(async () => undefined),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.initialize();
+
+    const retry = await orchestrator.retryCurrentStage();
+
+    expect(retry).toMatchObject({
+      status: 'PAUSED',
+      message: '治理一致性重试上下文不完整，请从治理一致性入口重新执行。',
+    });
+    expect(orchestrator.getState()).toMatchObject({
+      status: 'NEEDS_USER_ACTION',
+      recentError: { code: 'GOVERNANCE_RECONCILIATION_RETRY_CONTEXT_INVALID' },
+      pendingReconciliationSync: null,
+    });
+    expect(syncGovernance).not.toHaveBeenCalled();
+  });
+
+  it('rejects a tampered pending reconciliation baseline before Git sync', async () => {
+    const initial = new MainOrchestrator(baseOptions()).getState();
+    const stored = {
+      ...initial,
+      recentError: { code: 'GOVERNANCE_RECONCILIATION_COMMIT_FAILED', message: 'sync failed' },
+      pendingReconciliationSync: {
+        baseline: { ...baseline, head: 'tampered-head' },
+        runId: 'reconciliation-1',
+        changedPaths: ['docs/governance/policy.md'],
+        backupPaths: [],
+        outputKey: 'reconciliation-output',
+      },
+    } as never;
+    const captureBaseline = vi.fn(async () => baseline);
+    const syncGovernance = vi.fn(async () => ({
+      kind: 'governance' as const,
+      commit: 'should-not-run',
+      pushed: true,
+      remoteCommit: 'should-not-run',
+      pushRetried: false,
+    }));
+    const options = baseOptions({
+      git: { ...baseOptions().git, captureBaseline, syncGovernance },
+      stateStore: {
+        load: vi.fn(async () => stored),
+        save: vi.fn(async () => undefined),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+
+    const retry = await orchestrator.retryCurrentStage();
+
+    expect(retry).toMatchObject({ status: 'PAUSED', message: expect.stringContaining('基线') });
+    expect(orchestrator.getState()).toMatchObject({
+      status: 'PAUSED',
+      recentError: { code: 'BASELINE_CHANGED' },
+      pendingReconciliationSync: null,
+    });
+    expect(captureBaseline).toHaveBeenCalledOnce();
+    expect(syncGovernance).not.toHaveBeenCalled();
+  });
+
+  it('serializes reconciliation and an ordinary round through one orchestration lock', async () => {
+    const events: string[] = [];
+    let releaseApply!: () => void;
+    const applyGate = new Promise<void>((resolve) => {
+      releaseApply = resolve;
+    });
+    const apply = vi.fn(async () => {
+      events.push('apply:start');
+      await applyGate;
+      events.push('apply:end');
+      return { runId: 'reconciliation-serial', changedPaths: ['docs/governance/policy.md'], backupPaths: [] };
+    });
+    const options = baseOptions({
+      reconciliation: { apply },
+      edge: {
+        observe: vi.fn(async () => {
+          events.push('edge');
+          return observation(taskText());
+        }),
+      },
+    });
+    vi.mocked(options.git.syncGovernance).mockImplementation(async () => {
+      events.push('sync');
+      return {
+        kind: 'governance',
+        commit: 'serial-commit',
+        pushed: true,
+        remoteCommit: 'serial-commit',
+        pushRetried: false,
+      };
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+    const reconciliationRun = orchestrator.runGovernanceReconciliation({
+      solOutput: `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
+{
+  "schema_version": 1,
+  "status": "CHANGES_REQUIRED",
+  "baseline_commit": "base-commit",
+  "files": [{
+    "path": "docs/governance/policy.md",
+    "action": "replace",
+    "reason": "clarify policy",
+    "sha256_before": "0000000000000000000000000000000000000000000000000000000000000000",
+    "content": "Updated policy"
+  }]
+}
+[/WRITING_BLOCK]`,
+      baseline,
+    });
+    await vi.waitFor(() => expect(apply).toHaveBeenCalledOnce());
+
+    const ordinaryRun = orchestrator.runRound();
+    await Promise.resolve();
+    expect(options.edge.observe).not.toHaveBeenCalled();
+
+    releaseApply();
+    await expect(reconciliationRun).resolves.toMatchObject({ status: 'COMPLETED' });
+    await expect(ordinaryRun).resolves.toMatchObject({ status: 'PAUSED' });
+    expect(events.indexOf('sync')).toBeLessThan(events.indexOf('edge'));
+    expect(events.indexOf('apply:end')).toBeLessThan(events.indexOf('sync'));
+  });
+
+  it('counts governance reconciliation in dedicated parse diagnostics', async () => {
+    const reconciliation = `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
+{
+  "schema_version": 1,
+  "status": "PASS"
+}
+    [/WRITING_BLOCK]`;
+    const orchestrator = new MainOrchestrator(baseOptions());
+    await orchestrator.start();
+
+    await expect(
+      orchestrator.runGovernanceReconciliation({ solOutput: reconciliation, baseline }),
+    ).resolves.toMatchObject({
+      status: 'PASS',
+      reconciliationStatus: 'PASS',
+    });
+
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'parse-task')).toMatchObject({
+      state: 'COMPLETED',
+      summary: '已验证 1 个 Writing Block。',
+      details: ['治理一致性：1'],
+    });
   });
 
   it('recovers one context-limit event and does not create another recovery on polling', async () => {

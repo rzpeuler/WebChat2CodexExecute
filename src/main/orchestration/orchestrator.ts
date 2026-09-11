@@ -37,8 +37,11 @@ import {
   type OrchestratorState,
   type OrchestratorStateStore,
   type PendingCodeSyncState,
+  type PendingReconciliationSyncState,
   type SolMessageSource,
 } from './types.js';
+
+const MAX_RETRIES = 3;
 
 const DEFAULT_STATE: OrchestratorState = {
   version: 1,
@@ -55,8 +58,10 @@ const DEFAULT_STATE: OrchestratorState = {
   luna: { status: 'NOT_STARTED', sessionId: null },
   commits: { local: null, remote: null },
   recentError: null,
+  retryCount: 0,
   loopGraph: createLoopGraph(null, new Date(0).toISOString()),
   pendingCodeSync: null,
+  pendingReconciliationSync: null,
   activeSolSession: null,
 };
 
@@ -71,6 +76,7 @@ export class OrchestratorError extends Error {
 }
 
 type PendingCodeSync = PendingCodeSyncState;
+type PendingReconciliationSync = PendingReconciliationSyncState;
 
 export class MainOrchestrator implements Orchestrator {
   private readonly project: OrchestratorProject;
@@ -95,10 +101,15 @@ export class MainOrchestrator implements Orchestrator {
   private state: OrchestratorState = cloneState(DEFAULT_STATE);
   private baseline: Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>> | null = null;
   private pendingCodeSync: PendingCodeSync | null = null;
+  /** Retained only in memory so a retryable reconciliation sync failure can resume its original flow. */
+  private pendingReconciliationInput: GovernanceReconciliationRunInput | null = null;
+  private pendingReconciliationSync: PendingReconciliationSync | null = null;
   private loadPromise: Promise<void> | null = null;
   private initialized = false;
   private roundPromise: Promise<OrchestratorResult> | null = null;
   private reconciliationPromise: Promise<GovernanceReconciliationRunResult> | null = null;
+  private retryPromise: Promise<OrchestratorResult> | null = null;
+  private orchestrationTail: Promise<void> = Promise.resolve();
   private dashboardOperationPromise: Promise<void> | null = null;
   private readonly dashboardNavigationPromises = new Map<'open-edge' | 'open-project', Promise<void>>();
 
@@ -131,6 +142,7 @@ export class MainOrchestrator implements Orchestrator {
       const stored = await this.stateStore?.load();
       if (stored !== null && stored !== undefined && stored.version === 1) this.state = normalizeState(stored);
       this.pendingCodeSync = clonePendingCodeSync(this.state.pendingCodeSync);
+      this.pendingReconciliationSync = clonePendingReconciliationSync(this.state.pendingReconciliationSync);
       const interrupted = this.state.active || this.state.status === 'RUNNING';
       this.state.active = false;
       if (interrupted) {
@@ -179,8 +191,14 @@ export class MainOrchestrator implements Orchestrator {
   private dashboardActions(): DashboardActions {
     const roundBusy = this.roundPromise !== null;
     const reconciliationBusy = this.reconciliationPromise !== null;
-    const operationBusy = roundBusy || reconciliationBusy || this.dashboardOperationPromise !== null;
-    const hasRecoverableError = this.pendingCodeSync !== null || isRetryableDashboardError(this.state.recentError);
+    const operationBusy =
+      roundBusy || reconciliationBusy || this.retryPromise !== null || this.dashboardOperationPromise !== null;
+    const hasRecoverableError =
+      this.state.retryCount < MAX_RETRIES &&
+      (this.pendingCodeSync !== null ||
+        this.pendingReconciliationInput !== null ||
+        this.pendingReconciliationSync !== null ||
+        isRetryableDashboardError(this.state.recentError));
     const blockedBySol = dashboardNeedsNewSol(this.state.recentError);
     const callbackAvailable = (
       name: 'rebind' | 'governanceConsistencyCheck' | 'openEdge' | 'openProject' | 'viewReport',
@@ -238,6 +256,19 @@ export class MainOrchestrator implements Orchestrator {
 
   async start(): Promise<OrchestratorResult> {
     await this.initialize();
+    if (this.pendingReconciliationSync !== null) {
+      if (this.state.retryCount >= MAX_RETRIES) return this.pauseForRetryLimit();
+      this.state.active = true;
+      this.state.status = 'RUNNING';
+      this.state.phase = 'SYNCING_GOVERNANCE';
+      this.state.taskId = null;
+      this.state.recentError = null;
+      this.activateGraphNode('sync-governance', null);
+      this.touchState();
+      await this.persist();
+      return result('WAITING', this.state, '已恢复治理一致性同步上下文，请重试当前同步。');
+    }
+    this.clearPendingReconciliationRetry();
     if (this.pendingCodeSync !== null) {
       this.state.active = true;
       this.state.status = 'RUNNING';
@@ -245,14 +276,18 @@ export class MainOrchestrator implements Orchestrator {
       this.state.taskId = this.pendingCodeSync.taskId;
       this.activateGraphNode('sync-code', this.pendingCodeSync.taskId);
       this.state.recentError = null;
+      this.state.retryCount = 0;
       this.touchState();
       await this.persist();
       return result('WAITING', this.state, '已恢复代码同步，等待继续执行。');
     }
-    if (dashboardNeedsNewSol(this.state.recentError))
+    if (dashboardNeedsNewSol(this.state.recentError)) {
+      await this.persist();
       return result('PAUSED', this.state, '当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。');
+    }
     this.state.active = true;
     this.state.status = 'RUNNING';
+    this.state.retryCount = 0;
     this.state.phase =
       this.state.phase === 'IDLE' || this.state.phase === 'PAUSED' || this.state.phase === 'FAILED'
         ? 'WAITING_FOR_SOL'
@@ -277,25 +312,23 @@ export class MainOrchestrator implements Orchestrator {
 
   async retryCurrentStage(): Promise<OrchestratorResult> {
     await this.initialize();
-    this.state.active = true;
-    this.state.status = 'RUNNING';
-    if (this.pendingCodeSync !== null) {
-      this.state.phase = 'SYNCING_CODE';
-      this.state.taskId = this.pendingCodeSync.taskId;
-      this.activateGraphNode('sync-code', this.pendingCodeSync.taskId);
-    } else if (this.state.phase === 'PAUSED' || this.state.phase === 'FAILED') this.state.phase = 'WAITING_FOR_SOL';
-    if (this.state.phase === 'WAITING_FOR_SOL') this.resumeWaitingGraph();
-    this.state.recentError = null;
-    this.touchState();
-    await this.persist();
-    return this.runRound();
+    if (this.retryPromise !== null) return this.retryPromise;
+    const operation = this.withOrchestrationLock(() => this.processRetryCurrentStage());
+    this.retryPromise = operation;
+    try {
+      return await operation;
+    } finally {
+      this.retryPromise = null;
+    }
   }
 
   async runRound(): Promise<OrchestratorResult> {
     await this.initialize();
     if (this.roundPromise !== null) return this.roundPromise;
-    this.roundPromise = this.processRound().catch((error) =>
-      this.isTerminalFailure(error) ? this.failFor(error) : this.pauseFor(error, '当前阶段执行失败，已暂停。'),
+    this.roundPromise = this.withOrchestrationLock(() =>
+      this.processRound().catch((error) =>
+        this.isTerminalFailure(error) ? this.failFor(error) : this.pauseFor(error, '当前阶段执行失败，已暂停。'),
+      ),
     );
     try {
       return await this.roundPromise;
@@ -309,14 +342,25 @@ export class MainOrchestrator implements Orchestrator {
   ): Promise<GovernanceReconciliationRunResult> {
     await this.initialize();
     if (this.reconciliationPromise !== null) return this.reconciliationPromise;
-    this.reconciliationPromise = (async () => {
-      // A dashboard request can arrive while the polling timer has already
-      // entered a round. Let that round finish before touching governance.
-      if (this.roundPromise !== null) await this.roundPromise;
-      return this.processGovernanceReconciliation(input);
-    })().catch(async (error) => {
-      const paused = await this.pauseFor(error, '治理一致性检查已暂停，请检查协议、基线和文件状态后重试。');
-      return reconciliationResult('PAUSED', null, paused, null, [], [], null, null);
+    const retryInput = cloneGovernanceReconciliationInput(input);
+    this.reconciliationPromise = this.withOrchestrationLock(async () => {
+      this.clearPendingReconciliationRetry();
+      this.state.retryCount = 0;
+      this.pendingReconciliationInput = retryInput;
+      await this.persist();
+      try {
+        const completed = await this.processGovernanceReconciliation(retryInput);
+        this.clearPendingReconciliationRetry();
+        await this.persist();
+        return completed;
+      } catch (error) {
+        const retryable = isRetryableGovernanceReconciliationError(error);
+        if (this.pendingReconciliationSync !== null && retryable) this.pendingReconciliationInput = null;
+        else if (retryable) this.pendingReconciliationInput = retryInput;
+        else this.clearPendingReconciliationRetry();
+        const paused = await this.pauseFor(error, '治理一致性检查已暂停，请检查协议、基线和文件状态后重试。');
+        return reconciliationResult('PAUSED', null, paused, null, [], [], null, null);
+      }
     });
     try {
       return await this.reconciliationPromise;
@@ -373,6 +417,157 @@ export class MainOrchestrator implements Orchestrator {
     return tracked;
   }
 
+  private async processRetryCurrentStage(): Promise<OrchestratorResult> {
+    const recentError = this.state.recentError;
+    if (recentError?.code === 'GOVERNANCE_RECONCILIATION_RETRY_CONTEXT_INVALID')
+      return result('PAUSED', this.state, '治理一致性重试上下文不完整，请从治理一致性入口重新执行。');
+    if (dashboardNeedsNewSol(recentError)) {
+      this.clearPendingReconciliationRetry();
+      await this.persist();
+      return result('PAUSED', this.state, '当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。');
+    }
+
+    const reconciliationRetry =
+      this.pendingReconciliationInput !== null ||
+      this.pendingReconciliationSync !== null ||
+      isRetryableGovernanceReconciliationError(recentError);
+    if (reconciliationRetry) {
+      if (this.pendingReconciliationSync === null && this.pendingReconciliationInput === null)
+        return this.pauseForMissingReconciliationContext();
+      if (this.state.retryCount >= MAX_RETRIES) return this.pauseForRetryLimit();
+      this.state.retryCount += 1;
+      this.state.active = true;
+      this.state.status = 'RUNNING';
+      this.state.recentError = null;
+      await this.persist();
+      if (this.pendingReconciliationSync !== null) return this.retryPendingReconciliationSync();
+
+      const input = cloneGovernanceReconciliationInput(this.pendingReconciliationInput!);
+      await this.setPhase('PARSING', 'RUNNING', null);
+      try {
+        const completed = await this.processGovernanceReconciliation(input);
+        this.clearPendingReconciliationRetry();
+        this.state.retryCount = 0;
+        await this.persist();
+        return reconciliationOrchestratorResult(completed);
+      } catch (error) {
+        const retryable = isRetryableGovernanceReconciliationError(error);
+        if (this.pendingReconciliationSync !== null && retryable) this.pendingReconciliationInput = null;
+        else if (retryable) this.pendingReconciliationInput = input;
+        else this.clearPendingReconciliationRetry();
+        const paused = await this.pauseFor(error, '治理一致性检查已暂停，请检查协议、基线和文件状态后重试。');
+        return paused;
+      }
+    }
+
+    if (this.state.retryCount >= MAX_RETRIES) return this.pauseForRetryLimit();
+    this.clearPendingReconciliationRetry();
+    this.state.retryCount += 1;
+    this.state.active = true;
+    this.state.status = 'RUNNING';
+    if (this.pendingCodeSync !== null) {
+      this.state.phase = 'SYNCING_CODE';
+      this.state.taskId = this.pendingCodeSync.taskId;
+      this.activateGraphNode('sync-code', this.pendingCodeSync.taskId);
+    } else if (this.state.phase === 'PAUSED' || this.state.phase === 'FAILED') this.state.phase = 'WAITING_FOR_SOL';
+    if (this.state.phase === 'WAITING_FOR_SOL') this.resumeWaitingGraph();
+    this.state.recentError = null;
+    this.touchState();
+    await this.persist();
+    return this.processRound().catch((error) =>
+      this.isTerminalFailure(error) ? this.failFor(error) : this.pauseFor(error, '当前阶段执行失败，已暂停。'),
+    );
+  }
+
+  private async retryPendingReconciliationSync(): Promise<OrchestratorResult> {
+    const pending = this.pendingReconciliationSync;
+    if (pending === null) return this.pauseForMissingReconciliationContext();
+    try {
+      await this.assertPendingReconciliationBaseline(pending);
+      await this.setPhase('SYNCING_GOVERNANCE', 'RUNNING', null);
+      const sync = await this.git.syncGovernance({
+        baseline: pending.baseline,
+        changeId: `reconciliation-${safeSyncId(pending.runId)}`,
+        changedPaths: [...pending.changedPaths],
+      });
+      this.state.commits = { local: sync.commit, remote: sync.remoteCommit };
+      this.state.processedOutputKey = pending.outputKey;
+      this.baseline = {
+        ...pending.baseline,
+        head: sync.commit,
+        remoteTip: sync.remoteCommit ?? pending.baseline.remoteTip,
+        worktree: [],
+      };
+      this.clearPendingReconciliationRetry();
+      this.state.retryCount = 0;
+      await this.finishIndependentRound(true);
+      return result('COMPLETED', this.state, '治理一致性修改已应用、提交并同步。');
+    } catch (error) {
+      if (!isRetryableGovernanceReconciliationError(error)) this.clearPendingReconciliationRetry();
+      const paused = await this.pauseFor(error, '治理一致性同步已暂停，请检查 Git 状态后重试。');
+      return paused;
+    }
+  }
+
+  private async pauseForMissingReconciliationContext(): Promise<OrchestratorResult> {
+    this.clearPendingReconciliationRetry();
+    return this.pauseForCode(
+      'GOVERNANCE_RECONCILIATION_RETRY_CONTEXT_INVALID',
+      '治理一致性重试上下文不完整，请从治理一致性入口重新执行。',
+      true,
+      '请从治理一致性入口重新执行检查，不要直接重试当前阶段。',
+    );
+  }
+
+  private async assertPendingReconciliationBaseline(pending: PendingReconciliationSync): Promise<void> {
+    if (this.targetBranch !== undefined && pending.baseline.branch !== this.targetBranch)
+      throw new OrchestratorError('BASELINE_CHANGED', '待恢复治理一致性同步的目标分支与当前 targetBranch 不一致。');
+    const current = await this.git.captureBaseline(this.project.localPath, {
+      requireClean: false,
+      ...(this.targetBranch === undefined ? {} : { expectedBranch: this.targetBranch }),
+      ...(this.expectedRemoteUrl === undefined ? {} : { expectedRemoteUrl: this.expectedRemoteUrl }),
+    });
+    const sameRoot = resolve(current.repositoryRoot).toLowerCase() === resolve(this.project.localPath).toLowerCase();
+    const samePendingRoot =
+      resolve(current.repositoryRoot).toLowerCase() === resolve(pending.baseline.repositoryRoot).toLowerCase();
+    if (
+      !sameRoot ||
+      !samePendingRoot ||
+      current.remoteName !== pending.baseline.remoteName ||
+      current.remoteUrl !== pending.baseline.remoteUrl ||
+      current.branch !== pending.baseline.branch ||
+      current.head !== pending.baseline.head ||
+      current.remoteTip !== pending.baseline.remoteTip
+    ) {
+      throw new OrchestratorError(
+        'BASELINE_CHANGED',
+        '待恢复治理一致性同步的 repositoryRoot、分支、HEAD 或远端基线已变化，已拒绝 Git sync。',
+      );
+    }
+  }
+
+  private pauseForRetryLimit(): Promise<OrchestratorResult> {
+    return this.pauseForCode(
+      'RETRY_LIMIT_EXCEEDED',
+      `当前阶段已达到最多 ${MAX_RETRIES} 次重试，请检查状态后重新执行。`,
+      true,
+      '请检查 Git、工作区和 Sol 状态后重新发起治理一致性检查或新一轮任务。',
+    );
+  }
+
+  private withOrchestrationLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.orchestrationTail;
+    let release!: () => void;
+    const gate = new Promise<void>((resolveGate) => {
+      release = resolveGate;
+    });
+    this.orchestrationTail = previous.then(
+      () => gate,
+      () => gate,
+    );
+    return previous.then(operation, operation).finally(release);
+  }
+
   private async processGovernanceReconciliation(
     input: GovernanceReconciliationRunInput,
   ): Promise<GovernanceReconciliationRunResult> {
@@ -393,6 +588,10 @@ export class MainOrchestrator implements Orchestrator {
 
     await this.setPhase('PARSING', 'RUNNING', null);
     const parsed = parseWritingBlocks(input.solOutput);
+    this.updateGraphNode('parse-task', {
+      summary: `已验证 ${writingBlockCount(parsed)} 个 Writing Block。`,
+      details: [`治理一致性：${parsed.governanceReconciliation === null ? '无' : '1'}`],
+    });
     if (parsed.blocks.length !== 1 || parsed.governanceReconciliation === null) {
       throw new OrchestratorError(
         'GOVERNANCE_RECONCILIATION_PROTOCOL_INVALID',
@@ -430,6 +629,15 @@ export class MainOrchestrator implements Orchestrator {
     }
     await this.setPhase('APPLYING_UPDATES', 'RUNNING', null);
     const applied = await this.reconciliation.apply(reconciliation);
+    this.setPendingReconciliationSync({
+      baseline: input.baseline,
+      runId: applied.runId,
+      changedPaths: applied.changedPaths,
+      backupPaths: applied.backupPaths,
+      outputKey,
+    });
+    this.pendingReconciliationInput = null;
+    await this.persist();
     await this.setPhase('SYNCING_GOVERNANCE', 'RUNNING', null);
     const sync = await this.git.syncGovernance({
       baseline: input.baseline,
@@ -444,6 +652,8 @@ export class MainOrchestrator implements Orchestrator {
       remoteTip: sync.remoteCommit ?? input.baseline.remoteTip,
       worktree: [],
     };
+    this.clearPendingReconciliationRetry();
+    this.state.retryCount = 0;
     await this.finishIndependentRound(wasActive);
     return reconciliationResult(
       'COMPLETED',
@@ -480,6 +690,8 @@ export class MainOrchestrator implements Orchestrator {
 
   private async processRound(): Promise<OrchestratorResult> {
     if (!this.state.active) return result('IDLE', this.state, '编排器未运行。');
+    if (this.pendingReconciliationSync !== null && this.state.phase === 'SYNCING_GOVERNANCE')
+      return result('WAITING', this.state, '治理一致性同步上下文已恢复，请重试当前同步。');
     if (this.pendingCodeSync !== null && this.state.phase === 'SYNCING_CODE') return this.syncPendingCode();
 
     const waitingForNextOutput = this.state.phase === 'WAITING_FOR_SOL' && this.state.loopGraph.roundId !== null;
@@ -797,6 +1009,8 @@ export class MainOrchestrator implements Orchestrator {
     this.state.luna = { status: 'COMPLETED', sessionId: pending.sessionId };
     this.state.pendingCodeSync = null;
     this.pendingCodeSync = null;
+    this.clearPendingReconciliationRetry();
+    this.state.retryCount = 0;
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
     return result('COMPLETED', this.state, `任务 ${pending.taskId} 已完成并同步。`);
   }
@@ -952,6 +1166,8 @@ export class MainOrchestrator implements Orchestrator {
   }
 
   private async beginRound(): Promise<void> {
+    this.clearPendingReconciliationRetry();
+    this.state.retryCount = 0;
     const now = this.now().toISOString();
     this.state.loopGraph = createLoopGraph(`round-${this.state.revision + 1}-${this.now().getTime()}`, now);
     await this.setPhase('READING_SOL', 'RUNNING', null);
@@ -967,6 +1183,17 @@ export class MainOrchestrator implements Orchestrator {
   private setPendingCodeSync(pending: PendingCodeSync): void {
     this.pendingCodeSync = pending;
     this.state.pendingCodeSync = clonePendingCodeSync(pending);
+  }
+
+  private setPendingReconciliationSync(pending: PendingReconciliationSync): void {
+    this.pendingReconciliationSync = clonePendingReconciliationSync(pending);
+    this.state.pendingReconciliationSync = clonePendingReconciliationSync(pending);
+  }
+
+  private clearPendingReconciliationRetry(): void {
+    this.pendingReconciliationInput = null;
+    this.pendingReconciliationSync = null;
+    this.state.pendingReconciliationSync = null;
   }
 
   private resumeWaitingGraph(): void {
@@ -1098,6 +1325,7 @@ function cloneState(state: OrchestratorState): OrchestratorState {
     recentError: sanitized.recentError === null ? null : { ...sanitized.recentError },
     loopGraph: sanitized.loopGraph,
     pendingCodeSync: clonePendingCodeSync(state.pendingCodeSync),
+    pendingReconciliationSync: clonePendingReconciliationSync(state.pendingReconciliationSync),
     activeSolSession: state.activeSolSession === null ? null : { ...state.activeSolSession },
   };
 }
@@ -1107,6 +1335,7 @@ function normalizeState(state: OrchestratorState): OrchestratorState {
   return {
     ...DEFAULT_STATE,
     ...source,
+    retryCount: normalizeRetryCount(source.retryCount),
     architectureRevisions: Array.isArray(source.architectureRevisions) ? [...source.architectureRevisions] : [],
     luna: { ...DEFAULT_STATE.luna, ...source.luna },
     commits: { ...DEFAULT_STATE.commits, ...source.commits },
@@ -1114,6 +1343,7 @@ function normalizeState(state: OrchestratorState): OrchestratorState {
     loopGraph: sanitizeDashboardSnapshot(source.loopGraph === undefined ? {} : { loopGraph: source.loopGraph })
       .loopGraph,
     pendingCodeSync: normalizePendingCodeSync(source.pendingCodeSync),
+    pendingReconciliationSync: normalizePendingReconciliationSync(source.pendingReconciliationSync),
     activeSolSession:
       source.activeSolSession === null || source.activeSolSession === undefined ? null : { ...source.activeSolSession },
   };
@@ -1146,6 +1376,46 @@ function clonePendingCodeSync(value: unknown): PendingCodeSyncState | null {
     protectedPaths: [...pending.protectedPaths],
     baseline: { ...pending.baseline, worktree: [...pending.baseline.worktree] },
   };
+}
+
+function cloneGovernanceReconciliationInput(input: GovernanceReconciliationRunInput): GovernanceReconciliationRunInput {
+  return {
+    solOutput: input.solOutput,
+    baseline: { ...input.baseline, worktree: [...input.baseline.worktree] },
+  };
+}
+
+function clonePendingReconciliationSync(value: unknown): PendingReconciliationSync | null {
+  const pending = normalizePendingReconciliationSync(value);
+  if (pending === null) return null;
+  return {
+    ...pending,
+    changedPaths: [...pending.changedPaths],
+    backupPaths: [...pending.backupPaths],
+    baseline: { ...pending.baseline, worktree: [...pending.baseline.worktree] },
+  };
+}
+
+function normalizePendingReconciliationSync(value: unknown): PendingReconciliationSync | null {
+  if (!isRecord(value)) return null;
+  const runId = boundedPendingText(value.runId, 256);
+  const outputKey = boundedPendingText(value.outputKey, 128);
+  const baseline = normalizePendingBaseline(value.baseline);
+  const changedPaths = normalizeRequiredPendingStringArray(value.changedPaths, 512);
+  const backupPaths = normalizeRequiredPendingStringArray(value.backupPaths, 512);
+  if (runId === null || outputKey === null || baseline === null || changedPaths === null || backupPaths === null)
+    return null;
+  return { baseline, runId, outputKey, changedPaths, backupPaths };
+}
+
+function normalizeRequiredPendingStringArray(value: unknown, limit: number): string[] | null {
+  if (!Array.isArray(value) || value.length > limit) return null;
+  const normalized = normalizePendingStringArray(value, limit);
+  return normalized.length === value.length ? normalized : null;
+}
+
+function normalizeRetryCount(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_RETRIES ? value : 0;
 }
 
 function normalizePendingCodeSync(value: unknown): PendingCodeSyncState | null {
@@ -1286,8 +1556,18 @@ function writingBlockCount(parsed: ReturnType<typeof parseWritingBlocks>): numbe
     parsed.governanceChanges.length +
     parsed.architectureFreezes.length +
     (parsed.lunaTask === null ? 0 : 1) +
+    (parsed.governanceReconciliation === null ? 0 : 1) +
     parsed.blocked.length
   );
+}
+
+function reconciliationOrchestratorResult(run: GovernanceReconciliationRunResult): OrchestratorResult {
+  return {
+    status: run.status === 'PASS' ? 'NO_TASK' : run.status,
+    phase: run.phase,
+    taskId: null,
+    message: run.message,
+  };
 }
 
 function outputKeyFor(observation: EdgeSolObservation): string {
@@ -1346,6 +1626,21 @@ function isRetryableDashboardError(error: { code: string; message: string } | nu
   return /^(?:FAILED|TIMEOUT|NETWORK|SESSION|CLI|CODEX|LUNA|REPORT|TEST|GIT|PUSH|SYNC|CONTEXT|AUTH|PROCESS_|COMMAND_FAILED|DASHBOARD_COMMAND_FAILED|COMMIT_FAILED|GOVERNANCE_CHANGE_COMMIT_FAILED|GOVERNANCE_RECONCILIATION_COMMIT_FAILED|ARCHITECTURE_FREEZE_(?:FETCH_FAILED|CONTENT_UNREADABLE|COMMIT_FAILED)|EDGE_PROCESS_EXITED|GOVERNANCE_RECONCILIATION_(?:TIMEOUT|AUTH_REQUIRED|CONTEXT_LIMIT)|BLOCKED_EXTERNAL_SETUP)/i.test(
     error.code,
   );
+}
+
+const RETRYABLE_GOVERNANCE_RECONCILIATION_ERROR_CODES = new Set([
+  'COMMIT_FAILED',
+  'PUSH_FAILED',
+  'GOVERNANCE_RECONCILIATION_COMMIT_FAILED',
+  'GOVERNANCE_RECONCILIATION_PUSH_FAILED',
+  'GOVERNANCE_RECONCILIATION_SYNC_FAILED',
+  'GOVERNANCE_RECONCILIATION_TIMEOUT',
+  'GOVERNANCE_RECONCILIATION_AUTH_REQUIRED',
+  'GOVERNANCE_RECONCILIATION_CONTEXT_LIMIT',
+]);
+
+function isRetryableGovernanceReconciliationError(error: unknown): boolean {
+  return RETRYABLE_GOVERNANCE_RECONCILIATION_ERROR_CODES.has(errorCode(error));
 }
 
 function safeSyncId(value: string): string {

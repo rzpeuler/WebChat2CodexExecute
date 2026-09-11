@@ -57,6 +57,15 @@ export interface PendingCodeSyncState {
   outputKey: string;
 }
 
+/** Minimal JSON-safe context required to resume governance sync after apply succeeded. */
+export interface PendingReconciliationSyncState {
+  baseline: GitBaseline;
+  runId: string;
+  changedPaths: string[];
+  backupPaths: string[];
+  outputKey: string;
+}
+
 export interface OrchestratorState {
   version: 1;
   revision: number;
@@ -72,9 +81,11 @@ export interface OrchestratorState {
   luna: { status: string; sessionId: string | null };
   commits: { local: string | null; remote: string | null };
   recentError: { code: string; message: string } | null;
+  retryCount: number;
   /** The single persisted dashboard projection for the current orchestration round. */
   loopGraph: LoopGraphSnapshot;
   pendingCodeSync: PendingCodeSyncState | null;
+  pendingReconciliationSync: PendingReconciliationSyncState | null;
   activeSolSession: {
     sessionId: string;
     conversationId: string | null;

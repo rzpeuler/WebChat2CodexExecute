@@ -1,0 +1,141 @@
+import { describe, expect, it } from 'vitest';
+import { createRuntimeLifecycleController, createSingleFlightEnsure } from '../../src/main/automation-runtime.js';
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+describe('automation runtime lifecycle', () => {
+  it('shares concurrent Edge startup and rejects new startup after stop begins', async () => {
+    const startup = deferred<void>();
+    let starts = 0;
+    let blocked = false;
+    const ensure = createSingleFlightEnsure(
+      async () => {
+        starts += 1;
+        await startup.promise;
+      },
+      () => blocked,
+    );
+
+    const first = ensure();
+    const second = ensure();
+    expect(starts).toBe(1);
+    startup.resolve();
+    await Promise.all([first, second]);
+
+    blocked = true;
+    await expect(ensure()).rejects.toMatchObject({ code: 'RUNTIME_STOPPING' });
+  });
+
+  it('serializes polling and waits for an in-flight round before closing Edge', async () => {
+    const round = deferred<void>();
+    let runCount = 0;
+    let active = true;
+    let busy = true;
+    let closed = false;
+    const lifecycle = createRuntimeLifecycleController({
+      runRound: async () => {
+        runCount += 1;
+        await round.promise;
+        busy = false;
+      },
+      isActive: () => active,
+      isBusy: () => busy,
+      pause: async () => {
+        active = false;
+      },
+      close: () => {
+        closed = true;
+      },
+      intervalMs: 1,
+    });
+
+    lifecycle.startPolling();
+    lifecycle.startPolling();
+    await Promise.resolve();
+    expect(runCount).toBe(1);
+
+    const stopping = lifecycle.stop();
+    expect(closed).toBe(false);
+    expect(active).toBe(true);
+    round.resolve();
+    await stopping;
+
+    expect(closed).toBe(true);
+    expect(runCount).toBe(1);
+    await lifecycle.stop();
+  });
+
+  it('waits for an existing round before entering a mutually exclusive operation', async () => {
+    const round = deferred<void>();
+    let entered = false;
+    const lifecycle = createRuntimeLifecycleController({
+      runRound: async () => round.promise,
+      isActive: () => true,
+      isBusy: () => false,
+      pause: async () => undefined,
+      close: () => undefined,
+      intervalMs: 1,
+    });
+    lifecycle.startPolling();
+    await Promise.resolve();
+    const exclusive = lifecycle.withRoundExclusion(async () => {
+      entered = true;
+    });
+    await Promise.resolve();
+    expect(entered).toBe(false);
+    round.resolve();
+    await exclusive;
+    expect(entered).toBe(true);
+    await lifecycle.stop();
+  });
+
+  it('drains a tracked dashboard operation even when the command returns before its work is done', async () => {
+    const operation = deferred<void>();
+    let busy = true;
+    let closed = false;
+    const lifecycle = createRuntimeLifecycleController({
+      runRound: async () => undefined,
+      isActive: () => false,
+      isBusy: () => busy,
+      pause: async () => undefined,
+      close: () => {
+        closed = true;
+      },
+    });
+
+    void lifecycle.track(async () => {
+      await operation.promise;
+      busy = false;
+    });
+    const stopping = lifecycle.stop();
+    expect(closed).toBe(false);
+    operation.resolve();
+    await stopping;
+    expect(closed).toBe(true);
+  });
+
+  it('always closes Edge when pause fails and reports the failed stop', async () => {
+    let closed = false;
+    const pauseError = new Error('pause failed');
+    const lifecycle = createRuntimeLifecycleController({
+      runRound: async () => undefined,
+      isActive: () => true,
+      isBusy: () => false,
+      pause: async () => {
+        throw pauseError;
+      },
+      close: () => {
+        closed = true;
+      },
+    });
+
+    await expect(lifecycle.stop()).rejects.toBe(pauseError);
+    expect(closed).toBe(true);
+  });
+});

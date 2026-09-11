@@ -90,6 +90,22 @@ export class CdpConversationController implements SolConversationController {
     ) {
       throw new Error('A known Project, account, and allowed ChatGPT URL are required to send a message.');
     }
+    const targets = await this.transport.listTargets();
+    const target = targets.find(
+      (candidate) =>
+        candidate.id === input.conversation.targetId && candidate.type === 'page' && isAllowedChatGptUrl(candidate.url),
+    );
+    if (target === undefined) throw conversationIdentityChanged('The bound ChatGPT target is no longer available.');
+    const current = await this.adapter.sample(target.id);
+    if (
+      !isAllowedChatGptUrl(current.url) ||
+      current.url !== input.conversation.url ||
+      current.projectFingerprint !== input.conversation.projectFingerprint ||
+      current.accountFingerprint !== input.conversation.accountFingerprint ||
+      conversationIdFromUrl(current.url) !== input.conversation.conversationId
+    ) {
+      throw conversationIdentityChanged('The active ChatGPT target no longer matches the bound conversation.');
+    }
     const result = await this.transport.evaluate<{ sent?: boolean; inputHash?: string }>(
       input.conversation.targetId,
       sendMessageScript(input.text),
@@ -98,6 +114,12 @@ export class CdpConversationController implements SolConversationController {
       throw new Error('The original Sol input could not be submitted exactly.');
     }
   }
+}
+
+function conversationIdentityChanged(message: string): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string };
+  error.code = 'SESSION_CONVERSATION_IDENTITY_CHANGED';
+  return error;
 }
 
 export const NEW_CHAT_SCRIPT = `(() => {

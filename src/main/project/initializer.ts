@@ -13,6 +13,16 @@ import type {
   ProjectRemoteAccessCheckResult,
 } from '../../shared/contracts/project-initialization.js';
 import { compareCodePoints } from '../../shared/sorting.js';
+import {
+  stringifyWritingBlockTemplate,
+  WRITING_BLOCK_TEMPLATE_AUDIENCE,
+  WRITING_BLOCK_TEMPLATE_DIRECTORY,
+  WRITING_BLOCK_TEMPLATE_DOCUMENT_TYPE,
+  WRITING_BLOCK_TEMPLATE_FILENAMES,
+  WRITING_BLOCK_TEMPLATE_PATHS,
+  WRITING_BLOCK_TEMPLATE_VERSION,
+} from '../../shared/protocol/writing-block-templates.js';
+import type { WritingBlockType } from '../../shared/protocol/writing-block.js';
 import { assertSafeProjectPath, realProjectRoot } from '../security/path-safety.js';
 import type { GovernanceManifest } from '../governance/manifest.js';
 import { redactRemoteUrl } from './config.js';
@@ -22,7 +32,7 @@ const GOVERNANCE_DIRECTORY = 'docs/governance';
 const MANIFEST_PATH = `${GOVERNANCE_DIRECTORY}/governance-manifest.yaml`;
 const TOOL_DIRECTORY = '.web-chat2codex';
 const MANAGED_BY = 'web-chat2codex';
-const TEMPLATE_VERSION = 1;
+const TEMPLATE_VERSION = 2;
 
 export type ProjectInitializationErrorCode =
   | 'INVALID_INPUT'
@@ -34,6 +44,7 @@ export type ProjectInitializationErrorCode =
   | 'NESTED_GIT_REPOSITORY'
   | 'REMOTE_URL_INVALID'
   | 'REMOTE_CREDENTIALS_FORBIDDEN'
+  | 'BRANCH_INVALID'
   | 'CLONE_FAILED'
   | 'INITIALIZATION_DRIFT'
   | 'INITIALIZATION_FAILED';
@@ -68,9 +79,12 @@ export type ProjectInitializerExecFile = (
   options: ProjectInitializerExecOptions,
 ) => Promise<ProjectInitializerCommandResult>;
 
+export type ProjectInitializerRename = (sourcePath: string, targetPath: string) => Promise<void>;
+
 export interface ProjectInitializerOptions {
   execFile?: ProjectInitializerExecFile;
   runId?: () => string;
+  rename?: ProjectInitializerRename;
 }
 
 const STANDARD_DOCUMENTS = new Map<string, string>([
@@ -134,10 +148,27 @@ This policy is active through the \`docs/governance\` manifest only.
   ],
 ]);
 
+const writingBlockTemplateTypes = Object.keys(WRITING_BLOCK_TEMPLATE_FILENAMES) as WritingBlockType[];
+
 const STANDARD_MANIFEST: GovernanceManifest = {
   version: 1,
   managed_by: MANAGED_BY,
   template_version: TEMPLATE_VERSION,
+  governance_entry_point: GOVERNANCE_DIRECTORY,
+  documents: [
+    standardManifestDocument('governance-readme', 'README.md', 'entry-point'),
+    standardManifestDocument('project-rules', 'PROJECT_RULES.md', 'project-policy'),
+    standardManifestDocument('development-workflow', 'DEVELOPMENT_WORKFLOW.md', 'workflow'),
+    standardManifestDocument('agent-roles', 'AGENT_ROLES.md', 'roles'),
+    standardManifestDocument('git-policy', 'GIT_POLICY.md', 'git-policy'),
+    ...writingBlockTemplateTypes.map((type) => writingBlockManifestDocument(type)),
+  ],
+};
+
+const LEGACY_STANDARD_MANIFEST: GovernanceManifest = {
+  version: 1,
+  managed_by: MANAGED_BY,
+  template_version: 1,
   governance_entry_point: GOVERNANCE_DIRECTORY,
   documents: [
     standardManifestDocument('governance-readme', 'README.md', 'entry-point'),
@@ -159,10 +190,42 @@ function standardManifestDocument(id: string, fileName: string, type: string) {
   };
 }
 
+function writingBlockManifestDocument(type: WritingBlockType) {
+  return {
+    id: `writing-block-template-${type.toLowerCase().replaceAll('_', '-')}`,
+    path: WRITING_BLOCK_TEMPLATE_PATHS[type],
+    audience: [...WRITING_BLOCK_TEMPLATE_AUDIENCE],
+    version: WRITING_BLOCK_TEMPLATE_VERSION,
+    status: 'active' as const,
+    type: WRITING_BLOCK_TEMPLATE_DOCUMENT_TYPE,
+  };
+}
+
 const STANDARD_MANIFEST_SOURCE = stringify(STANDARD_MANIFEST);
-const STANDARD_PATHS = [...STANDARD_DOCUMENTS.keys(), 'governance-manifest.yaml'].map(
-  (fileName) => `${GOVERNANCE_DIRECTORY}/${fileName}`,
+const LEGACY_MANIFEST_SOURCE = stringify(LEGACY_STANDARD_MANIFEST);
+const WRITING_BLOCK_TEMPLATE_RELATIVE_DIRECTORY = WRITING_BLOCK_TEMPLATE_DIRECTORY.slice(
+  `${GOVERNANCE_DIRECTORY}/`.length,
 );
+
+const STANDARD_TEMPLATE_FILES = new Map<string, string>(
+  writingBlockTemplateTypes.map((type) => [
+    `${WRITING_BLOCK_TEMPLATE_RELATIVE_DIRECTORY}/${WRITING_BLOCK_TEMPLATE_FILENAMES[type]}`,
+    `${stringifyWritingBlockTemplate(type)}\n`,
+  ]),
+);
+
+const STANDARD_MANAGED_FILES = new Map<string, string>([
+  ...STANDARD_DOCUMENTS,
+  ['governance-manifest.yaml', STANDARD_MANIFEST_SOURCE],
+  ...STANDARD_TEMPLATE_FILES,
+]);
+
+const LEGACY_MANAGED_FILES = new Map<string, string>([
+  ...STANDARD_DOCUMENTS,
+  ['governance-manifest.yaml', LEGACY_MANIFEST_SOURCE],
+]);
+
+const STANDARD_PATHS = [...STANDARD_MANAGED_FILES.keys()].map((fileName) => `${GOVERNANCE_DIRECTORY}/${fileName}`);
 
 function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && 'code' in error && error.code === code;
@@ -316,7 +379,153 @@ function hasManagedMarker(source: string): boolean {
   }
 }
 
-async function assertManagedDirectoryUnchanged(projectRoot: string, governancePath: string): Promise<boolean> {
+type ManagedDirectoryState = 'current' | 'legacy' | false;
+
+function expectedManagedEntries(files: ReadonlyMap<string, string>): string[] {
+  const directories = new Set<string>();
+  for (const fileName of files.keys()) {
+    const segments = fileName.split('/');
+    for (let index = 1; index < segments.length; index += 1) {
+      directories.add(`${segments.slice(0, index).join('/')}/`);
+    }
+  }
+  return uniqueSorted([...directories, ...files.keys()]);
+}
+
+async function listManagedEntries(directoryPath: string, currentPath = directoryPath): Promise<string[]> {
+  const entries = await readdir(currentPath, { withFileTypes: true });
+  const paths: string[] = [];
+  for (const entry of entries.sort((left, right) => compareCodePoints(left.name, right.name))) {
+    const entryPath = join(currentPath, entry.name);
+    const entryRelativePath = relativeProjectPath(directoryPath, entryPath);
+    if (entry.isSymbolicLink()) {
+      paths.push(`${entryRelativePath}:symbolic-link`);
+    } else if (entry.isDirectory()) {
+      paths.push(`${entryRelativePath}/`);
+      paths.push(...(await listManagedEntries(directoryPath, entryPath)));
+    } else if (entry.isFile()) {
+      paths.push(entryRelativePath);
+    } else {
+      paths.push(`${entryRelativePath}:unsafe-entry`);
+    }
+  }
+  return paths;
+}
+
+interface GovernanceDirectorySnapshot {
+  state: 'empty-directory' | 'nonempty-directory';
+  entries: string[];
+  fileContents: ReadonlyMap<string, string>;
+}
+
+function managedEntryPath(entry: string): string {
+  const annotation = entry.endsWith(':symbolic-link')
+    ? '（符号链接）'
+    : entry.endsWith(':unsafe-entry')
+      ? '（不安全条目）'
+      : '';
+  const path = entry.replace(/:(?:symbolic-link|unsafe-entry)$/, '').replace(/\/$/, '');
+  return `${GOVERNANCE_DIRECTORY}/${path}${annotation}`;
+}
+
+function isManagedFileEntry(entry: string): boolean {
+  return !entry.endsWith('/') && !entry.endsWith(':symbolic-link') && !entry.endsWith(':unsafe-entry');
+}
+
+async function captureGovernanceDirectorySnapshot(
+  projectRoot: string,
+  governancePath: string,
+): Promise<GovernanceDirectorySnapshot> {
+  const state = await pathState(governancePath);
+  if (state !== 'empty-directory' && state !== 'nonempty-directory') {
+    throw new ProjectInitializationError('PATH_UNSAFE', '安装前无法确认现有治理目录状态。');
+  }
+  let entries: string[];
+  try {
+    entries = await listManagedEntries(governancePath);
+  } catch (error) {
+    throw new ProjectInitializationError('PATH_UNSAFE', '安装前无法检查现有治理目录。', { cause: error });
+  }
+  const fileContents = new Map<string, string>();
+  try {
+    for (const entry of entries.filter(isManagedFileEntry)) {
+      fileContents.set(entry, await readFile(join(governancePath, ...entry.split('/')), 'utf8'));
+    }
+  } catch (error) {
+    throw new ProjectInitializationError('PATH_UNSAFE', '安装前无法读取现有治理文件。', { cause: error });
+  }
+  await assertSafeProjectPath(projectRoot, governancePath);
+  return { state, entries, fileContents };
+}
+
+async function assertGovernanceDirectorySnapshotUnchanged(
+  governancePath: string,
+  snapshot: GovernanceDirectorySnapshot | null,
+): Promise<void> {
+  const currentState = await pathState(governancePath);
+  if (snapshot === null) {
+    if (currentState !== 'missing') {
+      throw new ProjectInitializationError(
+        'INITIALIZATION_DRIFT',
+        '治理目录在安装期间发生变化，已停止安装。请先检查 details.paths，再手动处理或从备份恢复。',
+        { paths: [GOVERNANCE_DIRECTORY] },
+      );
+    }
+    return;
+  }
+
+  if (currentState !== snapshot.state) {
+    throw new ProjectInitializationError(
+      'INITIALIZATION_DRIFT',
+      '治理目录在安装期间发生变化，已停止覆盖。请先检查 details.paths，再手动处理或从备份恢复。',
+      { paths: [GOVERNANCE_DIRECTORY] },
+    );
+  }
+  let currentEntries: string[];
+  try {
+    currentEntries = await listManagedEntries(governancePath);
+  } catch (error) {
+    throw new ProjectInitializationError('PATH_UNSAFE', '安装前无法再次检查现有治理目录。', { cause: error });
+  }
+  const changedEntries = uniqueSorted([
+    ...snapshot.entries.filter((entry) => !currentEntries.includes(entry)),
+    ...currentEntries.filter((entry) => !snapshot.entries.includes(entry)),
+  ]);
+  const changedFiles: string[] = [];
+  for (const entry of snapshot.entries.filter(isManagedFileEntry)) {
+    if (!currentEntries.includes(entry)) continue;
+    try {
+      const current = await readFile(join(governancePath, ...entry.split('/')), 'utf8');
+      if (current !== snapshot.fileContents.get(entry)) changedFiles.push(entry);
+    } catch {
+      changedFiles.push(entry);
+    }
+  }
+  const changedPaths = uniqueSorted([...changedEntries, ...changedFiles].map(managedEntryPath));
+  if (changedPaths.length > 0) {
+    throw new ProjectInitializationError(
+      'INITIALIZATION_DRIFT',
+      '治理目录在安装期间发生变化，已停止覆盖。请先检查 details.paths，再手动处理或从备份恢复。',
+      { paths: changedPaths },
+    );
+  }
+}
+
+function manifestTemplateVersion(source: string): string | number | null {
+  try {
+    const value: unknown = parse(source);
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+    const version = (value as Record<string, unknown>).template_version;
+    return typeof version === 'string' || typeof version === 'number' ? version : null;
+  } catch {
+    return null;
+  }
+}
+
+async function assertManagedDirectoryUnchanged(
+  projectRoot: string,
+  governancePath: string,
+): Promise<ManagedDirectoryState> {
   const manifestPath = join(governancePath, 'governance-manifest.yaml');
   let source: string;
   try {
@@ -327,32 +536,34 @@ async function assertManagedDirectoryUnchanged(projectRoot: string, governancePa
   }
   if (!hasManagedMarker(source)) return false;
 
-  const expectedNames = uniqueSorted([...STANDARD_DOCUMENTS.keys(), 'governance-manifest.yaml']);
-  let actualNames: string[];
+  let actualEntries: string[];
   try {
-    const entries = await readdir(governancePath, { withFileTypes: true });
-    if (entries.some((entry) => !entry.isFile() || entry.isSymbolicLink())) {
-      throw new ProjectInitializationError(
-        'INITIALIZATION_DRIFT',
-        'Managed governance directory contains unexpected or unsafe entries',
-      );
-    }
-    actualNames = entries.map((entry) => entry.name).sort(compareCodePoints);
+    actualEntries = await listManagedEntries(governancePath);
   } catch (error) {
     if (error instanceof ProjectInitializationError) throw error;
     throw new ProjectInitializationError('PATH_UNSAFE', 'Could not inspect the managed governance directory');
   }
 
-  if (actualNames.length !== expectedNames.length || actualNames.some((name, index) => name !== expectedNames[index])) {
+  const currentStructure = expectedManagedEntries(STANDARD_MANAGED_FILES);
+  const legacyStructure = expectedManagedEntries(LEGACY_MANAGED_FILES);
+  const isLegacyVersion = manifestTemplateVersion(source) === 1;
+  const expectedStructure = isLegacyVersion ? legacyStructure : currentStructure;
+  const isExpectedStructure =
+    actualEntries.length === expectedStructure.length &&
+    actualEntries.every((entry, index) => entry === expectedStructure[index]);
+  if (!isExpectedStructure) {
+    const missingPaths = expectedStructure.filter((entry) => !actualEntries.includes(entry)).map(managedEntryPath);
+    const extraPaths = actualEntries.filter((entry) => !expectedStructure.includes(entry)).map(managedEntryPath);
     throw new ProjectInitializationError(
       'INITIALIZATION_DRIFT',
-      'Managed governance directory differs from the standard template set',
+      '治理目录结构已发生漂移，发现缺失或多余的治理文件/模板。请先检查 details.paths，再手动处理或从备份恢复。',
+      { paths: uniqueSorted([...missingPaths, ...extraPaths]) },
     );
   }
 
+  const expectedFiles = isLegacyVersion ? LEGACY_MANAGED_FILES : STANDARD_MANAGED_FILES;
   const mismatches: string[] = [];
-  if (source !== STANDARD_MANIFEST_SOURCE) mismatches.push(MANIFEST_PATH);
-  for (const [fileName, expected] of STANDARD_DOCUMENTS) {
+  for (const [fileName, expected] of expectedFiles) {
     try {
       const actual = await readFile(join(governancePath, fileName), 'utf8');
       if (actual !== expected) mismatches.push(`${GOVERNANCE_DIRECTORY}/${fileName}`);
@@ -365,23 +576,24 @@ async function assertManagedDirectoryUnchanged(projectRoot: string, governancePa
     }
   }
   if (mismatches.length > 0) {
-    throw new ProjectInitializationError('INITIALIZATION_DRIFT', 'Managed governance files have drifted', {
-      paths: mismatches,
-    });
+    throw new ProjectInitializationError(
+      'INITIALIZATION_DRIFT',
+      isLegacyVersion
+        ? '发现托管治理 v1 文件已被修改，拒绝自动升级。请先检查 details.paths，再手动处理或从备份恢复。'
+        : '发现托管治理文件或 Writing Block 模板已被修改。请先检查 details.paths，再手动处理或从备份恢复；初始化不会覆盖这些修改。',
+      { paths: mismatches },
+    );
   }
   await assertSafeProjectPath(projectRoot, manifestPath);
-  return true;
+  return isLegacyVersion ? 'legacy' : 'current';
 }
 
 async function writeStandardGovernance(stageGovernancePath: string): Promise<void> {
-  await mkdir(stageGovernancePath, { recursive: true });
-  for (const [fileName, contents] of STANDARD_DOCUMENTS) {
-    await writeFile(join(stageGovernancePath, fileName), contents, { encoding: 'utf8', flag: 'wx' });
+  for (const [fileName, contents] of STANDARD_MANAGED_FILES) {
+    const targetPath = join(stageGovernancePath, ...fileName.split('/'));
+    await mkdir(dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, contents, { encoding: 'utf8', flag: 'wx' });
   }
-  await writeFile(join(stageGovernancePath, 'governance-manifest.yaml'), STANDARD_MANIFEST_SOURCE, {
-    encoding: 'utf8',
-    flag: 'wx',
-  });
 }
 
 function assertRunId(value: string): string {
@@ -394,10 +606,12 @@ function assertRunId(value: string): string {
 export class ProjectInitializer {
   private readonly execFile: ProjectInitializerExecFile;
   private readonly createRunId: () => string;
+  private readonly renamePath: ProjectInitializerRename;
 
   constructor(options: ProjectInitializerOptions = {}) {
     this.execFile = options.execFile ?? defaultExecFile;
     this.createRunId = options.runId ?? randomUUID;
+    this.renamePath = options.rename ?? rename;
   }
 
   async checkRemoteAccess(input: ProjectRemoteAccessCheckInput): Promise<ProjectRemoteAccessCheckResult> {
@@ -490,12 +704,20 @@ export class ProjectInitializer {
     }
 
     const remoteUrl = validateRemoteUrl(input.remoteUrl);
+    const targetBranch = input.targetBranch;
+    if (targetBranch !== undefined && !isValidBranchName(targetBranch)) {
+      throw new ProjectInitializationError('BRANCH_INVALID', 'Clone target branch is invalid');
+    }
     try {
-      await this.execFile('git', ['clone', '--', remoteUrl, targetDirectory], {
-        cwd: canonicalParent,
-        shell: false,
-        windowsHide: true,
-      });
+      await this.execFile(
+        'git',
+        ['clone', ...(targetBranch === undefined ? [] : ['--branch', targetBranch]), '--', remoteUrl, targetDirectory],
+        {
+          cwd: canonicalParent,
+          shell: false,
+          windowsHide: true,
+        },
+      );
     } catch {
       throw new ProjectInitializationError('CLONE_FAILED', 'Git clone failed');
     }
@@ -572,7 +794,7 @@ export class ProjectInitializer {
       await assertSafeProjectPath(projectRoot, governancePath).catch(() => {
         throw new ProjectInitializationError('PATH_UNSAFE', 'Existing governance directory is unsafe');
       });
-      if (await assertManagedDirectoryUnchanged(projectRoot, governancePath)) {
+      if ((await assertManagedDirectoryUnchanged(projectRoot, governancePath)) === 'current') {
         return {
           mode,
           projectRoot,
@@ -583,6 +805,9 @@ export class ProjectInitializer {
         };
       }
     }
+
+    const governanceSnapshot =
+      existingState === 'missing' ? null : await captureGovernanceDirectorySnapshot(projectRoot, governancePath);
 
     const runId = assertRunId(this.createRunId());
     const stageRunPath = join(projectRoot, TOOL_DIRECTORY, 'staging', runId);
@@ -597,7 +822,10 @@ export class ProjectInitializer {
       });
     }
     if ((await pathState(stageRunPath)) !== 'missing' || (await pathState(backupPath)) !== 'missing') {
-      throw new ProjectInitializationError('INITIALIZATION_FAILED', 'Initialization run path already exists');
+      throw new ProjectInitializationError('INITIALIZATION_FAILED', '初始化运行路径已存在，未安装治理模板。', {
+        backupPath: null,
+        recovery: '原有治理目录未被修改，可以更换运行 ID 后重试。',
+      });
     }
 
     let backupInstalled = false;
@@ -605,30 +833,67 @@ export class ProjectInitializer {
       await writeStandardGovernance(stageGovernancePath);
       await mkdir(dirname(governancePath), { recursive: true });
       if (existingState !== 'missing') {
+        await assertGovernanceDirectorySnapshotUnchanged(governancePath, governanceSnapshot);
         await mkdir(dirname(backupPath), { recursive: true });
-        await rename(governancePath, backupPath);
+        try {
+          await assertSafeProjectPath(projectRoot, governancePath);
+          await assertSafeProjectPath(projectRoot, backupPath);
+          await assertGovernanceDirectorySnapshotUnchanged(governancePath, governanceSnapshot);
+          await this.renamePath(governancePath, backupPath);
+        } catch (error) {
+          throw new ProjectInitializationError('INITIALIZATION_FAILED', '备份现有治理目录失败，未覆盖原目录。', {
+            backupPath: null,
+            recovery: '原有治理目录仍在原位置，请检查文件占用后重试。',
+            cause: error,
+          });
+        }
         backupInstalled = true;
       }
       try {
-        await rename(stageGovernancePath, governancePath);
-      } catch (error) {
-        if (backupInstalled) await rename(backupPath, governancePath);
-        throw error;
+        await assertGovernanceDirectorySnapshotUnchanged(governancePath, null);
+        await assertSafeProjectPath(projectRoot, governancePath);
+        await this.renamePath(stageGovernancePath, governancePath);
+      } catch (installError) {
+        if (!backupInstalled) {
+          throw new ProjectInitializationError('INITIALIZATION_FAILED', '安装治理模板失败，原有目录未被覆盖。', {
+            backupPath: null,
+            recovery: '原有治理目录未被修改，可以检查错误后重试。',
+            cause: installError,
+          });
+        }
+        try {
+          await this.renamePath(backupPath, governancePath);
+          backupInstalled = false;
+        } catch (rollbackError) {
+          throw new ProjectInitializationError('INITIALIZATION_FAILED', '治理模板安装失败且原目录回滚失败。', {
+            backupPath: backupRelativePath,
+            recovery: '请使用该备份路径恢复 docs/governance，然后检查文件占用或并发修改。',
+            cause: rollbackError,
+            installError,
+          });
+        }
+        throw new ProjectInitializationError('INITIALIZATION_FAILED', '治理模板安装失败，原目录已回滚。', {
+          backupPath: null,
+          recovery: '原有治理目录已恢复，可以检查错误后重试。',
+          cause: installError,
+        });
       }
     } catch (error) {
       if (error instanceof ProjectInitializationError) throw error;
-      throw new ProjectInitializationError('INITIALIZATION_FAILED', 'Could not install standard governance templates');
+      throw new ProjectInitializationError('INITIALIZATION_FAILED', '安装标准治理模板失败。', {
+        backupPath: backupInstalled ? backupRelativePath : null,
+        recovery: backupInstalled
+          ? '请使用该备份路径恢复 docs/governance。'
+          : '原有治理目录未被修改，可以检查错误后重试。',
+        cause: error,
+      });
     } finally {
       await rm(stageRunPath, { recursive: true, force: true }).catch(() => undefined);
     }
 
+    // Backups are recovery material only. They intentionally remain local and
+    // are never handed to Git as changed paths.
     const changedPaths = [...STANDARD_PATHS, ...originalPaths];
-    if (backupInstalled) {
-      for (const originalPath of originalPaths) {
-        const suffix = originalPath.slice(`${GOVERNANCE_DIRECTORY}/`.length);
-        changedPaths.push(`${backupRelativePath}/${suffix}`);
-      }
-    }
     return {
       mode,
       projectRoot,
@@ -638,4 +903,38 @@ export class ProjectInitializer {
       idempotent: false,
     };
   }
+}
+
+function isValidBranchName(branch: string): boolean {
+  const components = branch.split('/');
+  return (
+    branch.trim() === branch &&
+    branch !== '' &&
+    branch !== 'HEAD' &&
+    components.every(
+      (component) =>
+        component !== '' &&
+        component !== '.' &&
+        component !== '..' &&
+        !component.startsWith('.') &&
+        !component.startsWith('-') &&
+        !component.endsWith('.lock'),
+    ) &&
+    !branch.includes('..') &&
+    !branch.includes('~') &&
+    !branch.includes('^') &&
+    !branch.includes(':') &&
+    !branch.includes('\\') &&
+    !branch.includes(' ') &&
+    !branch.includes('*') &&
+    !branch.includes('?') &&
+    !branch.includes('[') &&
+    !branch.includes('//') &&
+    !branch.startsWith('/') &&
+    !branch.endsWith('/') &&
+    !branch.endsWith('.') &&
+    !branch.endsWith('.lock') &&
+    !branch.includes('@{') &&
+    !/[\u0000-\u001f\u007f]/.test(branch)
+  );
 }

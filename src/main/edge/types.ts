@@ -54,6 +54,7 @@ export interface EdgeProfileOptions {
   onProcessExit?: (cause: 'exit' | 'error') => void;
   ownershipFilePath?: string;
   ownershipProbe?: (port: number, ownership: EdgeProfileOwnership) => Promise<boolean>;
+  ownershipTimeoutMs?: number;
   ownershipFetchImpl?: typeof fetch;
   ownershipWebSocketFactory?: (url: string) => WebSocket;
 }

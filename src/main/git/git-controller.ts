@@ -26,6 +26,8 @@ import {
 
 const defaultExecFileCallback = promisify(execFileCallback);
 const DEFAULT_PROTECTED_PATHS = ['docs/superpowers', 'docs/superpowers/**'];
+const DEFAULT_EXCLUDED_PATHS = ['.web-chat2codex/backups', '.web-chat2codex/backups/**'];
+const BACKUP_ROOT = '.web-chat2codex/backups';
 
 interface GitSnapshot extends Omit<GitBaseline, 'remoteTip'> {
   worktree: string[];
@@ -91,14 +93,31 @@ function isValidRelativePath(path: string): boolean {
 }
 
 function isValidBranchName(branch: string): boolean {
+  const components = branch.split('/');
   return (
+    branch.trim() === branch &&
     branch !== '' &&
     branch !== 'HEAD' &&
+    components.every(
+      (component) =>
+        component !== '' &&
+        component !== '.' &&
+        component !== '..' &&
+        !component.startsWith('.') &&
+        !component.startsWith('-') &&
+        !component.endsWith('.lock'),
+    ) &&
     !branch.includes('..') &&
     !branch.includes('~') &&
     !branch.includes('^') &&
     !branch.includes(':') &&
     !branch.includes('\\') &&
+    !branch.includes(' ') &&
+    !branch.includes('*') &&
+    !branch.includes('?') &&
+    !branch.includes('[') &&
+    !branch.includes('//') &&
+    !/[\u0000-\u001f\u007f]/.test(branch) &&
     !branch.startsWith('/') &&
     !branch.endsWith('/') &&
     !branch.endsWith('.') &&
@@ -126,10 +145,18 @@ function assertSafePathList(paths: string[], label: string): string[] {
   if (invalid !== undefined) {
     throw new GitControllerError('UNAUTHORIZED_CHANGE', `${label} contains an unsafe path`, { paths: [invalid] });
   }
+  const excluded = normalized.find(
+    (path) => matchesPath(BACKUP_ROOT, path) || DEFAULT_EXCLUDED_PATHS.some((pattern) => matchesPath(path, pattern)),
+  );
+  if (excluded !== undefined) {
+    throw new GitControllerError('PROTECTED_PATH', `${label} may not include local recovery backups`, {
+      paths: [excluded],
+    });
+  }
   return [...new Set(normalized)];
 }
 
-function parseStatus(output: string): string[] {
+function parseStatus(output: string, excludedPaths: readonly string[] = []): string[] {
   const entries = output.split('\0').filter((entry) => entry.length > 0);
   const paths: string[] = [];
   for (let index = 0; index < entries.length; index += 1) {
@@ -142,7 +169,7 @@ function parseStatus(output: string): string[] {
       index += 1;
     }
   }
-  return [...new Set(paths)];
+  return [...new Set(paths)].filter((path) => !excludedPaths.some((pattern) => matchesPath(path, pattern)));
 }
 
 function commitMessageForGovernance(changeId: string): string {
@@ -241,7 +268,9 @@ export class GitController {
     let commit = existing;
     if (commit === null) {
       this.assertWorktreePaths(current.worktree, allowedPaths, []);
-      await this.run(['add', '--', ...allowedPaths], current.repositoryRoot);
+      const stagePaths = current.worktree;
+      if (stagePaths.length === 0) throw new GitControllerError('NO_CHANGES', 'Governance sync has no staged changes');
+      await this.run(['add', '--', ...stagePaths], current.repositoryRoot);
       commit = await this.commit(message, current.repositoryRoot);
     } else if (current.worktree.length > 0) {
       throw new GitControllerError(
@@ -275,6 +304,7 @@ export class GitController {
       throw new GitControllerError('BRANCH_MISMATCH', 'Initialization target branch is invalid');
     const status = parseStatus(
       await this.run(['status', '--porcelain=v1', '--untracked-files=all', '-z'], repositoryRoot),
+      DEFAULT_EXCLUDED_PATHS,
     );
     this.assertWorktreePaths(status, allowedPaths, DEFAULT_PROTECTED_PATHS);
     await this.loadPendingPushState();
@@ -319,8 +349,10 @@ export class GitController {
       }
       commit = currentHead;
     } else {
+      const stagePaths = status;
+      if (stagePaths.length === 0) throw new GitControllerError('NO_CHANGES', 'Initialization has no staged changes');
       if (branchOutput.trim() !== branch) await this.run(['branch', '-M', branch], repositoryRoot);
-      await this.run(['add', '--', ...allowedPaths], repositoryRoot);
+      await this.run(['add', '--', ...stagePaths], repositoryRoot);
       commit = await this.commit('chore(governance): initialize', repositoryRoot);
     }
 
@@ -434,7 +466,23 @@ export class GitController {
     const key = pendingPushKey(baseline);
     const pendingPush = await this.pendingPushState.read(key);
     const isPendingPush = pendingPush !== null && this.matchesPendingPush(pendingPush, baseline, commit);
-    const remoteTip = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
+    let remoteTip: string | null;
+    try {
+      remoteTip = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
+    } catch (error) {
+      await this.rememberPendingPush(key, baseline, commit);
+      throw new GitControllerError(
+        'PUSH_FAILED',
+        'The local commit was retained because the remote baseline could not be verified',
+        {
+          localCommit: commit,
+          remoteName: baseline.remoteName,
+          remoteUrl: baseline.remoteUrl,
+          uncertain: true,
+        },
+        { cause: error },
+      );
+    }
     if (remoteTip === commit) {
       await this.pendingPushState.clear(key, commit);
       return { kind, commit, pushed: true, remoteCommit: commit, pushRetried: false };
@@ -475,7 +523,22 @@ export class GitController {
       await this.rememberPendingPush(key, baseline, commit);
       if (error.details.uncertain !== true) throw error;
 
-      const observed = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
+      let observed: string | null;
+      try {
+        observed = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
+      } catch (error) {
+        throw new GitControllerError(
+          'PUSH_FAILED',
+          'The push result could not be confirmed; the local commit remains pending',
+          {
+            localCommit: commit,
+            remoteName: baseline.remoteName,
+            remoteUrl: baseline.remoteUrl,
+            uncertain: true,
+          },
+          { cause: error },
+        );
+      }
       if (observed === commit) {
         await this.pendingPushState.clear(key, commit);
         return { kind, commit, pushed: true, remoteCommit: observed, pushRetried };
@@ -489,7 +552,23 @@ export class GitController {
         }
         throw retryError;
       }
-      const afterRetry = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
+      let afterRetry: string | null;
+      try {
+        afterRetry = await this.queryRemoteAfterFetch(repositoryRoot, baseline);
+      } catch (error) {
+        await this.rememberPendingPush(key, baseline, commit);
+        throw new GitControllerError(
+          'PUSH_FAILED',
+          'The retry push result could not be confirmed; the local commit remains pending',
+          {
+            localCommit: commit,
+            remoteName: baseline.remoteName,
+            remoteUrl: baseline.remoteUrl,
+            uncertain: true,
+          },
+          { cause: error },
+        );
+      }
       if (afterRetry !== commit) {
         await this.rememberPendingPush(key, baseline, commit);
         throw new GitControllerError('PUSH_FAILED', 'Push response remained unconfirmed after retry', {
@@ -725,7 +804,7 @@ export class GitController {
       remoteUrl: normalizedRemote,
       branch: branch.trim(),
       head: head.trim(),
-      worktree: parseStatus(status),
+      worktree: parseStatus(status, DEFAULT_EXCLUDED_PATHS),
     };
   }
 
@@ -756,4 +835,4 @@ export class GitController {
   }
 }
 
-export { DEFAULT_PROTECTED_PATHS, matchesPath, normalizePath, parseStatus, redactOutput };
+export { DEFAULT_EXCLUDED_PATHS, DEFAULT_PROTECTED_PATHS, matchesPath, normalizePath, parseStatus, redactOutput };

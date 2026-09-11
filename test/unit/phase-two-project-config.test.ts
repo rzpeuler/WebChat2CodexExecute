@@ -5,11 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  assertProjectConfigMatchesScan,
   ProjectConfigService,
   ProjectConfigStore,
   normalizeProjectConfig,
   scanGitProject,
 } from '../../src/main/project/config.js';
+import { parseProjectConfig } from '../../src/shared/contracts/project-config.js';
+import { ProjectInitializer } from '../../src/main/project/initializer.js';
 
 const execFile = promisify(execFileCallback);
 const directories: string[] = [];
@@ -133,22 +136,166 @@ describe('phase two project configuration', () => {
 
     await expect(service.save({ ...scan, reportDirectory: 'reports' })).rejects.toMatchObject({
       code: 'INVALID_PROJECT_CONFIG',
-      message: expect.stringContaining('Governance manifest is invalid'),
+      message: expect.stringContaining('治理 manifest 无效'),
     });
     await expect(service.loadAll()).resolves.toEqual([]);
   });
 
-  it('allows saving without a manifest without inferring governance candidates', async () => {
+  it('fails closed when saving without a governance manifest even if templates remain', async () => {
+    const repository = await gitRepository();
+    await new ProjectInitializer({ runId: () => `missing-manifest-${directories.length}` }).initialize({
+      mode: 'adopt',
+      targetDirectory: repository,
+    });
+    await rm(join(repository, 'docs', 'governance', 'governance-manifest.yaml'));
+    const scan = await scanGitProject(repository);
+    const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
+
+    expect(scan.governanceManifestStatus).toBe('missing');
+    expect(scan.governanceDocumentCandidates).toEqual([]);
+    await expect(service.save({ ...scan, reportDirectory: 'reports' })).rejects.toMatchObject({
+      code: 'INVALID_PROJECT_CONFIG',
+      message: expect.stringContaining('治理 manifest 缺失'),
+    });
+    await expect(service.loadAll()).resolves.toEqual([]);
+  });
+
+  it('rejects a custom governance manifest path before saving configuration', async () => {
     const repository = await gitRepository();
     const scan = await scanGitProject(repository);
     const service = new ProjectConfigService(new ProjectConfigStore(join(await temporaryDirectory(), 'projects.json')));
 
-    const saved = await service.save({ ...scan, reportDirectory: 'reports' });
+    await expect(
+      service.save({
+        ...scan,
+        reportDirectory: 'reports',
+        governanceManifestPath: 'custom/governance-manifest.yaml',
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_PROJECT_CONFIG',
+      message: expect.stringContaining('治理 manifest 路径必须固定为 docs/governance/governance-manifest.yaml'),
+    });
+    await expect(service.loadAll()).resolves.toEqual([]);
+  });
 
-    expect(scan.governanceManifestStatus).toBe('missing');
-    expect(scan.governanceDocumentCandidates).toEqual([]);
-    expect(saved.localPath).toBe(scan.localPath);
-    await expect(service.load(saved.projectId)).resolves.toEqual(saved);
+  it('rejects custom governance manifest paths at normalization and store boundaries', async () => {
+    const repository = await gitRepository();
+    const scan = await scanGitProject(repository);
+    const invalidInput = {
+      ...scan,
+      reportDirectory: 'reports',
+      governanceManifestPath: 'custom/governance-manifest.yaml',
+    };
+
+    expect(() => normalizeProjectConfig(invalidInput)).toThrowError(
+      expect.objectContaining({
+        code: 'INVALID_PROJECT_CONFIG',
+        message: expect.stringContaining('治理 manifest 路径必须固定为 docs/governance/governance-manifest.yaml'),
+      }),
+    );
+
+    const storePath = join(await temporaryDirectory(), 'projects.json');
+    const store = new ProjectConfigStore(storePath);
+    await expect(store.save(invalidInput)).rejects.toMatchObject({ code: 'INVALID_PROJECT_CONFIG' });
+    await writeFile(
+      storePath,
+      JSON.stringify([
+        {
+          schemaVersion: 1,
+          projectId: 'persisted-invalid',
+          localPath: repository,
+          remoteUrl: null,
+          targetBranch: scan.currentBranch,
+          reportDirectory: join(repository, 'reports'),
+          currentBranch: scan.currentBranch,
+          headCommit: scan.headCommit,
+          governanceManifestPath: 'custom/governance-manifest.yaml',
+        },
+      ]),
+      'utf8',
+    );
+    await expect(store.loadAll()).rejects.toMatchObject({
+      code: 'INVALID_PROJECT_CONFIG',
+      message: expect.stringContaining('治理 manifest 路径必须固定为'),
+    });
+
+    expect(() =>
+      parseProjectConfig({
+        ...scan,
+        schemaVersion: 1,
+        targetBranch: scan.currentBranch,
+        reportDirectory: join(repository, 'reports'),
+        remoteUrl: 'https://alice:secret@example.com/repo.git?token=secret-token',
+      } as never),
+    ).toThrowError('项目配置 remoteUrl 必须已脱敏，不能包含用户密码或 token 查询参数');
+  });
+
+  it('rejects persisted project facts that drift from a fresh Git scan', async () => {
+    const repository = await gitRepository();
+    const scan = await scanGitProject(repository);
+    const config = normalizeProjectConfig({ ...scan, reportDirectory: 'reports' });
+
+    expect(() =>
+      assertProjectConfigMatchesScan(config, {
+        ...scan,
+        currentBranch: `${scan.currentBranch}-drifted`,
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVALID_PROJECT_CONFIG',
+        message: expect.stringContaining('当前分支与最新 Git 扫描不一致'),
+      }),
+    );
+  });
+
+  it('rejects a tampered projects.json containing a credential-bearing remote URL', async () => {
+    const repository = await gitRepository();
+    const scan = await scanGitProject(repository);
+    const storePath = join(await temporaryDirectory(), 'projects.json');
+    await writeFile(
+      storePath,
+      JSON.stringify([
+        {
+          schemaVersion: 1,
+          projectId: 'tampered-remote',
+          localPath: repository,
+          remoteUrl: 'https://alice:password-secret@example.com/repo.git?token=token-secret',
+          targetBranch: scan.currentBranch,
+          reportDirectory: join(repository, 'reports'),
+          currentBranch: scan.currentBranch,
+          headCommit: scan.headCommit,
+          governanceManifestPath: scan.governanceManifestPath,
+        },
+      ]),
+      'utf8',
+    );
+    await expect(new ProjectConfigStore(storePath).loadAll()).rejects.toMatchObject({
+      code: 'INVALID_PROJECT_CONFIG',
+      message: expect.stringContaining('remoteUrl'),
+    });
+    try {
+      await new ProjectConfigStore(storePath).loadAll();
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).not.toContain('password-secret');
+      expect((error as Error).message).not.toContain('token-secret');
+    }
+  });
+
+  it('returns normalized redacted configs and rejects both corrupted project snapshots with a stable code', async () => {
+    const repository = await gitRepository();
+    const scan = await scanGitProject(repository);
+    const storePath = join(await temporaryDirectory(), 'projects.json');
+    const store = new ProjectConfigStore(storePath);
+    const saved = await store.save({ ...scan, reportDirectory: 'reports' });
+    expect((await store.loadAll())[0]).toEqual(saved);
+
+    await writeFile(storePath, '{not-json', 'utf8');
+    await writeFile(`${storePath}.bak`, '[also-not-json', 'utf8');
+    await expect(store.loadAll()).rejects.toMatchObject({
+      code: 'INVALID_PROJECT_CONFIG',
+      message: '项目配置主快照和备份快照均无效，未加载任何项目配置。',
+    });
   });
 
   it('rejects non-repositories and report paths outside the repository', async () => {

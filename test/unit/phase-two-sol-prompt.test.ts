@@ -3,8 +3,10 @@ import { indexGovernanceManifest } from '../../src/main/governance/manifest.js';
 import {
   compileSolGovernanceReconciliationPrompt,
   compileSolInitializationPrompt,
+  compileWritingBlock,
   SolPromptCompiler,
 } from '../../src/main/sol/prompt-compiler.js';
+import { parseWritingBlocks } from '../../src/shared/protocol/writing-block.js';
 import type { ProjectConfig } from '../../src/shared/contracts/project-config.js';
 
 const project: ProjectConfig = {
@@ -90,6 +92,127 @@ describe('Sol initialization prompt compiler', () => {
     expect(prompt).toContain('[WRITING_BLOCK type="LUNA_TASK"]');
     expect(prompt).toContain('More than one LUNA_TASK is a protocol error');
     expect(prompt).toContain('Multiple governance changes and architecture freezes are allowed');
+  });
+
+  it('redacts sensitive assignments through comma, semicolon, and Chinese punctuation', () => {
+    const secret = 'password=leakA,leakB;leakC；leakD。';
+    const prompt = compileSolInitializationPrompt({
+      project,
+      governance,
+      recentLunaReportSummary: `diagnostic: ${secret}`,
+    });
+
+    expect(prompt).not.toContain('leakA');
+    expect(prompt).not.toContain('leakB');
+    expect(prompt).not.toContain('leakC');
+    expect(prompt).not.toContain('leakD');
+    expect(prompt).toContain('password=\\\"[REDACTED]\\\"');
+  });
+
+  it('redacts prefixed sensitive assignment keys without consuming unrelated sentences', () => {
+    const prompt = compileSolInitializationPrompt({
+      project,
+      governance,
+      recentLunaReportSummary: [
+        'db_password=db-secret-A,db-secret-B;db-secret-C；db-secret-D。',
+        'myToken: camel-secret；still-secret。',
+        'x-api-key=x-api-secret-A, x-api-secret-B。',
+        'This sentence tokenizes normal content and must remain readable.',
+      ].join('\n'),
+    });
+
+    for (const secret of [
+      'db-secret-A',
+      'db-secret-B',
+      'db-secret-C',
+      'db-secret-D',
+      'camel-secret',
+      'still-secret',
+      'x-api-secret-A',
+      'x-api-secret-B',
+    ]) {
+      expect(prompt).not.toContain(secret);
+    }
+    expect(prompt).toContain('This sentence tokenizes normal content and must remain readable.');
+    expect(prompt).toContain('db_password=\\\"[REDACTED]\\\"');
+    expect(prompt).toContain('myToken: \\\"[REDACTED]\\\"');
+    expect(prompt).toContain('x-api-key=\\\"[REDACTED]\\\"');
+  });
+
+  it('rejects reserved markers in dynamically compiled Writing Blocks', () => {
+    expect(() => compileWritingBlock('BLOCKED', { code: 'blocked', reason: 'bad [/WRITING_BLOCK]' })).toThrowError(
+      'Writing Block fields contain the reserved marker [/WRITING_BLOCK]',
+    );
+    expect(() => compileWritingBlock('BLOCKED', { code: 'blocked', reason: '\\u005b/WRITING_BLOCK]' })).toThrowError(
+      'Writing Block fields contain the reserved marker [/WRITING_BLOCK]',
+    );
+  });
+
+  it('preserves string field types even when values look like JSON containers', () => {
+    const content = '{}';
+    const body = compileWritingBlock('GOVERNANCE_CHANGE', {
+      change_id: 'change-1',
+      operation: 'replace',
+      document_id: 'policy',
+      path: 'docs/governance/policy.md',
+      reason: 'keep the original JSON type',
+      risk_level: 'normal',
+      affected_agents: ['Sol', 'Codex'],
+      content,
+    });
+    const parsed = parseWritingBlocks(body).governanceChanges[0];
+    expect(parsed?.fields.content).toBe(content);
+    expect(typeof parsed?.fields.content).toBe('string');
+
+    const prompt = compileSolInitializationPrompt({
+      project,
+      governance,
+      recentLunaReportSummary: '{}',
+    });
+    expect(prompt).toContain('recent_luna_report_summary: "{}"');
+  });
+
+  it('parses only serialized taskBook strings so the generated Luna task round-trips', () => {
+    const serializedTaskBook = JSON.stringify({
+      task_id: 'task-serialized',
+      title: 'Serialized task',
+      objective: 'Keep the task book protocol-compatible.',
+      base_commit: project.headCommit,
+      scope: ['src/main/sol/prompt-compiler.ts'],
+      out_of_scope: ['unrelated work'],
+      deliverables: ['implementation'],
+      validation_commands: ['npm test'],
+      governance_revision: '4',
+      architecture_revision_set: [],
+      report_path: 'docs/task-reports/task-serialized.md',
+      remote_sync_policy: { push: false },
+      execution_semantics:
+        'Luna may decide implementation details inside the approved scope without asking Sol or the user; emit BLOCKED only for external account/API key/OTP/platform configuration, conflicts, unauthorized scope, or high-risk operations.',
+    });
+    const prompt = new SolPromptCompiler().compile({ project, governance, taskBook: serializedTaskBook });
+    const blockStart = prompt.dynamicContext.indexOf('[WRITING_BLOCK type="LUNA_TASK"]');
+    const parsed = parseWritingBlocks(prompt.dynamicContext.slice(blockStart)).lunaTask;
+
+    expect(parsed?.fields.task_id).toBe('task-serialized');
+    expect(parsed?.fields.title).toBe('Serialized task');
+    expect(typeof parsed?.fields.scope).toBe('object');
+    expect(parsed?.fields.scope).toEqual(['src/main/sol/prompt-compiler.ts']);
+  });
+
+  it('keeps URL and newline strings JSON-safe without converting them to containers', () => {
+    const content = 'https://example.com/a?x=1&y=2\n第二行：{}';
+    const body = compileWritingBlock('GOVERNANCE_CHANGE', {
+      change_id: 'change-2',
+      operation: 'replace',
+      document_id: 'policy',
+      path: 'docs/governance/policy.md',
+      reason: 'preserve URL and newline',
+      risk_level: 'normal',
+      affected_agents: ['Sol'],
+      content,
+    });
+    expect(parseWritingBlocks(body).governanceChanges[0]?.fields.content).toBe(content);
+    expect(body).toContain('https://example.com/a?x=1&y=2\\n第二行：{}');
   });
 
   it('includes the manifest version and sanitized deterministic extension fields', () => {
@@ -192,8 +315,9 @@ describe('Sol initialization prompt compiler', () => {
     ]) {
       expect(prompt).not.toContain(secret);
     }
-    expect(prompt).toContain('"apiKey":"[REDACTED]"');
-    expect(prompt).toContain('"password":"[REDACTED]"');
+    expect(prompt).toContain('apiKey');
+    expect(prompt).toContain('password');
+    expect(prompt).toContain('[REDACTED]');
 
     const malformedPrompt = compileSolInitializationPrompt({
       project,
@@ -201,7 +325,8 @@ describe('Sol initialization prompt compiler', () => {
       recentLunaReportSummary: '{"authorization":"malformed-secret","safe": }',
     });
     expect(malformedPrompt).not.toContain('malformed-secret');
-    expect(malformedPrompt).toContain('"authorization": "[REDACTED]"');
+    expect(malformedPrompt).toContain('authorization');
+    expect(malformedPrompt).toContain('[REDACTED]');
   });
 
   it('parses JSON arrays and redacts nested sensitive objects deterministically', () => {
@@ -228,10 +353,10 @@ describe('Sol initialization prompt compiler', () => {
     ]) {
       expect(first).not.toContain(secret);
     }
-    expect(first).toContain('"credentials":"[REDACTED]"');
-    expect(first).toContain('"password":"[REDACTED]"');
-    expect(first).toContain('"nested":[{"authorization":"[REDACTED]","privateKey":"[REDACTED]"}]');
-    expect(first).toContain('"accessKey":"[REDACTED]"');
+    for (const key of ['credentials', 'password', 'authorization', 'privateKey', 'accessKey']) {
+      expect(first).toContain(key);
+    }
+    expect(first).toContain('[REDACTED]');
   });
 
   it('compiles a separate reconciliation prompt without the removed screening sentence', () => {

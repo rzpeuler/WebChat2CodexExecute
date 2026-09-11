@@ -13,13 +13,20 @@ import {
   type TopLevelStateTransitionEvent,
 } from './state/coordinator.js';
 import { parseTopLevelState, type TopLevelState } from '../shared/contracts/top-level-state.js';
-import { createProjectConfigStore, defaultProjectConfigPath, ProjectConfigService } from './project/config.js';
+import {
+  assertProjectConfigMatchesScan,
+  createProjectConfigStore,
+  defaultProjectConfigPath,
+  ProjectConfigError,
+  ProjectConfigService,
+} from './project/config.js';
 import { NotificationService } from './notify/index.js';
 import { createAutomationRuntime, type AutomationRuntime } from './automation-runtime.js';
 import type { ProjectConfig } from '../shared/contracts/project-config.js';
 import { ProjectInitializer } from './project/initializer.js';
 import type {
   ProjectInitializationInput,
+  ProjectInitializationResult,
   ProjectRemoteAccessCheckInput,
 } from '../shared/contracts/project-initialization.js';
 import { GitController } from './git/index.js';
@@ -29,6 +36,9 @@ let mainWindow: BrowserWindow | null = null;
 let ipcRegistered = false;
 let applicationState: ApplicationState | null = null;
 let automationRuntime: AutomationRuntime | null = null;
+let activeRuntimeConfig: ProjectConfig | null = null;
+let runtimeWindowGeneration = 0;
+let runtimeWindowClosed = true;
 
 const notificationService = new NotificationService(({ title, body }) => new Notification({ title, body }), {
   logger: (event, details) => console.warn(`[notification] ${event}`, details),
@@ -56,6 +66,8 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
   app.quit();
 } else {
   const createWindow = async (state: ApplicationState): Promise<void> => {
+    runtimeWindowGeneration += 1;
+    runtimeWindowClosed = false;
     const rendererPath = join(appDirectory, '../renderer/index.html');
     const trustedRendererUrl = pathToFileURL(rendererPath).toString();
     const currentState = state.coordinator.getState();
@@ -74,14 +86,118 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
       const initializationGit = new GitController({
         pendingPushStatePath: join(app.getPath('userData'), 'state', 'initialization-git-pending-push.json'),
       });
-      const installRuntime = async (config: ProjectConfig): Promise<void> => {
-        automationRuntime?.stop();
-        automationRuntime = await createAutomationRuntime(config, app.getPath('userData'), notificationService);
-        automationRuntime.startPolling();
+      let repositoryOperationTail: Promise<void> = Promise.resolve();
+
+      const stopRuntime = async (): Promise<void> => {
+        const previousRuntime = automationRuntime;
+        if (previousRuntime === null) return;
+        await previousRuntime.stop();
+        if (automationRuntime === previousRuntime) {
+          automationRuntime = null;
+          activeRuntimeConfig = null;
+        }
+      };
+
+      const installRuntime = async (config: ProjectConfig, generation: number): Promise<void> => {
+        if (runtimeWindowClosed || generation !== runtimeWindowGeneration) return;
+        let scan;
+        try {
+          scan = await projectConfigService.scan(config.localPath);
+        } catch (error) {
+          const code = error instanceof ProjectConfigError ? error.code : 'INVALID_PROJECT_CONFIG';
+          throw new ProjectConfigError(code, `持久化项目配置启动前扫描失败，未启动自动循环。错误码=${code}。`, {
+            cause: error,
+          });
+        }
+        assertProjectConfigMatchesScan(config, scan);
+        if (automationRuntime !== null && activeRuntimeConfig !== null && configsEqual(activeRuntimeConfig, config)) {
+          return;
+        }
+        await stopRuntime();
+        if (runtimeWindowClosed || generation !== runtimeWindowGeneration) return;
+        const nextRuntime = await createAutomationRuntime(config, app.getPath('userData'), notificationService);
+        if (runtimeWindowClosed || generation !== runtimeWindowGeneration) {
+          await nextRuntime.stop();
+          return;
+        }
+        automationRuntime = nextRuntime;
+        activeRuntimeConfig = config;
+        nextRuntime.startPolling();
+      };
+      const enqueueRuntimeInstall = (config: ProjectConfig): Promise<void> => {
+        const generation = runtimeWindowGeneration;
+        const operation = repositoryOperationTail.then(() => installRuntime(config, generation));
+        repositoryOperationTail = operation.catch(() => undefined);
+        return operation;
+      };
+      const initializeProject = (input: ProjectInitializationInput): Promise<ProjectInitializationResult> => {
+        const operation = repositoryOperationTail.then(() => initializeProjectOnce(input));
+        repositoryOperationTail = operation.then(
+          () => undefined,
+          () => undefined,
+        );
+        return operation;
+      };
+      const initializeProjectOnce = async (input: ProjectInitializationInput): Promise<ProjectInitializationResult> => {
+        // Git initialization must not overlap a runtime round for any project;
+        // the runtime is restarted only after a later config-save install.
+        await stopRuntime();
+        if (input.mode === 'adopt') {
+          // Refuse before touching the project when an existing repository
+          // has unapproved work or cannot be verified against its remote.
+          await initializationGit.captureBaseline(input.targetDirectory, { requireClean: true });
+        }
+        const initialized = await projectInitializer.initialize(input);
+        if (initialized.changedPaths.length === 0 && initialized.idempotent) {
+          const sync = await initializationGit.syncInitialization({
+            repositoryPath: initialized.projectRoot,
+            changedPaths: [],
+            ...(input.mode === 'clone' && input.targetBranch === undefined
+              ? {}
+              : input.mode === 'clone'
+                ? { targetBranch: input.targetBranch }
+                : {}),
+            ...(input.mode === 'clone' ? { expectedRemoteUrl: input.remoteUrl } : {}),
+          });
+          return {
+            ...initialized,
+            commit: sync.commit,
+            remoteCommit: sync.remoteCommit,
+          };
+        }
+        if (initialized.changedPaths.length === 0) return initialized;
+        let sync;
+        try {
+          const baseline = await initializationGit.captureBaseline(initialized.projectRoot, {
+            requireClean: false,
+          });
+          sync = await initializationGit.syncGovernance({
+            baseline,
+            changeId: 'initialize',
+            changedPaths: initialized.changedPaths,
+          });
+        } catch (error) {
+          if (!(error instanceof Error) || !('code' in error) || error.code !== 'NO_HEAD') throw error;
+          sync = await initializationGit.syncInitialization({
+            repositoryPath: initialized.projectRoot,
+            changedPaths: initialized.changedPaths,
+            ...(input.mode === 'clone' && input.targetBranch === undefined
+              ? {}
+              : input.mode === 'clone'
+                ? { targetBranch: input.targetBranch }
+                : {}),
+            ...(input.mode === 'clone' ? { expectedRemoteUrl: input.remoteUrl } : {}),
+          });
+        }
+        return {
+          ...initialized,
+          commit: sync.commit,
+          remoteCommit: sync.remoteCommit,
+        };
       };
       const savedConfigs = await projectConfigService.loadAll();
       if (savedConfigs[0] !== undefined) {
-        void installRuntime(savedConfigs[0]).catch((error) => {
+        void enqueueRuntimeInstall(savedConfigs[0]).catch((error) => {
           notificationService.notify({
             project: savedConfigs[0]?.projectId ?? 'Web Chat 2 Codex',
             taskId: null,
@@ -108,63 +224,10 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
             return selected.canceled ? null : (selected.filePaths[0] ?? null);
           },
           checkRemoteAccess: (input: ProjectRemoteAccessCheckInput) => projectInitializer.checkRemoteAccess(input),
-          initialize: async (input: ProjectInitializationInput) => {
-            if (input.mode === 'adopt') {
-              // Refuse before touching the project when an existing repository
-              // has unapproved work or cannot be verified against its remote.
-              await initializationGit.captureBaseline(input.targetDirectory, { requireClean: true });
-            }
-            const initialized = await projectInitializer.initialize(input);
-            if (initialized.changedPaths.length === 0 && initialized.idempotent) {
-              const sync = await initializationGit.syncInitialization({
-                repositoryPath: initialized.projectRoot,
-                changedPaths: [],
-                ...(input.mode === 'clone' && input.targetBranch === undefined
-                  ? {}
-                  : input.mode === 'clone'
-                    ? { targetBranch: input.targetBranch }
-                    : {}),
-                ...(input.mode === 'clone' ? { expectedRemoteUrl: input.remoteUrl } : {}),
-              });
-              return {
-                ...initialized,
-                commit: sync.commit,
-                remoteCommit: sync.remoteCommit,
-              };
-            }
-            if (initialized.changedPaths.length === 0) return initialized;
-            let sync;
-            try {
-              const baseline = await initializationGit.captureBaseline(initialized.projectRoot, {
-                requireClean: false,
-              });
-              sync = await initializationGit.syncGovernance({
-                baseline,
-                changeId: 'initialize',
-                changedPaths: initialized.changedPaths,
-              });
-            } catch (error) {
-              if (!(error instanceof Error) || !('code' in error) || error.code !== 'NO_HEAD') throw error;
-              sync = await initializationGit.syncInitialization({
-                repositoryPath: initialized.projectRoot,
-                changedPaths: initialized.changedPaths,
-                ...(input.mode === 'clone' && input.targetBranch === undefined
-                  ? {}
-                  : input.mode === 'clone'
-                    ? { targetBranch: input.targetBranch }
-                    : {}),
-                ...(input.mode === 'clone' ? { expectedRemoteUrl: input.remoteUrl } : {}),
-              });
-            }
-            return {
-              ...initialized,
-              commit: sync.commit,
-              remoteCommit: sync.remoteCommit,
-            };
-          },
+          initialize: (input: ProjectInitializationInput) => initializeProject(input),
         },
         onProjectConfigSaved: (config) =>
-          installRuntime(config).catch((error) => {
+          enqueueRuntimeInstall(config).catch((error) => {
             notificationService.notify({
               project: config.projectId,
               taskId: null,
@@ -193,7 +256,7 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
                   code: 'DASHBOARD_COMMAND_UNAVAILABLE',
                   message: '请先保存项目配置并完成 Sol 会话绑定。',
                 }
-              : automationRuntime.orchestrator.executeCommand(command),
+              : automationRuntime.executeCommand(command),
         },
       });
       ipcRegistered = true;
@@ -212,8 +275,27 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     await mainWindow.loadFile(rendererPath);
     mainWindow.on('closed', () => {
       mainWindow = null;
-      automationRuntime?.stop();
-      automationRuntime = null;
+      runtimeWindowClosed = true;
+      runtimeWindowGeneration += 1;
+      activeRuntimeConfig = null;
+      const closingRuntime = automationRuntime;
+      if (closingRuntime !== null) {
+        void closingRuntime.stop().then(
+          () => {
+            if (automationRuntime === closingRuntime) automationRuntime = null;
+          },
+          (error) => {
+            notificationService.notify({
+              project: 'Web Chat 2 Codex',
+              taskId: null,
+              phase: 'SHUTDOWN',
+              suggestion: '运行时未能安全停止，请保持应用关闭并检查状态后重试。',
+              error,
+              level: 'FATAL',
+            });
+          },
+        );
+      }
       initializationGate.reset();
     });
   };
@@ -278,4 +360,8 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
       app.quit();
     }
   });
+}
+
+function configsEqual(left: ProjectConfig, right: ProjectConfig): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }

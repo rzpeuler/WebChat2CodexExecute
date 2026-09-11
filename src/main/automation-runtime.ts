@@ -11,16 +11,19 @@ import {
   ContextRecoveryManager,
   SolSessionBindingStore,
   type EdgeSolObservation,
+  type EdgeProcess,
   type SolConversationIdentity,
 } from './edge/index.js';
 import { GovernanceChangeApplier } from './governance/change-applier.js';
-import { GovernanceManifestStore } from './governance/manifest.js';
+import { GovernanceManifestError, GovernanceManifestStore } from './governance/manifest.js';
 import { ArchitectureFreezeDownloader } from './architecture/freeze-downloader.js';
 import { GitController } from './git/index.js';
 import { CodexRunner } from './codex/index.js';
 import { MainOrchestrator, type OrchestratorState } from './orchestration/index.js';
 import type { NotificationService } from './notify/index.js';
 import { SolPromptCompiler } from './sol/prompt-compiler.js';
+import { assertFixedGovernanceManifestPath } from './project/config.js';
+import { assertWritingBlockTemplatesValid } from './project/writing-block-templates.js';
 import { createHash } from 'node:crypto';
 
 const CHATGPT_URL = 'https://chatgpt.com/';
@@ -44,7 +47,221 @@ function validateOrchestratorState(value: unknown): OrchestratorState {
 export interface AutomationRuntime {
   orchestrator: MainOrchestrator;
   startPolling(): void;
-  stop(): void;
+  executeCommand(
+    command: Parameters<MainOrchestrator['executeCommand']>[0],
+  ): ReturnType<MainOrchestrator['executeCommand']>;
+  stop(): Promise<void>;
+}
+
+export interface RuntimeLifecycleControllerOptions {
+  runRound: () => Promise<unknown>;
+  isActive: () => boolean;
+  isBusy: () => boolean;
+  pause: () => Promise<unknown>;
+  close: () => void | Promise<void>;
+  intervalMs?: number;
+  drainTimeoutMs?: number;
+}
+
+export interface RuntimeLifecycleController {
+  startPolling(): void;
+  track<T>(operation: () => Promise<T>): Promise<T>;
+  withRoundExclusion<T>(operation: () => Promise<T>): Promise<T>;
+  stop(): Promise<void>;
+}
+
+export function createSingleFlightEnsure<T>(
+  start: () => Promise<T>,
+  isBlocked: () => boolean,
+  blockedError: () => Error = () => runtimeLifecycleError('RUNTIME_STOPPING', 'Runtime is stopping.'),
+): () => Promise<T> {
+  let inFlight: Promise<T> | null = null;
+  return async () => {
+    if (isBlocked()) throw blockedError();
+    if (inFlight !== null) return inFlight;
+    const operation = start();
+    inFlight = operation;
+    try {
+      return await operation;
+    } finally {
+      if (inFlight === operation) inFlight = null;
+    }
+  };
+}
+
+/**
+ * Owns the runtime's polling and externally-triggered operations. A stop is a
+ * drain barrier: it blocks new rounds, drains every in-flight round and
+ * dashboard operation, pauses the orchestrator, and only then closes Edge.
+ */
+export function createRuntimeLifecycleController(
+  options: RuntimeLifecycleControllerOptions,
+): RuntimeLifecycleController {
+  const operations = new Set<Promise<unknown>>();
+  const rounds = new Set<Promise<unknown>>();
+  const intervalMs = options.intervalMs ?? 2_000;
+  const drainTimeoutMs = options.drainTimeoutMs ?? 10_000;
+  let timer: NodeJS.Timeout | null = null;
+  let stopping = false;
+  let roundExclusions = 0;
+  let stopPromise: Promise<void> | null = null;
+
+  const track = <T>(operation: () => Promise<T>): Promise<T> => {
+    const promise = Promise.resolve().then(operation);
+    operations.add(promise);
+    void promise.then(
+      () => operations.delete(promise),
+      () => operations.delete(promise),
+    );
+    return promise;
+  };
+
+  const runRound = (): void => {
+    if (stopping || roundExclusions > 0) return;
+    const operation = track(options.runRound);
+    rounds.add(operation);
+    void operation.then(
+      () => rounds.delete(operation),
+      () => rounds.delete(operation),
+    );
+  };
+
+  const startPolling = (): void => {
+    if (stopping || timer !== null) return;
+    timer = setInterval(runRound, intervalMs);
+    runRound();
+  };
+
+  const waitForRounds = async (): Promise<void> => {
+    while (rounds.size > 0) await Promise.allSettled([...rounds]);
+  };
+
+  const withRoundExclusion = async <T>(operation: () => Promise<T>): Promise<T> => {
+    roundExclusions += 1;
+    try {
+      await waitForRounds();
+      return await operation();
+    } finally {
+      roundExclusions -= 1;
+    }
+  };
+
+  const waitForDrain = async (): Promise<void> => {
+    // Let a command such as retry-current-stage publish its internal promise
+    // before the busy check below. The command intentionally returns early.
+    await Promise.resolve();
+    const deadline = Date.now() + drainTimeoutMs;
+    while (operations.size > 0 || options.isBusy()) {
+      const inFlight = [...operations];
+      const remaining = deadline - Date.now();
+      if (remaining <= 0)
+        throw runtimeLifecycleError('RUNTIME_DRAIN_TIMEOUT', 'Runtime operations did not stop in time.');
+      if (inFlight.length > 0) {
+        await Promise.race([
+          Promise.allSettled(inFlight),
+          new Promise<void>((resolveDelay) => setTimeout(resolveDelay, remaining)),
+        ]);
+      }
+      if (operations.size > 0 || options.isBusy())
+        await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, Math.min(10, Math.max(1, remaining))));
+    }
+  };
+
+  const stop = (): Promise<void> => {
+    if (stopPromise !== null) return stopPromise;
+    stopping = true;
+    if (timer !== null) clearInterval(timer);
+    timer = null;
+    stopPromise = (async () => {
+      const errors: unknown[] = [];
+      try {
+        await waitForDrain();
+      } catch (error) {
+        errors.push(error);
+      }
+      if (options.isActive() || options.isBusy()) {
+        try {
+          await options.pause();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      try {
+        await options.close();
+      } catch (error) {
+        errors.push(error);
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'Runtime did not stop cleanly.');
+    })();
+    return stopPromise;
+  };
+
+  return { startPolling, track, withRoundExclusion, stop };
+}
+
+function runtimeLifecycleError(code: string, message: string): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string };
+  error.code = code;
+  return error;
+}
+
+export class GovernanceReconciliationPreflightError extends Error {
+  readonly code: string;
+  readonly details: unknown;
+
+  constructor(manifestPath: string, cause: GovernanceManifestError) {
+    super(`治理 manifest ${manifestPath} 无法安全读取或解析，已停止发送治理一致性 prompt。`, { cause });
+    this.name = 'GovernanceReconciliationPreflightError';
+    this.code = cause.code;
+    this.details =
+      typeof cause === 'object' && cause !== null && 'details' in cause
+        ? (cause as { details?: unknown }).details
+        : { manifestPath };
+  }
+}
+
+export async function validateGovernanceReconciliationTemplatesForRuntime(
+  manifestStore: Pick<GovernanceManifestStore, 'load'>,
+  project: ProjectConfig,
+): Promise<void> {
+  let manifest;
+  try {
+    manifest = await manifestStore.load();
+  } catch (error) {
+    if (error instanceof GovernanceManifestError) {
+      throw new GovernanceReconciliationPreflightError(project.governanceManifestPath, error);
+    }
+    throw error;
+  }
+  if (manifest === null) {
+    throw new GovernanceReconciliationPreflightError(
+      project.governanceManifestPath,
+      new GovernanceManifestError(
+        'MANIFEST_NOT_FOUND',
+        `治理 manifest ${project.governanceManifestPath} 不存在，已停止发送治理一致性 prompt。`,
+      ),
+    );
+  }
+  await assertWritingBlockTemplatesValid(project.localPath, manifest, project.governanceManifestPath);
+}
+
+export async function runGovernanceReconciliationAfterTemplatePreflight<T>(
+  preflight: () => Promise<void>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await preflight();
+  return operation();
+}
+
+export async function compileGovernanceReconciliationPromptForRuntime(
+  promptCompiler: Pick<SolPromptCompiler, 'compileGovernanceReconciliationPrompt'>,
+  manifestStore: Pick<GovernanceManifestStore, 'load'>,
+  project: ProjectConfig,
+  baselineCommit: string,
+): Promise<string> {
+  await validateGovernanceReconciliationTemplatesForRuntime(manifestStore, project);
+  return promptCompiler.compileGovernanceReconciliationPrompt({ project, baselineCommit });
 }
 
 export async function createAutomationRuntime(
@@ -52,38 +269,86 @@ export async function createAutomationRuntime(
   userDataDirectory: string,
   notifier: NotificationService,
 ): Promise<AutomationRuntime> {
+  assertFixedGovernanceManifestPath(config.localPath, config.governanceManifestPath);
   const stateDirectory = join(userDataDirectory, 'state');
+  let stopRequested = false;
   const profile = new EdgeProfileManager({
     userDataDirectory: join(userDataDirectory, 'edge-profile'),
     remoteDebuggingPort: DEFAULT_EDGE_PORT,
     initialUrl: CHATGPT_URL,
     onProcessExit: () =>
-      notifier.notify({
-        project: config.projectId,
-        taskId: null,
-        phase: 'EDGE',
-        suggestion: '请检查专用 Edge 是否仍在运行，然后重试。',
-        error: { code: 'EDGE_PROCESS_EXITED', message: '专用 Edge 进程已退出。' },
-        level: 'NEEDS_USER',
-      }),
+      stopRequested
+        ? undefined
+        : notifier.notify({
+            project: config.projectId,
+            taskId: null,
+            phase: 'EDGE',
+            suggestion: '请检查专用 Edge 是否仍在运行，然后重试。',
+            error: { code: 'EDGE_PROCESS_EXITED', message: '专用 Edge 进程已退出。' },
+            level: 'NEEDS_USER',
+          }),
   });
   let transport: HttpCdpTransport | null = null;
   let adapter: EdgeStateAdapter | null = null;
   let conversations: CdpConversationController | null = null;
+  let edgeProcess: EdgeProcess | null = null;
   const bindingStore = new SolSessionBindingStore({
     filePath: join(stateDirectory, `${config.projectId}-sol-session.json`),
   });
 
+  const closeEdge = async (): Promise<void> => {
+    const process = edgeProcess;
+    edgeProcess = null;
+    transport?.close();
+    transport = null;
+    adapter = null;
+    conversations = null;
+    let closeError: unknown = null;
+    try {
+      profile.close();
+    } catch (error) {
+      closeError = error;
+    }
+    let waitError: unknown = null;
+    try {
+      if (process !== null && process.exitCode === null) await waitForEdgeProcessExit(process, 10_000);
+    } catch (error) {
+      waitError = error;
+    }
+    if (closeError !== null && waitError !== null)
+      throw new AggregateError([closeError, waitError], 'Edge close failed.');
+    if (closeError !== null) throw closeError;
+    if (waitError !== null) throw waitError;
+  };
+
+  const startEdge = async (): Promise<void> => {
+    const handle = await profile.startOrReuse();
+    edgeProcess = handle.process;
+    profile.assertUsable();
+    if (stopRequested) {
+      await closeEdge();
+      throw runtimeLifecycleError('RUNTIME_STOPPING', '自动化运行时正在停止，请稍候。');
+    }
+    const nextTransport = new HttpCdpTransport({ port: handle.remoteDebuggingPort });
+    transport = nextTransport;
+    adapter = new EdgeStateAdapter(nextTransport);
+    conversations = new CdpConversationController({ transport: nextTransport, adapter });
+  };
+  const ensureEdgeStart = createSingleFlightEnsure(
+    startEdge,
+    () => stopRequested,
+    () => runtimeLifecycleError('RUNTIME_STOPPING', '自动化运行时正在停止，请稍候.'),
+  );
   const ensureEdge = async (): Promise<void> => {
+    if (stopRequested) throw runtimeLifecycleError('RUNTIME_STOPPING', '自动化运行时正在停止，请稍候。');
     if (transport !== null && adapter !== null && conversations !== null) {
       profile.assertUsable();
       return;
     }
-    const handle = await profile.startOrReuse();
-    profile.assertUsable();
-    transport = new HttpCdpTransport({ port: handle.remoteDebuggingPort });
-    adapter = new EdgeStateAdapter(transport);
-    conversations = new CdpConversationController({ transport, adapter });
+    await ensureEdgeStart();
+  };
+  const assertRuntimeOperationAllowed = (): void => {
+    if (stopRequested) throw runtimeLifecycleError('RUNTIME_STOPPING', '自动化运行时正在停止，请稍候。');
   };
 
   const edge = {
@@ -122,11 +387,13 @@ export async function createAutomationRuntime(
 
   const conversationPort = {
     createConversation: async (input: Parameters<CdpConversationController['createConversation']>[0]) => {
+      assertRuntimeOperationAllowed();
       await ensureEdge();
       if (conversations === null) throw new Error('Edge conversation controller is unavailable.');
       return conversations.createConversation(input);
     },
     sendMessage: async (input: Parameters<CdpConversationController['sendMessage']>[0]) => {
+      assertRuntimeOperationAllowed();
       await ensureEdge();
       if (conversations === null) throw new Error('Edge conversation controller is unavailable.');
       return conversations.sendMessage(input);
@@ -134,6 +401,7 @@ export async function createAutomationRuntime(
   };
   const sol = {
     sendMessage: async (input: { text: string; observation: EdgeSolObservation }): Promise<void> => {
+      assertRuntimeOperationAllowed();
       await ensureEdge();
       const state = await bindingStore.load();
       const record = state?.conversationChain.find((entry) => entry.conversationId === state.activeConversationId);
@@ -149,12 +417,15 @@ export async function createAutomationRuntime(
         targetId: record.targetId,
       };
       bindingStore.assertCanSend(identity);
+      assertRuntimeOperationAllowed();
       await bindingStore.recordRawInput(input.text);
+      assertRuntimeOperationAllowed();
       await conversations.sendMessage({ conversation: identity, text: input.text });
     },
   };
 
   const rebind = async (): Promise<void> => {
+    assertRuntimeOperationAllowed();
     await ensureEdge();
     if (transport === null || adapter === null) throw new Error('Edge transport is unavailable.');
     const targets = await transport.listTargets();
@@ -166,6 +437,7 @@ export async function createAutomationRuntime(
         observation.accountFingerprint !== null &&
         observation.url.startsWith('https://')
       ) {
+        assertRuntimeOperationAllowed();
         await bindingStore.bind(observation);
         return;
       }
@@ -185,6 +457,43 @@ export async function createAutomationRuntime(
     sessionStorePath: join(stateDirectory, `${config.projectId}-codex-sessions.json`),
     streamLogDirectory: join(userDataDirectory, 'streams', config.projectId),
   });
+  const guardedGit = {
+    captureBaseline: (...args: Parameters<GitController['captureBaseline']>) => {
+      assertRuntimeOperationAllowed();
+      return git.captureBaseline(...args);
+    },
+    syncGovernance: (...args: Parameters<GitController['syncGovernance']>) => {
+      assertRuntimeOperationAllowed();
+      return git.syncGovernance(...args);
+    },
+    syncCode: (...args: Parameters<GitController['syncCode']>) => {
+      assertRuntimeOperationAllowed();
+      return git.syncCode(...args);
+    },
+  };
+  const guardedGovernance = {
+    applyAll: async (...args: Parameters<GovernanceChangeApplier['applyAll']>) => {
+      assertRuntimeOperationAllowed();
+      return governance.applyAll(...args);
+    },
+  };
+  const guardedArchitecture = {
+    download: async (...args: Parameters<ArchitectureFreezeDownloader['download']>) => {
+      assertRuntimeOperationAllowed();
+      return architecture.download(...args);
+    },
+  };
+  const guardedCodex = {
+    startTask: async (...args: Parameters<CodexRunner['startTask']>) => {
+      assertRuntimeOperationAllowed();
+      return codex.startTask(...args);
+    },
+  };
+  const guardedNotifier = {
+    notify: (input: Parameters<NotificationService['notify']>[0]): void => {
+      if (!stopRequested) notifier.notify(input);
+    },
+  };
   const stateStore = new AtomicJsonFileStore<OrchestratorState>(
     join(stateDirectory, `${config.projectId}-orchestrator.json`),
     { validate: validateOrchestratorState },
@@ -195,6 +504,7 @@ export async function createAutomationRuntime(
     const deadline = Date.now() + 10 * 60 * 1000;
     while (Date.now() < deadline) {
       await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, 1_000));
+      assertRuntimeOperationAllowed();
       const current = await edge.observe();
       if (current.status === 'CONTEXT_LIMIT') throw new Error('GOVERNANCE_RECONCILIATION_CONTEXT_LIMIT');
       if (current.status === 'AUTH_REQUIRED') throw new Error('GOVERNANCE_RECONCILIATION_AUTH_REQUIRED');
@@ -207,6 +517,7 @@ export async function createAutomationRuntime(
     }
     throw new Error('GOVERNANCE_RECONCILIATION_TIMEOUT');
   };
+  let lifecycle: RuntimeLifecycleController;
   let orchestrator: MainOrchestrator;
   orchestrator = new MainOrchestrator({
     project: {
@@ -218,42 +529,56 @@ export async function createAutomationRuntime(
     edge,
     sol,
     contextRecovery: new ContextRecoveryManager({ bindingStore, conversations: conversationPort }),
-    git,
-    governance,
-    architecture,
-    codex,
+    git: guardedGit,
+    governance: guardedGovernance,
+    architecture: guardedArchitecture,
+    codex: guardedCodex,
     stateStore,
     targetBranch: config.targetBranch,
     expectedRemoteUrl: config.remoteUrl,
-    notifier,
+    notifier: guardedNotifier,
     callbacks: {
       rebind,
       governanceConsistencyCheck: (): Promise<void> =>
         orchestrator.runDashboardOperation(async () => {
-          const resumeLoop = orchestrator.getState().active;
-          if (resumeLoop) await orchestrator.pause();
           try {
-            const before = await edge.observe();
-            const baseline = await git.captureBaseline(config.localPath, {
-              ...(config.targetBranch === 'HEAD' ? {} : { expectedBranch: config.targetBranch }),
-              ...(config.remoteUrl === null ? {} : { expectedRemoteUrl: config.remoteUrl }),
-            });
-            const prompt = promptCompiler.compileGovernanceReconciliationPrompt({
-              project: config,
-              baselineCommit: baseline.head,
-            });
-            await sol.sendMessage({ text: prompt, observation: before });
-            const completed = await waitForReconciliationOutput(before);
-            const result = await orchestrator.runGovernanceReconciliation({
-              solOutput: completed.latestAssistantText,
-              baseline,
-            });
-            if (result.status === 'PAUSED') {
-              throw new Error(result.message);
-            }
-            if (resumeLoop) await orchestrator.start();
+            // This preflight must remain before state changes and all external
+            // observations: invalid governance input must not touch Edge, Git,
+            // or the pause/resume loop.
+            await runGovernanceReconciliationAfterTemplatePreflight(
+              () => validateGovernanceReconciliationTemplatesForRuntime(manifestStore, config),
+              () =>
+                lifecycle.withRoundExclusion(async () => {
+                  assertRuntimeOperationAllowed();
+                  const resumeLoop = orchestrator.getState().active;
+                  if (resumeLoop) await orchestrator.pause();
+                  assertRuntimeOperationAllowed();
+                  const before = await edge.observe();
+                  assertRuntimeOperationAllowed();
+                  const baseline = await guardedGit.captureBaseline(config.localPath, {
+                    ...(config.targetBranch === 'HEAD' ? {} : { expectedBranch: config.targetBranch }),
+                    ...(config.remoteUrl === null ? {} : { expectedRemoteUrl: config.remoteUrl }),
+                  });
+                  const prompt = promptCompiler.compileGovernanceReconciliationPrompt({
+                    project: config,
+                    baselineCommit: baseline.head,
+                  });
+                  assertRuntimeOperationAllowed();
+                  await sol.sendMessage({ text: prompt, observation: before });
+                  const completed = await waitForReconciliationOutput(before);
+                  assertRuntimeOperationAllowed();
+                  const result = await orchestrator.runGovernanceReconciliation({
+                    solOutput: completed.latestAssistantText,
+                    baseline,
+                  });
+                  if (result.status === 'PAUSED') {
+                    throw new Error(result.message);
+                  }
+                  if (resumeLoop && !stopRequested) await orchestrator.start();
+                }),
+            );
           } catch (error) {
-            notifier.notify({
+            guardedNotifier.notify({
               project: config.projectId,
               taskId: null,
               phase: 'GOVERNANCE_RECONCILIATION',
@@ -265,31 +590,72 @@ export async function createAutomationRuntime(
           }
         }),
       openEdge: async () => {
+        assertRuntimeOperationAllowed();
         await ensureEdge();
       },
       openProject: async () => {
+        assertRuntimeOperationAllowed();
         await shell.openPath(config.localPath);
       },
       viewReport: async (reportPath) => {
+        assertRuntimeOperationAllowed();
         if (reportPath !== null) await shell.openPath(join(config.localPath, reportPath));
       },
     },
   });
   await orchestrator.initialize();
-  let timer: NodeJS.Timeout | null = null;
-  const startPolling = (): void => {
-    if (timer !== null) return;
-    timer = setInterval(() => {
-      void orchestrator.runRound();
-    }, 2_000);
-    void orchestrator.runRound();
+  lifecycle = createRuntimeLifecycleController({
+    runRound: () => orchestrator.runRound(),
+    isActive: () => orchestrator.getState().active,
+    isBusy: () => Object.values(orchestrator.getDashboardSnapshot().actions).some((action) => action.busy),
+    pause: () => orchestrator.pause(),
+    close: closeEdge,
+  });
+  const executeCommand: AutomationRuntime['executeCommand'] = (command) => {
+    if (stopRequested)
+      return Promise.resolve({
+        accepted: false,
+        code: 'RUNTIME_STOPPING',
+        message: '自动化运行时正在停止，请稍候。',
+      });
+    return lifecycle.track(async () => {
+      if (stopRequested)
+        return {
+          accepted: false,
+          code: 'RUNTIME_STOPPING',
+          message: '自动化运行时正在停止，请稍候。',
+        };
+      return orchestrator.executeCommand(command);
+    });
   };
-  const stop = (): void => {
-    if (timer !== null) clearInterval(timer);
-    timer = null;
-    profile.close();
+  const stop = (): Promise<void> => {
+    stopRequested = true;
+    return lifecycle.stop();
   };
-  return { orchestrator, startPolling, stop };
+  return { orchestrator, executeCommand, startPolling: lifecycle.startPolling, stop };
+}
+
+function waitForEdgeProcessExit(process: EdgeProcess, timeoutMs: number): Promise<void> {
+  if (process.exitCode !== null) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    let timer: NodeJS.Timeout | null = setTimeout(() => {
+      timer = null;
+      reject(runtimeLifecycleError('EDGE_CLOSE_TIMEOUT', '专用 Edge 进程未能在限定时间内退出。'));
+    }, timeoutMs);
+    const finish = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      resolve();
+    };
+    const fail = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      reject(runtimeLifecycleError('EDGE_CLOSE_ERROR', '专用 Edge 进程报告关闭错误。'));
+    };
+    process.once('exit', finish);
+    process.once('error', fail);
+    if (process.exitCode !== null) finish();
+  });
 }
 
 function hashObservedText(value: string): string | null {

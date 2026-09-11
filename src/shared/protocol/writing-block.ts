@@ -176,23 +176,26 @@ export type WritingBlockProtocolErrorCode =
   | 'WRITING_BLOCK_UNSUPPORTED_VERSION'
   | 'WRITING_BLOCK_MISSING_FIELD'
   | 'WRITING_BLOCK_INVALID_FIELD'
+  | 'WRITING_BLOCK_RESERVED_MARKER'
   | 'WRITING_BLOCK_DUPLICATE_LUNA_TASK'
   | 'WRITING_BLOCK_DUPLICATE_GOVERNANCE_RECONCILIATION';
 
 export class WritingBlockProtocolError extends Error {
   readonly code: WritingBlockProtocolErrorCode;
   readonly blockIndex: number | null;
+  readonly blockType: WritingBlockType | null;
   readonly field: string | null;
 
   constructor(
     code: WritingBlockProtocolErrorCode,
     message: string,
-    options: { blockIndex?: number; field?: string; cause?: unknown } = {},
+    options: { blockIndex?: number; blockType?: WritingBlockType; field?: string; cause?: unknown } = {},
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'WritingBlockProtocolError';
     this.code = code;
     this.blockIndex = options.blockIndex ?? null;
+    this.blockType = options.blockType ?? null;
     this.field = options.field ?? null;
   }
 }
@@ -293,8 +296,41 @@ export const WRITING_BLOCK_JSON_SCHEMAS = {
 const OPEN_MARKER = '[WRITING_BLOCK';
 const CLOSE_MARKER = '[/WRITING_BLOCK]';
 
+function decodeUnicodeEscapes(value: string): string {
+  return value.replace(/\\u([0-9a-f]{4})/gi, (_match, code: string) => String.fromCharCode(Number.parseInt(code, 16)));
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasReservedClosingMarker(value: unknown, seen = new WeakSet<object>()): boolean {
+  if (typeof value === 'string') return decodeUnicodeEscapes(value).includes(CLOSE_MARKER);
+  if (value === null || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => hasReservedClosingMarker(item, seen));
+  return Object.entries(value).some(
+    ([key, child]) => decodeUnicodeEscapes(key).includes(CLOSE_MARKER) || hasReservedClosingMarker(child, seen),
+  );
+}
+
+function assertNoReservedClosingMarker(fields: Record<string, unknown>, blockIndex: number): void {
+  if (hasReservedClosingMarker(fields)) {
+    throw new WritingBlockProtocolError('WRITING_BLOCK_RESERVED_MARKER', `正文包含保留结束标记 ${CLOSE_MARKER}`, {
+      blockIndex,
+    });
+  }
+}
+
+function jsonParsePosition(error: unknown): string {
+  if (!(error instanceof Error)) return '';
+  const position = /(?:position|column)\s+(\d+)/i.exec(error.message)?.[1];
+  return position === undefined ? '' : `解析位置：${position}。`;
+}
+
+function isJsonObjectCandidate(value: string): boolean {
+  return value.startsWith('{');
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -500,28 +536,21 @@ function assertVersion(fields: Record<string, unknown>, blockIndex: number): voi
   }
 }
 
-function parseBody(body: string, blockIndex: number): Record<string, unknown> {
+function parseBody(body: string, blockIndex: number, blockType: WritingBlockType): Record<string, unknown> {
   const trimmed = body.trim();
   if (trimmed.length === 0) {
-    throw new WritingBlockProtocolError(
-      'WRITING_BLOCK_BODY_NOT_OBJECT',
-      `Writing block ${blockIndex} has an empty body`,
-      {
-        blockIndex,
-      },
-    );
+    throw new WritingBlockProtocolError('WRITING_BLOCK_BODY_NOT_OBJECT', '正文为空', {
+      blockIndex,
+    });
   }
 
-  if (trimmed.startsWith('{')) {
+  if (isJsonObjectCandidate(trimmed)) {
     try {
       const parsed: unknown = JSON.parse(trimmed);
       if (!isRecord(parsed)) {
-        throw new WritingBlockProtocolError(
-          'WRITING_BLOCK_BODY_NOT_OBJECT',
-          `Writing block ${blockIndex} JSON body must be an object`,
-          { blockIndex },
-        );
+        throw new WritingBlockProtocolError('WRITING_BLOCK_BODY_NOT_OBJECT', 'JSON 正文必须是对象', { blockIndex });
       }
+      assertNoReservedClosingMarker(parsed, blockIndex);
       return parsed;
     } catch (error) {
       if (error instanceof WritingBlockProtocolError) {
@@ -529,8 +558,8 @@ function parseBody(body: string, blockIndex: number): Record<string, unknown> {
       }
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_BODY_INVALID_JSON',
-        `Writing block ${blockIndex} has invalid JSON body`,
-        { blockIndex, cause: error },
+        `JSON 正文无效。请检查引号、反斜杠、注释、尾逗号和对象括号。${jsonParsePosition(error)}`,
+        { blockIndex, blockType, cause: error },
       );
     }
   }
@@ -538,33 +567,36 @@ function parseBody(body: string, blockIndex: number): Record<string, unknown> {
   try {
     const parsed: unknown = parseYaml(trimmed);
     if (!isRecord(parsed)) {
-      throw new WritingBlockProtocolError(
-        'WRITING_BLOCK_BODY_NOT_OBJECT',
-        `Writing block ${blockIndex} YAML body must be an object`,
-        { blockIndex },
-      );
+      throw new WritingBlockProtocolError('WRITING_BLOCK_BODY_NOT_OBJECT', 'YAML 正文必须是对象', { blockIndex });
     }
+    assertNoReservedClosingMarker(parsed, blockIndex);
     return parsed;
   } catch (error) {
     if (error instanceof WritingBlockProtocolError) {
       throw error;
     }
-    throw new WritingBlockProtocolError(
-      'WRITING_BLOCK_BODY_INVALID_YAML',
-      `Writing block ${blockIndex} has invalid YAML body`,
-      { blockIndex, cause: error },
-    );
+    throw new WritingBlockProtocolError('WRITING_BLOCK_BODY_INVALID_YAML', 'YAML 正文无效，请检查缩进、冒号和引号。', {
+      blockIndex,
+      cause: error,
+    });
   }
 }
 
 function parseHeader(source: string, start: number, blockIndex: number): { type: WritingBlockType; end: number } {
   const end = source.indexOf(']', start);
+  const recognizedType = /^\[WRITING_BLOCK type="([^"]+)"/.exec(
+    source.slice(start, end < 0 ? undefined : end + 1),
+  )?.[1];
+  const blockType = (WRITING_BLOCK_TYPES as readonly string[]).includes(recognizedType ?? '')
+    ? (recognizedType as WritingBlockType)
+    : undefined;
   if (end < 0) {
     throw new WritingBlockProtocolError(
       'WRITING_BLOCK_HEADER_INVALID',
-      `Writing block ${blockIndex} has an invalid header`,
+      `第 ${blockIndex} 个 Writing Block 的头部无效。请使用 [WRITING_BLOCK type="..."]。`,
       {
         blockIndex,
+        ...(blockType === undefined ? {} : { blockType }),
       },
     );
   }
@@ -573,17 +605,20 @@ function parseHeader(source: string, start: number, blockIndex: number): { type:
   if (match === null) {
     throw new WritingBlockProtocolError(
       'WRITING_BLOCK_HEADER_INVALID',
-      `Writing block ${blockIndex} has an invalid header`,
+      `第 ${blockIndex} 个 Writing Block 的头部无效。请使用 [WRITING_BLOCK type="..."]。`,
       {
         blockIndex,
+        ...(blockType === undefined ? {} : { blockType }),
       },
     );
   }
   const candidate = match[1] ?? '';
   if (!(WRITING_BLOCK_TYPES as readonly string[]).includes(candidate)) {
-    throw new WritingBlockProtocolError('WRITING_BLOCK_UNKNOWN_TYPE', `Unknown writing block type: ${candidate}`, {
-      blockIndex,
-    });
+    throw new WritingBlockProtocolError(
+      'WRITING_BLOCK_UNKNOWN_TYPE',
+      `第 ${blockIndex} 个 Writing Block 使用未知类型 ${candidate}。请使用受支持的块类型。`,
+      { blockIndex },
+    );
   }
   return { type: candidate as WritingBlockType, end: end + 1 };
 }
@@ -766,13 +801,18 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
     const nextOpen = input.indexOf(OPEN_MARKER, cursor);
     const nextClose = input.indexOf(CLOSE_MARKER, cursor);
     if (nextClose >= 0 && (nextOpen < 0 || nextClose < nextOpen)) {
-      throw new WritingBlockProtocolError('WRITING_BLOCK_OUT_OF_BLOCK_CONTENT', 'Closing marker found outside a block');
+      throw new WritingBlockProtocolError(
+        'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
+        `第 ${blocks.length} 个 Writing Block 之外发现结束标记。请只输出完整的 Writing Block。`,
+        { blockIndex: blocks.length },
+      );
     }
     if (nextOpen < 0) {
       if (input.slice(cursor).trim() !== '') {
         throw new WritingBlockProtocolError(
           'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
-          'Non-whitespace content is outside a writing block',
+          `第 ${blocks.length} 个 Writing Block 之外存在非空白文本。请删除块外说明文字。`,
+          { blockIndex: blocks.length },
         );
       }
       break;
@@ -780,35 +820,54 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
     if (input.slice(cursor, nextOpen).trim() !== '') {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
-        'Non-whitespace content is outside a writing block',
+        `第 ${blocks.length} 个 Writing Block 之外存在非空白文本。请删除块外说明文字。`,
+        { blockIndex: blocks.length },
       );
     }
     const blockIndex = blocks.length;
     const header = parseHeader(input, nextOpen, blockIndex);
     const bodyEnd = input.indexOf(CLOSE_MARKER, header.end);
     if (bodyEnd < 0) {
-      throw new WritingBlockProtocolError('WRITING_BLOCK_UNCLOSED', `Writing block ${blockIndex} is not closed`, {
-        blockIndex,
-      });
+      throw new WritingBlockProtocolError(
+        'WRITING_BLOCK_UNCLOSED',
+        `第 ${blockIndex} 个 Writing Block（类型 ${header.type}）未闭合。请补齐 ${CLOSE_MARKER}。`,
+        { blockIndex, blockType: header.type },
+      );
     }
     const body = input.slice(header.end, bodyEnd);
     if (body.includes(OPEN_MARKER)) {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_NESTED',
-        `Writing block ${blockIndex} contains a nested block`,
+        `第 ${blockIndex} 个 Writing Block（类型 ${header.type}）包含嵌套块。请拆分为同级块。`,
         {
           blockIndex,
+          blockType: header.type,
         },
       );
     }
-    const fields = parseBody(body, blockIndex);
-    const block = buildBlock(header.type, fields, body, blockIndex);
+    let fields: Record<string, unknown>;
+    let block: WritingBlock;
+    try {
+      fields = parseBody(body, blockIndex, header.type);
+      block = buildBlock(header.type, fields, body, blockIndex);
+    } catch (error) {
+      if (error instanceof WritingBlockProtocolError) {
+        const field = error.field === null ? '' : `字段 ${error.field} `;
+        throw new WritingBlockProtocolError(
+          error.code,
+          `第 ${blockIndex} 个 Writing Block（类型 ${header.type}）${field}校验失败：${error.message}`,
+          { blockIndex, blockType: header.type, ...(error.field === null ? {} : { field: error.field }), cause: error },
+        );
+      }
+      throw error;
+    }
     if (block.type === 'LUNA_TASK' && blocks.some((item) => item.type === 'LUNA_TASK')) {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_DUPLICATE_LUNA_TASK',
-        'A round may contain at most one LUNA_TASK',
+        `第 ${blockIndex} 个 Writing Block（类型 LUNA_TASK）违反规则：一回合最多一个 LUNA_TASK。`,
         {
           blockIndex,
+          blockType: block.type,
         },
       );
     }
@@ -818,8 +877,8 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
     ) {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_DUPLICATE_GOVERNANCE_RECONCILIATION',
-        'A round may contain at most one GOVERNANCE_RECONCILIATION block',
-        { blockIndex },
+        `第 ${blockIndex} 个 Writing Block（类型 GOVERNANCE_RECONCILIATION）违反规则：一回合最多一个该类型块。`,
+        { blockIndex, blockType: block.type },
       );
     }
     blocks.push(block);
@@ -842,7 +901,12 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
 export function parseWritingBlock(input: unknown): WritingBlock {
   const parsed = parseWritingBlocks(input);
   if (parsed.blocks.length !== 1) {
-    throw new WritingBlockProtocolError('WRITING_BLOCK_INPUT_INVALID', 'Expected exactly one writing block');
+    const offending = parsed.blocks[1];
+    throw new WritingBlockProtocolError(
+      'WRITING_BLOCK_INPUT_INVALID',
+      `需要且只能有一个 Writing Block，实际得到 ${parsed.blocks.length} 个。`,
+      offending === undefined ? {} : { blockIndex: 1, blockType: offending.type },
+    );
   }
   return parsed.blocks[0]!;
 }
