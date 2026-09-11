@@ -100,7 +100,6 @@ export interface DashboardRecoverySnapshot {
 export const LOOP_GRAPH_NODE_DEFINITIONS = [
   { id: 'read-sol', label: '读取 Sol' },
   { id: 'parse-task', label: '解析任务书' },
-  { id: 'repair-sol', label: 'Sol 自动修复' },
   { id: 'apply-updates', label: '应用治理/架构更新' },
   { id: 'sync-governance', label: '同步治理' },
   { id: 'run-luna', label: 'Luna 执行' },

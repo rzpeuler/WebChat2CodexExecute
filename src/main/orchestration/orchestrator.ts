@@ -38,7 +38,6 @@ import {
   type OrchestratorState,
   type OrchestratorStateStore,
   type ExecutionRecoveryRecord,
-  type AutoRepairState,
   type PendingCodeSyncState,
   type PendingReconciliationSyncState,
   type SolMessageSource,
@@ -67,7 +66,6 @@ const DEFAULT_STATE: OrchestratorState = {
   pendingCodeSync: null,
   pendingReconciliationSync: null,
   executionRecovery: null,
-  autoRepair: null,
   activeSolSession: null,
 };
 
@@ -149,7 +147,6 @@ export class MainOrchestrator implements Orchestrator {
       this.pendingCodeSync = clonePendingCodeSync(this.state.pendingCodeSync);
       this.pendingReconciliationSync = clonePendingReconciliationSync(this.state.pendingReconciliationSync);
       this.state.executionRecovery = cloneExecutionRecovery(this.state.executionRecovery);
-      this.state.autoRepair = normalizeAutoRepair(this.state.autoRepair);
       this.migrateLegacyWrongEntrypointState();
       const interrupted = this.state.active || this.state.status === 'RUNNING';
       this.state.active = false;
@@ -266,9 +263,6 @@ export class MainOrchestrator implements Orchestrator {
 
   async start(): Promise<OrchestratorResult> {
     await this.initialize();
-    if (this.state.active || this.roundPromise !== null) {
-      return result('WAITING', this.state, '自动循环已经在运行中。');
-    }
     const hasInterruptedExecution =
       this.state.executionRecovery !== null ||
       this.state.loopGraph.nodes.some(
@@ -306,13 +300,15 @@ export class MainOrchestrator implements Orchestrator {
     this.state.active = true;
     this.state.status = 'RUNNING';
     this.state.retryCount = 0;
-    if (this.state.loopGraph.roundId === null) await this.beginRound();
-    else await this.setPhase('READING_SOL', 'RUNNING', this.state.taskId);
+    this.state.phase =
+      this.state.phase === 'IDLE' || this.state.phase === 'PAUSED' || this.state.phase === 'FAILED'
+        ? 'WAITING_FOR_SOL'
+        : this.state.phase;
+    if (this.state.phase === 'WAITING_FOR_SOL') this.resumeWaitingGraph();
     this.state.recentError = null;
     this.touchState();
     await this.persist();
-    void this.runRound();
-    return result('WAITING', this.state, '编排器已启动，正在读取 Sol。');
+    return result('WAITING', this.state, '编排器已启动，等待 Sol 完成输出。');
   }
 
   async pause(): Promise<OrchestratorResult> {
@@ -420,15 +416,6 @@ export class MainOrchestrator implements Orchestrator {
         await this.persist();
         return completed;
       } catch (error) {
-        const repaired = await this.tryAutoRepair(
-          error,
-          retryInput.outputKey ?? reconciliationOutputKey(retryInput.solOutput, retryInput.baseline.head),
-          retryInput.observation,
-        );
-        if (repaired !== null) {
-          this.clearPendingReconciliationRetry();
-          return reconciliationResult('WAITING', null, repaired, null, [], [], null, null);
-        }
         const retryable = isRetryableGovernanceReconciliationError(error);
         if (this.pendingReconciliationSync !== null && retryable) this.pendingReconciliationInput = null;
         else if (retryable) this.pendingReconciliationInput = retryInput;
@@ -537,12 +524,6 @@ export class MainOrchestrator implements Orchestrator {
         await this.persist();
         return reconciliationOrchestratorResult(completed);
       } catch (error) {
-        const repaired = await this.tryAutoRepair(
-          error,
-          input.outputKey ?? reconciliationOutputKey(input.solOutput, input.baseline.head),
-          input.observation,
-        );
-        if (repaired !== null) return repaired;
         const retryable = isRetryableGovernanceReconciliationError(error);
         if (this.pendingReconciliationSync !== null && retryable) this.pendingReconciliationInput = null;
         else if (retryable) this.pendingReconciliationInput = input;
@@ -711,7 +692,6 @@ export class MainOrchestrator implements Orchestrator {
     }
     if (reconciliation.fields.status === 'PASS') {
       this.state.processedOutputKey = outputKey;
-      this.state.autoRepair = null;
       await this.finishIndependentRound(wasActive);
       return reconciliationResult(
         'PASS',
@@ -788,7 +768,6 @@ export class MainOrchestrator implements Orchestrator {
 
   private async finishIndependentRound(wasActive: boolean): Promise<void> {
     this.state.executionRecovery = null;
-    this.state.autoRepair = null;
     await this.setPhase(wasActive ? 'WAITING_FOR_SOL' : 'IDLE', wasActive ? 'RUNNING' : 'IDLE', null);
   }
 
@@ -825,17 +804,6 @@ export class MainOrchestrator implements Orchestrator {
           this.state.processedOutputKey ===
             reconciliationOutputKey(observation.latestAssistantText, this.baseline.head))
       ) {
-        const autoRepair = this.state.autoRepair;
-        if (autoRepair !== null && autoRepair !== undefined && this.state.loopGraph.currentNodeId === 'repair-sol') {
-          const message = 'Sol 自动修复提示已发送，等待新的稳定输出。';
-          this.updateGraphNode('repair-sol', {
-            summary: message,
-            details: [`错误：${autoRepair.errorCode}`, '已发送修复提示：1/1'],
-          });
-          this.touchState();
-          await this.persist();
-          return result('WAITING', this.state, message);
-        }
         const message = '等待 Sol 产生新的未处理输出。';
         await this.enterWaiting(message);
         return result('WAITING', this.state, message);
@@ -863,7 +831,6 @@ export class MainOrchestrator implements Orchestrator {
     if (observation.status !== 'COMPLETED_CANDIDATE') {
       this.markNodesNotApplicable([
         'parse-task',
-        'repair-sol',
         'apply-updates',
         'sync-governance',
         'run-luna',
@@ -877,7 +844,6 @@ export class MainOrchestrator implements Orchestrator {
     if (!waitingForNextOutput && this.state.processedOutputKey === outputKey) {
       this.markNodesNotApplicable([
         'parse-task',
-        'repair-sol',
         'apply-updates',
         'sync-governance',
         'run-luna',
@@ -896,10 +862,8 @@ export class MainOrchestrator implements Orchestrator {
     if (userMessage !== null) {
       this.state.processedOutputKey = outputKey;
       this.state.executionRecovery = null;
-      this.state.autoRepair = null;
       this.markNodesNotApplicable([
         'parse-task',
-        'repair-sol',
         'apply-updates',
         'sync-governance',
         'run-luna',
@@ -935,8 +899,6 @@ export class MainOrchestrator implements Orchestrator {
       });
     } catch (error) {
       this.prepareRecoveryRecord(outputKey, 'UNKNOWN', null);
-      const repaired = await this.tryAutoRepair(error, outputKey, observation);
-      if (repaired !== null) return repaired;
       return this.pauseFor(error, 'Writing Block 协议无效，已拒绝启动 Luna。');
     }
     if (parsed.blocked.length > 0) {
@@ -980,7 +942,6 @@ export class MainOrchestrator implements Orchestrator {
       if (parsed.lunaTask === null) {
         this.state.processedOutputKey = outputKey;
         this.state.executionRecovery = null;
-        this.state.autoRepair = null;
         this.markNodesNotApplicable(['run-luna', 'sync-code', 'notify-sol']);
         await this.setPhase('WAITING_FOR_SOL', 'RUNNING');
         return result(
@@ -991,8 +952,6 @@ export class MainOrchestrator implements Orchestrator {
       }
       return await this.runLuna(parsed.lunaTask, observation, outputKey);
     } catch (error) {
-      const repaired = await this.tryAutoRepair(error, outputKey, observation);
-      if (repaired !== null) return repaired;
       return this.isTerminalFailure(error)
         ? this.failFor(error)
         : this.pauseFor(error, '当前阶段执行失败，已暂停以等待重试或人工处理。');
@@ -1181,7 +1140,6 @@ export class MainOrchestrator implements Orchestrator {
     this.pendingCodeSync = null;
     this.clearPendingReconciliationRetry();
     this.state.executionRecovery = null;
-    this.state.autoRepair = null;
     this.state.retryCount = 0;
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
     return result('COMPLETED', this.state, `任务 ${pending.taskId} 已完成并同步。`);
@@ -1262,53 +1220,6 @@ export class MainOrchestrator implements Orchestrator {
     return this.pauseForCode(code, message, false, suggestion);
   }
 
-  private async tryAutoRepair(
-    error: unknown,
-    sourceOutputKey: string,
-    observation?: EdgeSolObservation,
-  ): Promise<OrchestratorResult | null> {
-    const code = errorCode(error);
-    if (!AUTO_REPAIRABLE_ERROR_CODES.has(code) || this.sol === undefined || this.state.autoRepair !== null) return null;
-
-    const repair: AutoRepairState = { sourceOutputKey, errorCode: code, attempt: 1 };
-    this.state.autoRepair = repair;
-    this.state.active = true;
-    this.state.status = 'RUNNING';
-    this.state.recentError = null;
-    this.state.processedOutputKey = sourceOutputKey;
-    this.activateGraphNode('repair-sol', this.state.taskId);
-    this.updateGraphNode('repair-sol', {
-      summary: '正在向 Sol 发送一次自动修复提示。',
-      details: [`错误：${code}`, '自动修复次数：1/1'],
-    });
-    this.touchState();
-    await this.persist();
-
-    const currentObservation = observation ?? (await this.edge.observe());
-    try {
-      await this.sol.sendMessage({
-        observation: currentObservation,
-        text: buildAutoRepairPrompt(code, error instanceof Error ? error.message : String(error)),
-      });
-    } catch (sendError) {
-      this.state.autoRepair = null;
-      this.state.recentError = null;
-      this.touchState();
-      await this.persist();
-      throw sendError;
-    }
-    this.state.phase = 'WAITING_FOR_SOL';
-    this.state.status = 'RUNNING';
-    this.state.recentError = null;
-    this.updateGraphNode('repair-sol', {
-      summary: '自动修复提示已发送，等待 Sol 重新输出。',
-      details: [`错误：${code}`, '自动修复次数：1/1', '本地文件未删除，等待新的 Writing Block。'],
-    });
-    this.touchState();
-    await this.persist();
-    return result('WAITING', this.state, '已向 Sol 发送一次自动修复提示，等待新的稳定输出。');
-  }
-
   private async pauseForCode(
     code: string,
     message: string,
@@ -1317,13 +1228,16 @@ export class MainOrchestrator implements Orchestrator {
   ): Promise<OrchestratorResult> {
     const interruptedPhase = this.state.phase;
     const interruptedNodeId = this.state.loopGraph.currentNodeId;
-    const requiresUserAction = needsUser || (this.state.autoRepair !== null && AUTO_REPAIRABLE_ERROR_CODES.has(code));
     this.state.active = false;
-    this.state.status = requiresUserAction ? 'NEEDS_USER_ACTION' : 'PAUSED';
+    this.state.status = needsUser ? 'NEEDS_USER_ACTION' : 'PAUSED';
     this.state.phase = 'PAUSED';
     this.state.recentError = { code, message };
     this.markRecoveryInterrupted(interruptedPhase, interruptedNodeId, { code, message });
-    this.blockActiveGraphNode(requiresUserAction ? 'NEEDS_USER_ACTION' : 'RECOVERABLE_BLOCKED', code, message);
+    this.blockActiveGraphNode(
+      needsUser || dashboardNeedsNewSol({ code, message }) ? 'NEEDS_USER_ACTION' : 'RECOVERABLE_BLOCKED',
+      code,
+      message,
+    );
     this.touchState();
     await this.persist();
     try {
@@ -1333,7 +1247,7 @@ export class MainOrchestrator implements Orchestrator {
         phase: this.state.phase,
         suggestion,
         error: { code, message },
-        level: requiresUserAction ? 'NEEDS_USER' : 'RECOVERABLE',
+        level: needsUser ? 'NEEDS_USER' : 'RECOVERABLE',
       });
     } catch {
       // Notification failures must not erase the orchestration diagnostic.
@@ -1650,7 +1564,6 @@ function cloneState(state: OrchestratorState): OrchestratorState {
     pendingCodeSync: clonePendingCodeSync(state.pendingCodeSync),
     pendingReconciliationSync: clonePendingReconciliationSync(state.pendingReconciliationSync),
     executionRecovery: cloneExecutionRecovery(state.executionRecovery),
-    autoRepair: normalizeAutoRepair(state.autoRepair),
     activeSolSession: state.activeSolSession === null ? null : { ...state.activeSolSession },
   };
 }
@@ -1703,15 +1616,6 @@ function normalizeRecoveryError(value: unknown): { code: string; message: string
   return code === null || message === null ? null : { code, message };
 }
 
-function normalizeAutoRepair(value: unknown): AutoRepairState | null {
-  if (!isRecord(value)) return null;
-  const sourceOutputKey = boundedPendingText(value.sourceOutputKey, 128);
-  const errorCode = boundedPendingText(value.errorCode, 128);
-  return sourceOutputKey !== null && errorCode !== null && value.attempt === 1
-    ? { sourceOutputKey, errorCode, attempt: 1 }
-    : null;
-}
-
 function normalizeState(state: OrchestratorState): OrchestratorState {
   const source = state as Partial<OrchestratorState>;
   return {
@@ -1727,7 +1631,6 @@ function normalizeState(state: OrchestratorState): OrchestratorState {
     pendingCodeSync: normalizePendingCodeSync(source.pendingCodeSync),
     pendingReconciliationSync: normalizePendingReconciliationSync(source.pendingReconciliationSync),
     executionRecovery: normalizeExecutionRecovery(source.executionRecovery),
-    autoRepair: normalizeAutoRepair(source.autoRepair),
     activeSolSession:
       source.activeSolSession === null || source.activeSolSession === undefined ? null : { ...source.activeSolSession },
   };
@@ -1767,7 +1670,6 @@ function cloneGovernanceReconciliationInput(input: GovernanceReconciliationRunIn
     solOutput: input.solOutput,
     baseline: { ...input.baseline, worktree: [...input.baseline.worktree] },
     ...(input.outputKey === undefined ? {} : { outputKey: input.outputKey }),
-    ...(input.observation === undefined ? {} : { observation: { ...input.observation } }),
   };
 }
 
@@ -1914,8 +1816,6 @@ function phaseForNode(nodeId: LoopGraphNodeId): OrchestratorState['phase'] {
       return 'READING_SOL';
     case 'parse-task':
       return 'PARSING';
-    case 'repair-sol':
-      return 'PARSING';
     case 'apply-updates':
       return 'APPLYING_UPDATES';
     case 'sync-governance':
@@ -1963,8 +1863,6 @@ function phaseSummary(nodeId: LoopGraphNodeId, taskId: string | null, state: Orc
       return '正在读取 Sol 会话。';
     case 'parse-task':
       return '正在校验 Writing Block。';
-    case 'repair-sol':
-      return '正在请求 Sol 修正上一轮输出。';
     case 'apply-updates':
       return '正在应用治理或架构更新。';
     case 'sync-governance':
@@ -2051,51 +1949,6 @@ const LOCALLY_REPROCESSABLE_WRITING_BLOCK_ERROR_CODES = new Set([
   'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
   'WRITING_BLOCK_BODY_INVALID_JSON',
 ]);
-
-const AUTO_REPAIRABLE_ERROR_CODES = new Set([
-  ...LOCALLY_REPROCESSABLE_WRITING_BLOCK_ERROR_CODES,
-  'WRITING_BLOCK_HEADER_INVALID',
-  'WRITING_BLOCK_UNCLOSED',
-  'WRITING_BLOCK_NESTED',
-  'WRITING_BLOCK_UNKNOWN_TYPE',
-  'WRITING_BLOCK_BODY_INVALID_YAML',
-  'WRITING_BLOCK_BODY_NOT_OBJECT',
-  'WRITING_BLOCK_UNSUPPORTED_VERSION',
-  'WRITING_BLOCK_MISSING_FIELD',
-  'WRITING_BLOCK_INVALID_FIELD',
-  'WRITING_BLOCK_RESERVED_MARKER',
-  'WRITING_BLOCK_DUPLICATE_LUNA_TASK',
-  'WRITING_BLOCK_DUPLICATE_GOVERNANCE_RECONCILIATION',
-  'GOVERNANCE_RECONCILIATION_PATH_OUTSIDE_PROJECT',
-  'GOVERNANCE_RECONCILIATION_PATH_PROTECTED',
-  'GOVERNANCE_RECONCILIATION_SHA_CONFLICT',
-]);
-
-function buildAutoRepairPrompt(code: string, message: string): string {
-  const pathRepair =
-    code === 'GOVERNANCE_RECONCILIATION_PATH_OUTSIDE_PROJECT' || code === 'GOVERNANCE_RECONCILIATION_PATH_PROTECTED';
-  const shaRepair = code === 'GOVERNANCE_RECONCILIATION_SHA_CONFLICT';
-  return [
-    '[ORCHESTRATOR_AUTO_REPAIR]',
-    'The previous Sol output could not be consumed by the local orchestrator.',
-    `error_code: ${code}`,
-    `diagnostic: ${message}`,
-    'Re-evaluate the previous request and output one complete corrected Writing Block only.',
-    'Do not add explanations, Markdown fences, XML wrappers, or text outside the block.',
-    ...(pathRepair
-      ? [
-          '对于不安全的治理路径，只能从输出 files 数组中移除该条目；不删除任何本地文件。',
-          'Only keep safe project-relative regular text files under the requested reconciliation scope.',
-          'If no safe file remains, output GOVERNANCE_RECONCILIATION with status PASS or BLOCKED as appropriate.',
-        ]
-      : []),
-    ...(shaRepair
-      ? ['Re-read the current target file and emit its actual current SHA-256 in sha256_before; do not guess the hash.']
-      : []),
-    'Use the corresponding governance template and validate the complete JSON body before sending.',
-    'If the request cannot be corrected safely, output one BLOCKED Writing Block with a concise reason.',
-  ].join('\n');
-}
 
 function dashboardNeedsNewSol(error: { code: string; message: string } | null): boolean {
   if (error === null) return false;

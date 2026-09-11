@@ -636,7 +636,6 @@ export async function createAutomationRuntime(
                       solOutput: before.latestAssistantText,
                       baseline,
                       outputKey: outputKeyForObservation(before),
-                      observation: before,
                     });
                     if (result.status === 'PAUSED') throw new Error(result.message);
                     if (resumeLoop && !stopRequested) await orchestrator.start();
@@ -660,7 +659,6 @@ export async function createAutomationRuntime(
                     solOutput: completed.latestAssistantText,
                     baseline,
                     outputKey: outputKeyForObservation(completed),
-                    observation: completed,
                   });
                   if (result.status === 'PAUSED') {
                     throw new Error(result.message);

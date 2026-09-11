@@ -430,20 +430,6 @@ input::placeholder {
   gap: 7px;
 }
 
-.loop-node-wrapper-repair {
-  position: relative;
-}
-
-.loop-node-wrapper-repair::before {
-  position: absolute;
-  top: -18px;
-  left: 10px;
-  color: #f1a95e;
-  content: '修复分支';
-  font-size: 0.68rem;
-  font-weight: 700;
-}
-
 .loop-node {
   position: relative;
   display: grid;
