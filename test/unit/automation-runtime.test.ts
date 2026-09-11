@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFile } from 'node:fs/promises';
 import {
   createRuntimeLifecycleController,
   createSingleFlightEnsure,
@@ -40,6 +41,13 @@ function observation(overrides: Partial<EdgeSolObservation> = {}): EdgeSolObserv
 }
 
 describe('automation runtime lifecycle', () => {
+  it('injects the governance reconciliation applier into the orchestrator runtime', async () => {
+    const source = await readFile(new URL('../../src/main/automation-runtime.ts', import.meta.url), 'utf8');
+    expect(source).toContain("import { applyGovernanceReconciliation } from './governance/reconciliation-applier.js';");
+    expect(source).toContain('reconciliation: {');
+    expect(source).toContain('applyGovernanceReconciliation(config.localPath, block)');
+  });
+
   it('keeps polling while Sol is thinking beyond the old two-minute cutoff', async () => {
     const outputs = [
       observation({

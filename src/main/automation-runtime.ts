@@ -15,6 +15,7 @@ import {
   type SolConversationIdentity,
 } from './edge/index.js';
 import { GovernanceChangeApplier } from './governance/change-applier.js';
+import { applyGovernanceReconciliation } from './governance/reconciliation-applier.js';
 import { GovernanceManifestError, GovernanceManifestStore } from './governance/manifest.js';
 import { ArchitectureFreezeDownloader } from './architecture/freeze-downloader.js';
 import { GitController } from './git/index.js';
@@ -598,6 +599,9 @@ export async function createAutomationRuntime(
     contextRecovery: new ContextRecoveryManager({ bindingStore, conversations: conversationPort }),
     git: guardedGit,
     governance: guardedGovernance,
+    reconciliation: {
+      apply: (block) => applyGovernanceReconciliation(config.localPath, block),
+    },
     architecture: guardedArchitecture,
     codex: guardedCodex,
     stateStore,
