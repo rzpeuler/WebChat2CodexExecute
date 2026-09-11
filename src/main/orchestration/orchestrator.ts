@@ -1401,9 +1401,8 @@ export class MainOrchestrator implements Orchestrator {
     const sync = await this.git.syncCode({
       baseline: pending.baseline,
       taskId: pending.taskId,
+      taskKind: pending.taskKind,
       reportPath: pending.reportPath,
-      testsPassed: pending.testsPassed,
-      allowFailedTests: pending.taskKind === 'TEST',
       allowedPaths: pending.allowedPaths,
       protectedPaths: pending.protectedPaths,
     });
@@ -1431,18 +1430,24 @@ export class MainOrchestrator implements Orchestrator {
     await this.setPhase('NOTIFYING_SOL', 'RUNNING', pending.taskId);
     if (this.sol !== undefined) {
       if (observation === undefined) observation = await this.edge.observe();
-      const testFailureNotice = pending.taskKind === 'TEST' && pending.testsStatus === 'FAILED';
+      const testFailureNotice = pending.testsStatus === 'FAILED';
+      const testNotRunNotice = pending.testsStatus === 'NOT_RUN';
       await this.sol.sendMessage({
         observation,
-        text: testFailureNotice
-          ? `LUNA_TEST_RESULT task_id=${pending.taskId}\n测试证据已同步，但验收未通过。\n测试状态：FAILED\n报告：${pending.reportPath}\n最新提交：${sync.commit}\n请根据报告规划下一项生产代码修复任务。`
-          : `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。`,
+        text:
+          testFailureNotice || testNotRunNotice
+            ? `LUNA_RESULT task_id=${pending.taskId}\n代码和任务报告已同步，但${testFailureNotice ? '测试未通过' : '测试未运行'}。\n任务类型：${pending.taskKind}\n测试状态：${pending.testsStatus}\n报告：${pending.reportPath}\n最新提交：${sync.commit}\n请根据报告完成验收并规划后续任务。`
+            : `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。`,
       });
       this.updateGraphNode('notify-sol', {
-        summary: testFailureNotice ? '已通知 Sol 测试证据已同步但验收未通过。' : '已通知 Sol 可以开始验收。',
+        summary:
+          testFailureNotice || testNotRunNotice
+            ? `已通知 Sol 代码已同步，但测试${testFailureNotice ? '未通过' : '未运行'}。`
+            : '已通知 Sol 可以开始验收。',
         details: [
           `任务：${pending.taskId}`,
-          ...(testFailureNotice ? ['测试任务已完成，但测试未通过。'] : []),
+          ...(testFailureNotice ? ['任务已完成，但测试未通过；测试结果交由 Sol/CTO 验收。'] : []),
+          ...(testNotRunNotice ? ['任务已完成，但没有测试执行证据。'] : []),
           ...commitDetails(sync.commit, sync.remoteCommit),
         ],
       });
@@ -2142,7 +2147,6 @@ function createPendingCodeSync(
     allowedPaths: [...task.fields.scope],
     protectedPaths: [...task.fields.out_of_scope],
     baseline,
-    testsPassed: testsStatus === 'PASSED',
     testsStatus,
     sessionId: run.sessionId,
     outputKey,
@@ -2210,14 +2214,15 @@ function normalizePendingCodeSync(value: unknown): PendingCodeSyncState | null {
   const baseline = normalizePendingBaseline(value.baseline);
   if (taskId === null || reportPath === null || sessionId === null || outputKey === null || baseline === null)
     return null;
-  if (typeof value.testsPassed !== 'boolean') return null;
   const taskKind = value.taskKind === 'TEST' || value.taskKind === 'IMPLEMENTATION' ? value.taskKind : 'IMPLEMENTATION';
   const testsStatus: LunaTestStatus =
     value.testsStatus === 'PASSED' || value.testsStatus === 'FAILED' || value.testsStatus === 'NOT_RUN'
       ? value.testsStatus
-      : value.testsPassed
+      : value.testsPassed === true
         ? 'PASSED'
-        : 'NOT_RUN';
+        : value.testsPassed === false
+          ? 'FAILED'
+          : 'NOT_RUN';
   return {
     taskId,
     taskKind,
@@ -2225,7 +2230,6 @@ function normalizePendingCodeSync(value: unknown): PendingCodeSyncState | null {
     allowedPaths: normalizePendingStringArray(value.allowedPaths, 512),
     protectedPaths: normalizePendingStringArray(value.protectedPaths, 512),
     baseline,
-    testsPassed: value.testsPassed,
     testsStatus,
     sessionId,
     outputKey,

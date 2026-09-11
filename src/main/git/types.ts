@@ -1,3 +1,5 @@
+import type { LunaTaskKind } from '../../shared/protocol/writing-block.js';
+
 export type GitErrorCode =
   | 'INVALID_REPOSITORY'
   | 'NO_HEAD'
@@ -171,10 +173,8 @@ export interface InitializationSyncInput {
 export interface CodeSyncInput {
   baseline: GitBaseline;
   taskId: string;
+  taskKind: LunaTaskKind;
   reportPath: string;
-  testsPassed: boolean;
-  /** Test tasks may sync failed-test evidence when the report is valid and scope is test-only. */
-  allowFailedTests?: boolean;
   allowedPaths: string[];
   protectedPaths?: string[];
 }

@@ -251,7 +251,7 @@ function promptForTask(task: LunaTaskBlock, snapshots: CodexSnapshots): string {
         blocking:
           'Emit BLOCKED_EXTERNAL_SETUP for external credentials, conflicts, scope expansion, or high-risk operations.',
         result:
-          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, tests_status, and a non-empty tests array. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED; use COMPLETED when implementation, report, and validation are finished even if the report says CTO acceptance is pending. For task_kind TEST, a test that executed and produced a valid report may use status COMPLETED with tests_status FAILED; this means the test task completed and found a defect, not that the product passed. For task_kind IMPLEMENTATION, tests_status FAILED or NOT_RUN means the task is not completed. Never invent a status value. tests_status and tests[].status must be exactly PASSED, FAILED, or NOT_RUN, and report_path must equal the task report_path.',
+          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, tests_status, and a non-empty tests array. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED. If the approved implementation or test work is complete and the required report is written, use COMPLETED even when tests_status is FAILED or NOT_RUN; tests are evidence for Sol/CTO acceptance and do not gate code synchronization. Use FAILED only when the task itself was not completed, the report is missing, the process failed, or a valid result cannot be produced. Never use FAILED solely because a test failed. tests_status and tests[].status must be exactly PASSED, FAILED, or NOT_RUN, and report_path must equal the task report_path.',
         test_scope:
           'When task_kind is TEST, only modify tests/** and the exact task report_path. Do not modify production code, arbitrary documentation, or any other path. A failed test is evidence for Sol; do not convert it to BLOCKED or ask for approval merely because the assertion failed.',
         git: 'The orchestrator owns commit, push, amend, rebase, and force-push. Do not run any of these Git synchronization operations. Leave implementation and report changes in the worktree for the orchestrator to validate, commit, and push.',
@@ -845,17 +845,6 @@ export class CodexRunner {
         };
       if (normalizePath(protocolResult.reportPath) !== normalizePath(input.task.fields.report_path))
         return { ...base, diagnostics: [...base.diagnostics, 'Luna report path does not match the task report path'] };
-      const testsStatus = protocolResult.testsStatus ?? aggregateTestsStatus(protocolResult.tests);
-      const testTaskAllowsFailedEvidence =
-        input.task.fields.task_kind === 'TEST' &&
-        testsStatus === 'FAILED' &&
-        protocolResult.tests.some((test) => test.status === 'FAILED');
-      if (testsStatus !== 'PASSED' && !testTaskAllowsFailedEvidence)
-        return {
-          ...base,
-          status: 'FAILED',
-          diagnostics: [...base.diagnostics, 'Luna validation results are not all PASSED'],
-        };
       const reportStatus = await this.checkReport(input.repositoryPath, input.task.fields.report_path);
       if (!reportStatus.exists)
         return { ...base, status: 'REPORT_MISSING', diagnostics: [...base.diagnostics, reportStatus.reason] };

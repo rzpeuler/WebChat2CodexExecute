@@ -369,13 +369,11 @@ describe('P0 main orchestration', () => {
     expect(syncCode).toHaveBeenCalledWith(
       expect.objectContaining({
         taskId: task.fields.task_id,
-        testsPassed: false,
-        allowFailedTests: true,
         allowedPaths: ['tests/**'],
       }),
     );
     expect(options.sol?.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ text: expect.stringContaining('测试证据已同步，但验收未通过') }),
+      expect.objectContaining({ text: expect.stringContaining('代码和任务报告已同步，但测试未通过') }),
     );
     expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'sync-code')).toMatchObject({
       state: 'COMPLETED',
@@ -419,7 +417,7 @@ describe('P0 main orchestration', () => {
       reportPath: 'docs/task-reports/task-1.md',
       allowedPaths: ['src/**', 'docs/task-reports/**'],
       protectedPaths: ['src/main/app.ts'],
-      testsPassed: true,
+      testsStatus: 'PASSED',
       sessionId: 'luna-1',
       outputKey: expect.any(String),
       baseline: expect.objectContaining({ head: 'base-commit' }),
@@ -463,7 +461,7 @@ describe('P0 main orchestration', () => {
         allowedPaths: ['src/**', 42],
         protectedPaths: ['x'.repeat(3000)],
         baseline: { ...baseline },
-        testsPassed: true,
+        testsStatus: 'PASSED',
         sessionId: 'luna-1',
         outputKey: 'key',
       },

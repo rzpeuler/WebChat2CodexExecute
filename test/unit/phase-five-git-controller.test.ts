@@ -425,7 +425,7 @@ describe('GitController', () => {
     expect(await command(root, ['rev-parse', 'HEAD'])).not.toBe(await command(external, ['rev-parse', 'HEAD']));
   });
 
-  it('requires a report, passing tests, and an approved non-protected change set for code sync', async () => {
+  it('requires a report and an approved non-protected change set for code sync', async () => {
     const { root } = await repository();
     const controller = new GitController();
     const baseline = await controller.captureBaseline(root);
@@ -436,8 +436,8 @@ describe('GitController', () => {
     const result = await controller.syncCode({
       baseline,
       taskId: 'task-1',
+      taskKind: 'IMPLEMENTATION',
       reportPath: 'reports/task.md',
-      testsPassed: true,
       allowedPaths: ['change.ts', 'reports/**'],
     });
     expect(result.kind).toBe('code');
@@ -449,8 +449,8 @@ describe('GitController', () => {
       controller.syncCode({
         baseline: nextBaseline,
         taskId: 'task-2',
+        taskKind: 'IMPLEMENTATION',
         reportPath: 'reports/task-2.md',
-        testsPassed: true,
         allowedPaths: ['reports/**', 'docs/superpowers/**'],
       }),
     ).rejects.toMatchObject({ code: 'REPORT_MISSING' });
@@ -458,11 +458,11 @@ describe('GitController', () => {
       controller.syncCode({
         baseline: nextBaseline,
         taskId: 'task-2',
+        taskKind: 'IMPLEMENTATION',
         reportPath: 'reports/task.md',
-        testsPassed: false,
         allowedPaths: ['reports/**'],
       }),
-    ).rejects.toMatchObject({ code: 'TESTS_NOT_PASSED' });
+    ).rejects.toMatchObject({ code: 'PROTECTED_PATH' });
     expect(await readFile(join(root, 'change.ts'), 'utf8')).toContain('value');
   });
 
@@ -479,9 +479,8 @@ describe('GitController', () => {
       controller.syncCode({
         baseline,
         taskId: 'test-task',
+        taskKind: 'TEST',
         reportPath: 'docs/task-reports/test-task.md',
-        testsPassed: false,
-        allowFailedTests: true,
         allowedPaths: ['tests/**'],
       }),
     ).resolves.toMatchObject({ kind: 'code' });
@@ -492,9 +491,8 @@ describe('GitController', () => {
       controller.syncCode({
         baseline: nextBaseline,
         taskId: 'test-task-2',
+        taskKind: 'TEST',
         reportPath: 'docs/task-reports/test-task.md',
-        testsPassed: false,
-        allowFailedTests: true,
         allowedPaths: ['tests/**', 'src-production.ts'],
       }),
     ).rejects.toMatchObject({ code: 'UNAUTHORIZED_CHANGE' });
@@ -513,8 +511,8 @@ describe('GitController', () => {
       controller.syncCode({
         baseline,
         taskId: 'legacy-scope-task',
+        taskKind: 'IMPLEMENTATION',
         reportPath: 'reports/nested/task.md',
-        testsPassed: true,
         allowedPaths: ['knowledge/production/', 'reports/'],
       }),
     ).resolves.toMatchObject({ kind: 'code' });

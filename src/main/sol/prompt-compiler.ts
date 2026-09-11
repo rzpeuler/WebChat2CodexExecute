@@ -105,6 +105,7 @@ DEFAULT EXECUTION SEMANTICS
 - A Sol round may contain zero or one LUNA_TASK, any number of GOVERNANCE_CHANGE blocks, and any number of ARCHITECTURE_FREEZE blocks.
 - More than one LUNA_TASK is a protocol error; never queue or select one implicitly.
 - ARCHITECTURE_FREEZE is completed by Sol and the orchestrator. Luna must not execute an architecture freeze.
+- A completed Luna task means the approved work and required report are finished; test results are evidence for Sol/CTO acceptance and do not gate code synchronization. Do not use LUNA_RESULT status FAILED solely because a test failed or did not run; use COMPLETED with tests_status FAILED or NOT_RUN.
 
 WRITING BLOCK PROTOCOL
 Every task book and every actionable instruction must be inside a closed WRITING_BLOCK. Its body must be one complete JSON object.

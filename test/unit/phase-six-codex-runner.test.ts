@@ -236,6 +236,37 @@ describe('CodexRunner', () => {
     expect(result.protocolResult).toMatchObject({ testsStatus: 'FAILED' });
   });
 
+  it('completes an IMPLEMENTATION task with failed validation evidence', async () => {
+    const { root, codex } = await targetRepository();
+    const implementationTask = task('reports/implementation.md', 'IMPLEMENTATION');
+    const runner = new CodexRunner({
+      ...runnerOptions(root, codex),
+      gitStateCheck: async (_repositoryPath, currentTask) => ({
+        valid: true,
+        changedPaths: [currentTask.fields.report_path],
+      }),
+      processRunner: async (_file, args) => {
+        const outputPath = args[args.indexOf('--output-last-message') + 1]!;
+        await writeFile(join(root, 'reports', 'implementation.md'), '# Validation evidence\n', 'utf8');
+        await writeFile(
+          outputPath,
+          JSON.stringify({
+            identifier: 'LUNA_RESULT',
+            status: 'COMPLETED',
+            summary: 'Implementation is complete; validation found a defect.',
+            report_path: 'reports/implementation.md',
+            tests_status: 'FAILED',
+            tests: [{ command: 'npm test', status: 'FAILED' }],
+          }),
+          'utf8',
+        );
+        return processFor(JSON.stringify({ type: 'progress', message: 'running' }));
+      },
+    });
+    const result = await runner.runTask({ ...input(root, codex), task: implementationTask });
+    expect(result.status).toBe('COMPLETED');
+  });
+
   const classifications: Array<
     [string, { exitCode?: number; report?: boolean; invalid?: boolean }, 'FAILED' | 'REPORT_MISSING' | 'INVALID_RESULT']
   > = [

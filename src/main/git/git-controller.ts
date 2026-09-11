@@ -557,8 +557,6 @@ export class GitController {
   }
 
   async syncCode(input: CodeSyncInput): Promise<GitSyncResult> {
-    if (!input.testsPassed && input.allowFailedTests !== true)
-      throw new GitControllerError('TESTS_NOT_PASSED', 'Code sync requires passing tests');
     const allowedPaths = assertSafePathList(input.allowedPaths, 'Code paths');
     const protectedPaths = assertSafePathList(
       [...DEFAULT_PROTECTED_PATHS, ...(input.protectedPaths ?? [])],
@@ -568,12 +566,9 @@ export class GitController {
     if (!isValidRelativePath(reportPath)) {
       throw new GitControllerError('REPORT_MISSING', 'Report path is outside the repository', { paths: [reportPath] });
     }
-    const syncAllowedPaths = input.allowFailedTests === true ? [...allowedPaths, reportPath] : allowedPaths;
-    if (input.allowFailedTests === true) {
-      const invalidTestScope = allowedPaths.filter((pattern) => {
-        const normalized = normalizePath(pattern);
-        return normalized !== reportPath && !normalized.startsWith('tests/');
-      });
+    const syncAllowedPaths = [...allowedPaths, reportPath];
+    if (input.taskKind === 'TEST') {
+      const invalidTestScope = allowedPaths.filter((pattern) => !normalizePath(pattern).startsWith('tests/'));
       if (invalidTestScope.length > 0) {
         throw new GitControllerError(
           'UNAUTHORIZED_CHANGE',
@@ -581,11 +576,6 @@ export class GitController {
           { paths: invalidTestScope },
         );
       }
-    }
-    if (!syncAllowedPaths.some((pattern) => matchesPath(reportPath, pattern))) {
-      throw new GitControllerError('UNAUTHORIZED_CHANGE', 'Report path is outside the approved code scope', {
-        paths: [reportPath],
-      });
     }
     const reportAbsolutePath = resolve(input.baseline.repositoryRoot, reportPath);
     const reportRelativePath = normalizePath(relative(input.baseline.repositoryRoot, reportAbsolutePath));

@@ -59,7 +59,6 @@ export interface PendingCodeSyncState {
   allowedPaths: string[];
   protectedPaths: string[];
   baseline: GitBaseline;
-  testsPassed: boolean;
   testsStatus: LunaTestStatus;
   sessionId: string;
   outputKey: string;
