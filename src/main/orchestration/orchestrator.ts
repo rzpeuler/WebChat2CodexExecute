@@ -725,7 +725,11 @@ export class MainOrchestrator implements Orchestrator {
         await this.enterWaiting(message);
         return result('WAITING', this.state, message);
       }
-      if (this.baselineOutputHash !== undefined && observation.latestAssistantHash === this.baselineOutputHash) {
+      if (
+        this.baselineOutputHash !== undefined &&
+        observation.latestAssistantHash === this.baselineOutputHash &&
+        !isGovernanceReconciliationOutput(observation.latestAssistantText)
+      ) {
         const message = '已确认绑定时的历史消息，不执行该消息。';
         await this.enterWaiting(message);
         return result('WAITING', this.state, message);
@@ -774,7 +778,8 @@ export class MainOrchestrator implements Orchestrator {
     if (
       !waitingForNextOutput &&
       this.baselineOutputHash !== undefined &&
-      observation.latestAssistantHash === this.baselineOutputHash
+      observation.latestAssistantHash === this.baselineOutputHash &&
+      !isGovernanceReconciliationOutput(observation.latestAssistantText)
     )
       return this.finishWaiting(observation, '已确认绑定时的历史消息，不执行该消息。');
 
@@ -1620,6 +1625,15 @@ function outputKeyFor(observation: EdgeSolObservation): string {
 
 function reconciliationOutputKey(solOutput: string, baselineHead: string): string {
   return createHash('sha256').update(`governance-reconciliation\n${baselineHead}\n${solOutput}`).digest('hex');
+}
+
+function isGovernanceReconciliationOutput(solOutput: string): boolean {
+  try {
+    const parsed = parseWritingBlocks(solOutput);
+    return parsed.blocks.length === 1 && parsed.governanceReconciliation !== null;
+  } catch {
+    return false;
+  }
 }
 
 function contextEventId(observation: EdgeSolObservation): string {

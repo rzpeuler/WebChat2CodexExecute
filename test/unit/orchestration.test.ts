@@ -1146,6 +1146,51 @@ ${invalidTask}`),
     expect(options.reconciliation?.apply).toHaveBeenCalledOnce();
   });
 
+  it('does not skip a baseline message when it is a valid governance reconciliation output', async () => {
+    const reconciliation = `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
+{
+  "schema_version": 1,
+  "status": "CHANGES_REQUIRED",
+  "baseline_commit": "base-commit",
+  "files": [{
+    "path": "docs/governance/policy.md",
+    "action": "replace",
+    "reason": "clarify policy",
+    "sha256_before": "0000000000000000000000000000000000000000000000000000000000000000",
+    "content": "Updated policy"
+  }]
+}
+[/WRITING_BLOCK]`;
+    const reconciliationObservation = observation(reconciliation);
+    const observe = vi
+      .fn()
+      .mockResolvedValueOnce(observation('', 'THINKING'))
+      .mockResolvedValue(reconciliationObservation);
+    const options = baseOptions({
+      edge: { observe },
+      baselineOutputHash: reconciliationObservation.latestAssistantHash,
+      reconciliation: {
+        apply: vi.fn(async () => ({
+          runId: 'reconciliation-baseline',
+          changedPaths: ['docs/governance/policy.md'],
+          backupPaths: [],
+        })),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    await orchestrator.runRound();
+    await orchestrator.pause();
+    await orchestrator.start();
+    const result = await orchestrator.runRound();
+
+    expect(result.status).toBe('COMPLETED');
+    expect(options.reconciliation?.apply).toHaveBeenCalledOnce();
+    expect(options.git.syncGovernance).toHaveBeenCalledOnce();
+    expect(orchestrator.getState()).toMatchObject({ phase: 'WAITING_FOR_SOL', recentError: null });
+  });
+
   it('retries only governance sync after the real applier has already changed files', async () => {
     const repositoryRoot = await mkdtemp(join(tmpdir(), 'web-chat2codex-reconciliation-'));
     const policyPath = join(repositoryRoot, 'docs', 'governance', 'policy.md');
