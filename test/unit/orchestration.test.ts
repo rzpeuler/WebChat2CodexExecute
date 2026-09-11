@@ -633,18 +633,12 @@ describe('P0 main orchestration', () => {
     await orchestrator.start();
     await orchestrator.runRound();
 
-    const before = orchestrator.getState();
-    expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({ enabled: false, busy: false });
+    expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({ enabled: true, busy: false });
     await expect(orchestrator.start()).resolves.toMatchObject({
-      status: 'PAUSED',
-      message: expect.stringContaining('新的 Sol 输出'),
+      status: 'WAITING',
+      message: '编排器已启动，等待 Sol 完成输出。',
     });
-    await expect(orchestrator.executeCommand({ command: 'start', confirm: true })).resolves.toMatchObject({
-      accepted: false,
-      code: 'DASHBOARD_ACTION_UNAVAILABLE',
-      message: expect.stringContaining('新的 Sol 输出'),
-    });
-    expect(orchestrator.getState()).toMatchObject({ active: before.active, recentError: before.recentError });
+    expect(orchestrator.getState()).toMatchObject({ active: true, status: 'RUNNING', recentError: null });
   });
 
   it('rechecks action state before executing commands and keeps open navigation available while a round is busy', async () => {
@@ -748,42 +742,37 @@ describe('P0 main orchestration', () => {
     await orchestrator.runRound();
     expect(orchestrator.getDashboardSnapshot().actions['retry-current-stage']).toMatchObject({
       enabled: false,
-      reason: expect.stringContaining('新的 Sol 输出'),
+      reason: expect.stringContaining('启动自动循环'),
     });
   });
 
-  it.each(['PROTECTED_PATH', 'UNAUTHORIZED_CHANGE'])('gates both start and retry for %s', async (code) => {
-    const options = baseOptions({
-      edge: {
-        observe: vi.fn(async () => {
-          const error = new Error(code);
-          Object.assign(error, { code });
-          throw error;
-        }),
-      },
-    });
-    const orchestrator = new MainOrchestrator(options);
-    await orchestrator.start();
-    await orchestrator.runRound();
+  it.each(['PROTECTED_PATH', 'UNAUTHORIZED_CHANGE'])(
+    'keeps start available while gating retry for %s',
+    async (code) => {
+      const options = baseOptions({
+        edge: {
+          observe: vi.fn(async () => {
+            const error = new Error(code);
+            Object.assign(error, { code });
+            throw error;
+          }),
+        },
+      });
+      const orchestrator = new MainOrchestrator(options);
+      await orchestrator.start();
+      await orchestrator.runRound();
 
-    expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({
-      enabled: false,
-      reason: expect.stringContaining('新的 Sol 输出'),
-    });
-    expect(orchestrator.getDashboardSnapshot().actions['retry-current-stage']).toMatchObject({
-      enabled: false,
-      reason: expect.stringContaining('新的 Sol 输出'),
-    });
-    await expect(orchestrator.start()).resolves.toMatchObject({
-      status: 'PAUSED',
-      message: expect.stringContaining('新的 Sol 输出'),
-    });
-    await expect(orchestrator.executeCommand({ command: 'start', confirm: true })).resolves.toMatchObject({
-      accepted: false,
-      code: 'DASHBOARD_ACTION_UNAVAILABLE',
-      message: expect.stringContaining('新的 Sol 输出'),
-    });
-  });
+      expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({ enabled: true, busy: false });
+      expect(orchestrator.getDashboardSnapshot().actions['retry-current-stage']).toMatchObject({
+        enabled: false,
+        reason: expect.stringContaining('启动自动循环'),
+      });
+      await expect(orchestrator.start()).resolves.toMatchObject({
+        status: 'WAITING',
+        message: '编排器已启动，等待 Sol 完成输出。',
+      });
+    },
+  );
 
   it('computes dashboard action availability from state and in-flight work', async () => {
     let releaseObservation!: (value: EdgeSolObservation) => void;
@@ -849,7 +838,31 @@ describe('P0 main orchestration', () => {
       enabled: false,
       busy: false,
     });
-    expect(blocked.getDashboardSnapshot().actions['retry-current-stage'].reason).toContain('新的 Sol 输出');
+    expect(blocked.getDashboardSnapshot().actions['retry-current-stage'].reason).toContain('启动自动循环');
+  });
+
+  it('uses a stable three-button state machine for idle, running, and paused states', async () => {
+    const orchestrator = new MainOrchestrator(baseOptions());
+
+    expect(orchestrator.getDashboardSnapshot().actions).toMatchObject({
+      start: { enabled: true, busy: false },
+      pause: { enabled: false, busy: false },
+      'retry-current-stage': { enabled: false, busy: false },
+    });
+
+    await orchestrator.start();
+    expect(orchestrator.getDashboardSnapshot().actions).toMatchObject({
+      start: { enabled: false, busy: false },
+      pause: { enabled: true, busy: false },
+      'retry-current-stage': { enabled: false, busy: false },
+    });
+
+    await orchestrator.pause();
+    expect(orchestrator.getDashboardSnapshot().actions).toMatchObject({
+      start: { enabled: true, busy: false },
+      pause: { enabled: false, busy: false },
+      'retry-current-stage': { enabled: false, busy: false },
+    });
   });
 
   it('stops ordinary retries after three persisted attempts', async () => {

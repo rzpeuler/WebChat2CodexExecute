@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createRuntimeLifecycleController,
   createSingleFlightEnsure,
@@ -72,6 +72,24 @@ describe('automation runtime lifecycle', () => {
 
     expect(result.latestAssistantText).toBe('complete');
     expect(delays).toEqual([2_000, 2_000, 2_000]);
+  });
+
+  it('stops reconciliation polling promptly after the orchestrator is paused', async () => {
+    let shouldContinue = true;
+    const sleep = vi.fn(async () => {
+      shouldContinue = false;
+    });
+
+    await expect(
+      waitForReconciliationOutput({
+        before: observation(),
+        observe: vi.fn(async () => observation({ latestAssistantText: 'ignored' })),
+        shouldContinue: () => shouldContinue,
+        sleep,
+      }),
+    ).rejects.toMatchObject({ code: 'GOVERNANCE_RECONCILIATION_CANCELLED' });
+
+    expect(sleep).toHaveBeenCalledOnce();
   });
 
   it('shares concurrent Edge startup and rejects new startup after stop begins', async () => {

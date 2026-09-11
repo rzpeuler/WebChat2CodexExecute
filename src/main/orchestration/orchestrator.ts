@@ -200,7 +200,6 @@ export class MainOrchestrator implements Orchestrator {
         this.pendingReconciliationInput !== null ||
         this.pendingReconciliationSync !== null ||
         isRetryableDashboardError(this.state.recentError));
-    const blockedBySol = dashboardNeedsNewSol(this.state.recentError);
     const callbackAvailable = (
       name: 'rebind' | 'governanceConsistencyCheck' | 'openEdge' | 'openProject' | 'viewReport',
     ) => this.callbacks[name] !== undefined;
@@ -208,26 +207,19 @@ export class MainOrchestrator implements Orchestrator {
     const enabled = () => ({ enabled: true, busy: false, reason: null });
 
     return {
-      start:
-        operationBusy || this.state.status === 'RUNNING'
-          ? disabled('已有编排操作正在处理中。', operationBusy)
-          : blockedBySol
-            ? disabled('当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。')
-            : this.state.status === 'NEEDS_USER_ACTION' && !hasRecoverableError
-              ? disabled('请先完成用户操作后再启动。')
-              : enabled(),
-      pause: reconciliationBusy
-        ? disabled('治理一致性检查正在处理中。', true)
-        : this.state.status === 'RUNNING' && this.state.active
-          ? enabled()
-          : disabled('编排器当前未运行。'),
+      start: operationBusy
+        ? disabled('已有编排操作正在处理中。', true)
+        : this.state.active
+          ? disabled('自动循环正在运行中。')
+          : enabled(),
+      pause: this.state.active ? enabled() : disabled('自动循环当前未运行。'),
       'retry-current-stage': operationBusy
-        ? disabled('已有操作正在处理中。', operationBusy)
-        : blockedBySol
-          ? disabled('当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。')
+        ? disabled('已有操作正在处理中。', true)
+        : this.state.active
+          ? disabled('自动循环运行中，请先暂停后再重试。')
           : hasRecoverableError
             ? enabled()
-            : disabled('当前没有可重试的阶段错误。'),
+            : disabled('当前没有可重试的阶段错误；如已修复 Sol 输出，请启动自动循环重新读取。'),
       rebind: operationBusy
         ? disabled('已有操作正在处理中。', operationBusy)
         : callbackAvailable('rebind')
@@ -281,10 +273,6 @@ export class MainOrchestrator implements Orchestrator {
       this.touchState();
       await this.persist();
       return result('WAITING', this.state, '已恢复代码同步，等待继续执行。');
-    }
-    if (dashboardNeedsNewSol(this.state.recentError)) {
-      await this.persist();
-      return result('PAUSED', this.state, '当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。');
     }
     this.state.active = true;
     this.state.status = 'RUNNING';

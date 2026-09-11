@@ -52,6 +52,7 @@ export interface ReconciliationOutputWaitOptions {
   before: EdgeSolObservation;
   observe: () => Promise<EdgeSolObservation>;
   assertRuntimeOperationAllowed?: () => void;
+  shouldContinue?: () => boolean;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => number;
 }
@@ -60,6 +61,7 @@ export async function waitForReconciliationOutput({
   before,
   observe,
   assertRuntimeOperationAllowed = () => undefined,
+  shouldContinue = () => true,
   sleep = (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
   now = () => Date.now(),
 }: ReconciliationOutputWaitOptions): Promise<EdgeSolObservation> {
@@ -70,9 +72,13 @@ export async function waitForReconciliationOutput({
   let lastStatus = before.status;
 
   while (true) {
+    if (!shouldContinue())
+      throw new OrchestratorError('GOVERNANCE_RECONCILIATION_CANCELLED', '治理一致性检查已被用户暂停。');
     await sleep(GOVERNANCE_RECONCILIATION_POLL_INTERVAL_MS);
     assertRuntimeOperationAllowed();
     const current = await observe();
+    if (!shouldContinue())
+      throw new OrchestratorError('GOVERNANCE_RECONCILIATION_CANCELLED', '治理一致性检查已被用户暂停。');
     if (current.status === 'CONTEXT_LIMIT')
       throw new OrchestratorError('GOVERNANCE_RECONCILIATION_CONTEXT_LIMIT', 'Sol 会话上下文已满。');
     if (current.status === 'AUTH_REQUIRED')
@@ -642,6 +648,7 @@ export async function createAutomationRuntime(
                     before,
                     observe: () => edge.observe(),
                     assertRuntimeOperationAllowed,
+                    shouldContinue: () => orchestrator.getState().active,
                   });
                   assertRuntimeOperationAllowed();
                   const result = await orchestrator.runGovernanceReconciliation({
@@ -652,10 +659,14 @@ export async function createAutomationRuntime(
                   if (result.status === 'PAUSED') {
                     throw new Error(result.message);
                   }
-                  if (resumeLoop && !stopRequested) await orchestrator.start();
+                  if (resumeLoop && !stopRequested && orchestrator.getState().active) await orchestrator.start();
                 }),
             );
           } catch (error) {
+            if (error instanceof OrchestratorError && error.code === 'GOVERNANCE_RECONCILIATION_CANCELLED') {
+              await orchestrator.pause();
+              return;
+            }
             await orchestrator.pauseGovernanceReconciliation(error);
             guardedNotifier.notify({
               project: config.projectId,
