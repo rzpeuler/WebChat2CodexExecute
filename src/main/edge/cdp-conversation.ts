@@ -236,7 +236,11 @@ export const CLICK_SUBMIT_SCRIPT = `(() => {
     const rect = element.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
   };
-  const input = document.querySelector('#prompt-textarea[contenteditable="true"], textarea');
+  const preferred = document.querySelector('#prompt-textarea[contenteditable="true"]');
+  const input = preferred instanceof HTMLElement && isVisible(preferred)
+    ? preferred
+    : [...document.querySelectorAll('[contenteditable="true"], textarea')]
+        .find((element) => element instanceof HTMLElement && isVisible(element));
   if (!(input instanceof HTMLElement) || !isVisible(input)) return { clicked: false };
   const form = input.closest('form');
   if (!(form instanceof HTMLFormElement)) return { clicked: false };
@@ -261,7 +265,11 @@ export const COMPOSER_STATE_SCRIPT = `(() => {
     const rect = element.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
   };
-  const input = document.querySelector('#prompt-textarea[contenteditable="true"], textarea');
+  const preferred = document.querySelector('#prompt-textarea[contenteditable="true"]');
+  const input = preferred instanceof HTMLElement && isVisible(preferred)
+    ? preferred
+    : [...document.querySelectorAll('[contenteditable="true"], textarea')]
+        .find((element) => element instanceof HTMLElement && isVisible(element));
   if (!(input instanceof HTMLElement) || !isVisible(input)) return { empty: true };
   const text = input instanceof HTMLTextAreaElement ? input.value : input.textContent ?? '';
   return { empty: text.trim() === '' };

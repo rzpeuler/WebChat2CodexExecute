@@ -456,6 +456,7 @@ describe('dedicated Edge profile and CDP state adapter', () => {
 
   it('targets the visible composer and never falls back to submitting an empty form', () => {
     expect(prepareMessageScript('hello')).toContain('#prompt-textarea[contenteditable="true"]');
+    expect(CLICK_SUBMIT_SCRIPT).toContain('const preferred');
     expect(CLICK_SUBMIT_SCRIPT).not.toContain('requestSubmit');
   });
 
