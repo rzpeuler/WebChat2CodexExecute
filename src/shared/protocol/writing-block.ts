@@ -545,6 +545,48 @@ function assertVersion(fields: Record<string, unknown>, blockIndex: number): voi
   }
 }
 
+function escapeRawJsonStringControls(input: string): string {
+  let inString = false;
+  let escaped = false;
+  let changed = false;
+  let output = '';
+  for (const character of input) {
+    if (!inString) {
+      output += character;
+      if (character === '"') inString = true;
+      continue;
+    }
+    if (escaped) {
+      output += character;
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      output += character;
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      output += character;
+      inString = false;
+      continue;
+    }
+    if (character === '\n') {
+      output += '\\n';
+      changed = true;
+    } else if (character === '\r') {
+      output += '\\r';
+      changed = true;
+    } else if (character === '\t') {
+      output += '\\t';
+      changed = true;
+    } else {
+      output += character;
+    }
+  }
+  return changed ? output : input;
+}
+
 function parseBody(body: string, blockIndex: number, blockType: WritingBlockType): Record<string, unknown> {
   const trimmed = body.trim();
   if (trimmed.length === 0) {
@@ -564,6 +606,18 @@ function parseBody(body: string, blockIndex: number, blockType: WritingBlockType
     } catch (error) {
       if (error instanceof WritingBlockProtocolError) {
         throw error;
+      }
+      const repaired = escapeRawJsonStringControls(trimmed);
+      if (repaired !== trimmed) {
+        try {
+          const parsed: unknown = JSON.parse(repaired);
+          if (isRecord(parsed)) {
+            assertNoReservedClosingMarker(parsed, blockIndex);
+            return parsed;
+          }
+        } catch {
+          // Fall through to the original strict JSON diagnostic.
+        }
       }
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_BODY_INVALID_JSON',

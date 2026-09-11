@@ -49,6 +49,30 @@ describe('Writing Block protocol', () => {
     );
   });
 
+  it('accepts raw line breaks inside JSON string fields without relaxing other JSON validation', () => {
+    const output = `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
+{
+  "schema_version": 1,
+  "status": "CHANGES_REQUIRED",
+  "baseline_commit": "base-commit",
+  "files": [{
+    "path": "README.md",
+    "action": "replace",
+    "reason": "refresh",
+    "sha256_before": "0000000000000000000000000000000000000000000000000000000000000000",
+    "content": "line one
+line two"
+  }]
+}
+[/WRITING_BLOCK]`;
+
+    const parsed = parseWritingBlocks(output);
+    expect(parsed.governanceReconciliation?.fields.files?.[0]?.content).toBe('line one\nline two');
+    expect(() => parseWritingBlocks(output.replace('"path": "README.md"', '"path": "../README.md"'))).toThrow(
+      /project-relative path/,
+    );
+  });
+
   it('exports five JSON-safe reusable templates and shared governance metadata', () => {
     expect(WRITING_BLOCK_TEMPLATE_VERSION).toBe(1);
     expect(WRITING_BLOCK_TEMPLATE_DIRECTORY).toBe('docs/governance/templates/writing-blocks');
