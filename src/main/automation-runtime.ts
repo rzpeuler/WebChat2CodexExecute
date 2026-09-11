@@ -19,7 +19,7 @@ import { GovernanceManifestError, GovernanceManifestStore } from './governance/m
 import { ArchitectureFreezeDownloader } from './architecture/freeze-downloader.js';
 import { GitController } from './git/index.js';
 import { CodexRunner } from './codex/index.js';
-import { MainOrchestrator, type OrchestratorState } from './orchestration/index.js';
+import { MainOrchestrator, OrchestratorError, type OrchestratorState } from './orchestration/index.js';
 import type { NotificationService } from './notify/index.js';
 import { SolPromptCompiler } from './sol/prompt-compiler.js';
 import { assertFixedGovernanceManifestPath } from './project/config.js';
@@ -500,23 +500,29 @@ export async function createAutomationRuntime(
     { validate: validateOrchestratorState },
   );
   const promptCompiler = new SolPromptCompiler();
+  const GOVERNANCE_RECONCILIATION_WAIT_TIMEOUT_MS = 2 * 60 * 1000;
   const waitForReconciliationOutput = async (before: EdgeSolObservation): Promise<EdgeSolObservation> => {
     const beforeHash = before.latestAssistantHash ?? hashObservedText(before.latestAssistantText);
-    const deadline = Date.now() + 10 * 60 * 1000;
+    const deadline = Date.now() + GOVERNANCE_RECONCILIATION_WAIT_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, 1_000));
       assertRuntimeOperationAllowed();
       const current = await edge.observe();
-      if (current.status === 'CONTEXT_LIMIT') throw new Error('GOVERNANCE_RECONCILIATION_CONTEXT_LIMIT');
-      if (current.status === 'AUTH_REQUIRED') throw new Error('GOVERNANCE_RECONCILIATION_AUTH_REQUIRED');
+      if (current.status === 'CONTEXT_LIMIT')
+        throw new OrchestratorError('GOVERNANCE_RECONCILIATION_CONTEXT_LIMIT', 'Sol 会话上下文已满。');
+      if (current.status === 'AUTH_REQUIRED')
+        throw new OrchestratorError('GOVERNANCE_RECONCILIATION_AUTH_REQUIRED', '需要在专用 Edge profile 中完成登录。');
       if (current.status === 'NETWORK_ERROR' || current.status === 'SESSION_LOST') {
-        throw new Error(`GOVERNANCE_RECONCILIATION_${current.status}`);
+        throw new OrchestratorError(
+          `GOVERNANCE_RECONCILIATION_${current.status}`,
+          current.status === 'NETWORK_ERROR' ? '读取 Sol 回复时发生网络错误。' : 'Sol 会话已丢失。',
+        );
       }
       const currentHash = current.latestAssistantHash ?? hashObservedText(current.latestAssistantText);
       if (current.status === 'COMPLETED_CANDIDATE' && currentHash !== null && currentHash !== beforeHash)
         return current;
     }
-    throw new Error('GOVERNANCE_RECONCILIATION_TIMEOUT');
+    throw new OrchestratorError('GOVERNANCE_RECONCILIATION_TIMEOUT', '等待 Sol 回复超过 2 分钟。');
   };
   let lifecycle: RuntimeLifecycleController;
   let orchestrator: MainOrchestrator;
@@ -565,6 +571,7 @@ export async function createAutomationRuntime(
                     baselineCommit: baseline.head,
                   });
                   assertRuntimeOperationAllowed();
+                  await orchestrator.beginGovernanceReconciliationWait();
                   await sol.sendMessage({ text: prompt, observation: before });
                   const completed = await waitForReconciliationOutput(before);
                   assertRuntimeOperationAllowed();
@@ -579,6 +586,7 @@ export async function createAutomationRuntime(
                 }),
             );
           } catch (error) {
+            await orchestrator.pauseGovernanceReconciliation(error);
             guardedNotifier.notify({
               project: config.projectId,
               taskId: null,

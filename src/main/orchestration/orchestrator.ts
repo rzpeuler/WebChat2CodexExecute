@@ -337,6 +337,26 @@ export class MainOrchestrator implements Orchestrator {
     }
   }
 
+  async beginGovernanceReconciliationWait(): Promise<void> {
+    await this.initialize();
+    this.state.active = true;
+    this.state.status = 'RUNNING';
+    this.state.recentError = null;
+    await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
+    this.updateGraphNode('wait-sol', {
+      summary: '正在等待 Sol 返回治理一致性检查结果。',
+      details: ['治理一致性检查已发送，等待新的稳定回复。'],
+    });
+    this.touchState();
+    await this.persist();
+  }
+
+  async pauseGovernanceReconciliation(error: unknown): Promise<void> {
+    await this.initialize();
+    if (this.state.phase === 'PAUSED' && this.state.recentError !== null) return;
+    await this.pauseFor(error, '治理一致性检查未完成，请确认 Sol 已输出后重新检查。');
+  }
+
   async runGovernanceReconciliation(
     input: GovernanceReconciliationRunInput,
   ): Promise<GovernanceReconciliationRunResult> {

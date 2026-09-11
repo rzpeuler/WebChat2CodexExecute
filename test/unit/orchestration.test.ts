@@ -10,6 +10,7 @@ import { parseWritingBlocks, type LunaTaskBlock } from '../../src/shared/protoco
 import { applyGovernanceReconciliation } from '../../src/main/governance/reconciliation-applier.js';
 import {
   MainOrchestrator,
+  OrchestratorError,
   type OrchestratorOptions,
   type OrchestratorState,
 } from '../../src/main/orchestration/index.js';
@@ -157,6 +158,29 @@ function baseOptions(overrides: Partial<OrchestratorOptions> = {}): Orchestrator
 }
 
 describe('P0 main orchestration', () => {
+  it('publishes reconciliation waiting state and pauses with a diagnostic on failure', async () => {
+    const orchestrator = new MainOrchestrator(baseOptions());
+
+    await orchestrator.beginGovernanceReconciliationWait();
+    expect(orchestrator.getDashboardSnapshot()).toMatchObject({
+      activeSolSession: null,
+      stage: 'WAITING_FOR_SOL',
+      status: 'RUNNING',
+      actions: { 'governance-consistency-check': { busy: false } },
+      loopGraph: { currentNodeId: 'wait-sol' },
+    });
+
+    await orchestrator.pauseGovernanceReconciliation(
+      new OrchestratorError('GOVERNANCE_RECONCILIATION_TIMEOUT', '等待 Sol 回复超过 2 分钟。'),
+    );
+    expect(orchestrator.getDashboardSnapshot()).toMatchObject({
+      stage: 'PAUSED',
+      status: 'PAUSED',
+      recentError: { code: 'GOVERNANCE_RECONCILIATION_TIMEOUT' },
+      loopGraph: { currentNodeId: 'wait-sol' },
+    });
+  });
+
   it('projects a completed task round onto the fixed eight-node graph', async () => {
     const options = baseOptions({
       edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${taskText()}`)) },

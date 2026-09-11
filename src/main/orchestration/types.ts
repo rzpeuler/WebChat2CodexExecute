@@ -228,6 +228,8 @@ export interface Orchestrator {
   pause(): Promise<OrchestratorResult>;
   retryCurrentStage(): Promise<OrchestratorResult>;
   runRound(): Promise<OrchestratorResult>;
+  beginGovernanceReconciliationWait(): Promise<void>;
+  pauseGovernanceReconciliation(error: unknown): Promise<void>;
   runGovernanceReconciliation(input: GovernanceReconciliationRunInput): Promise<GovernanceReconciliationRunResult>;
   getState(): OrchestratorState;
   getDashboardSnapshot(): DashboardSnapshot;
