@@ -1274,6 +1274,54 @@ ${invalidTask}`),
     expect(second.getState().processedOutputKey).not.toBeNull();
   });
 
+  it('migrates the legacy wrong-entrypoint state before the next Sol read', async () => {
+    const legacy = new MainOrchestrator(baseOptions()).getState();
+    legacy.status = 'NEEDS_USER_ACTION';
+    legacy.phase = 'PAUSED';
+    legacy.recentError = {
+      code: 'GOVERNANCE_RECONCILIATION_WRONG_ENTRYPOINT',
+      message: 'GOVERNANCE_RECONCILIATION 只能通过治理一致性检查入口处理。',
+    };
+    legacy.loopGraph = {
+      ...legacy.loopGraph,
+      roundId: 'round-legacy',
+      currentNodeId: 'parse-task',
+      nodes: legacy.loopGraph.nodes.map((node) =>
+        node.id === 'parse-task'
+          ? {
+              ...node,
+              state: 'NEEDS_USER_ACTION',
+              startedAt: '2026-09-10T01:02:03.000Z',
+            }
+          : node,
+      ),
+    };
+    const saved: OrchestratorState[] = [];
+    const orchestrator = new MainOrchestrator(
+      baseOptions({
+        stateStore: {
+          load: vi.fn(async () => legacy),
+          save: vi.fn(async (state) => {
+            saved.push(state);
+          }),
+        },
+      }),
+    );
+
+    await orchestrator.initialize();
+
+    expect(orchestrator.getState()).toMatchObject({
+      recentError: { code: 'EXECUTION_RECOVERY_PENDING' },
+      executionRecovery: {
+        outputKey: '__legacy_recovery_pending__',
+        interruptedNodeId: 'parse-task',
+        awaitingConfirmation: true,
+        error: { code: 'GOVERNANCE_RECONCILIATION_WRONG_ENTRYPOINT' },
+      },
+    });
+    expect(saved.length).toBeGreaterThan(0);
+  });
+
   it('retries only governance sync after the real applier has already changed files', async () => {
     const repositoryRoot = await mkdtemp(join(tmpdir(), 'web-chat2codex-reconciliation-'));
     const policyPath = join(repositoryRoot, 'docs', 'governance', 'policy.md');

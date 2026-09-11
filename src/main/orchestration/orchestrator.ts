@@ -147,6 +147,7 @@ export class MainOrchestrator implements Orchestrator {
       this.pendingCodeSync = clonePendingCodeSync(this.state.pendingCodeSync);
       this.pendingReconciliationSync = clonePendingReconciliationSync(this.state.pendingReconciliationSync);
       this.state.executionRecovery = cloneExecutionRecovery(this.state.executionRecovery);
+      this.migrateLegacyWrongEntrypointState();
       const interrupted = this.state.active || this.state.status === 'RUNNING';
       this.state.active = false;
       if (interrupted) {
@@ -1293,6 +1294,21 @@ export class MainOrchestrator implements Orchestrator {
     const now = this.now().toISOString();
     this.state.loopGraph = createLoopGraph(`round-${this.state.revision + 1}-${this.now().getTime()}`, now);
     await this.setPhase('READING_SOL', 'RUNNING', null);
+  }
+
+  private migrateLegacyWrongEntrypointState(): void {
+    if (
+      this.state.executionRecovery !== null ||
+      this.state.recentError?.code !== 'GOVERNANCE_RECONCILIATION_WRONG_ENTRYPOINT'
+    )
+      return;
+    const legacy = this.legacyRecoveryRecord();
+    if (legacy === null) return;
+    this.state.executionRecovery = legacy;
+    this.state.recentError = {
+      code: 'EXECUTION_RECOVERY_PENDING',
+      message: '已迁移旧版治理一致性入口阻塞记录，等待读取最新 Sol 输出后确认恢复。',
+    };
   }
 
   private prepareRecoveryRecord(
