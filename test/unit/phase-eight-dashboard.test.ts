@@ -72,6 +72,9 @@ describe('phase eight dashboard contract', () => {
     expect(validateDashboardCommand({ command: 'continue-interrupted' })).toEqual({
       command: 'continue-interrupted',
     });
+    expect(() => validateDashboardCommand({ command: 'continue-interrupted', confirm: true })).toThrow(
+      /continue-interrupted does not accept parameters/,
+    );
   });
 
   it('backfills a safe action contract for snapshots produced by older clients', () => {

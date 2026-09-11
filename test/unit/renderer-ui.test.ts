@@ -55,4 +55,15 @@ describe('renderer UI layout', () => {
     expect(css).toContain('.loop-node-wrapper');
     expect(css).toContain('.loop-node-actions');
   });
+
+  it('shows the current loop node and the latest dashboard action feedback', async () => {
+    const html = await readRendererFile('index.html');
+    const app = await readRendererFile('app.ts');
+    expect(html).toContain('id="dashboard-node"');
+    expect(html).toContain('id="dashboard-action-feedback"');
+    expect(app).toContain('formatDashboardNode');
+    expect(app).toContain('lastDashboardActionFeedback');
+    expect(app).toContain('当前动作不可用');
+    expect(app).toContain('动作已处理');
+  });
 });

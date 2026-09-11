@@ -382,6 +382,14 @@ input::placeholder {
   line-height: 1.5;
 }
 
+.action-feedback {
+  margin: 0 0 6px;
+  color: #f4f7fb;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .loop-graph-section {
   display: grid;
   gap: 14px;

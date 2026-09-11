@@ -1268,8 +1268,8 @@ ${invalidTask}`),
       expect.arrayContaining([expect.stringContaining('中断原因')]),
     );
 
-    const resumed = await second.continueInterrupted();
-    expect(resumed).toMatchObject({ status: 'COMPLETED', phase: 'WAITING_FOR_SOL' });
+    const resumed = await second.executeCommand({ command: 'continue-interrupted' });
+    expect(resumed).toMatchObject({ accepted: true, code: 'CONTINUE_COMPLETED' });
     expect(second.getState().executionRecovery).toBeNull();
     expect(second.getState().processedOutputKey).not.toBeNull();
   });

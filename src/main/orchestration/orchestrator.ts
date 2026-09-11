@@ -447,9 +447,17 @@ export class MainOrchestrator implements Orchestrator {
         case 'retry-current-stage':
           void this.retryCurrentStage().catch(() => undefined);
           return accepted('RETRY_ACCEPTED', '已接受当前阶段重试。');
-        case 'continue-interrupted':
-          void this.continueInterrupted().catch(() => undefined);
-          return accepted('CONTINUE_ACCEPTED', '已接受继续执行，将从中断节点恢复。');
+        case 'continue-interrupted': {
+          const hadRecovery = this.state.executionRecovery?.awaitingConfirmation === true;
+          const continued = await this.continueInterrupted();
+          if (!hadRecovery) return rejected('CONTINUE_UNAVAILABLE', continued.message);
+          return accepted(
+            continued.status === 'COMPLETED'
+              ? 'CONTINUE_COMPLETED'
+              : (this.state.recentError?.code ?? 'CONTINUE_PAUSED'),
+            continued.message,
+          );
+        }
         case 'rebind':
           return await this.invokeCallback('rebind', '重新绑定回调不可用。');
         case 'governance-consistency-check':

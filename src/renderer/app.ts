@@ -34,12 +34,14 @@ const dashboardUpdatedAtElement = document.querySelector<HTMLElement>('#dashboar
 const dashboardProjectElement = document.querySelector<HTMLElement>('#dashboard-project');
 const dashboardSolElement = document.querySelector<HTMLElement>('#dashboard-sol');
 const dashboardStageElement = document.querySelector<HTMLElement>('#dashboard-stage');
+const dashboardNodeElement = document.querySelector<HTMLElement>('#dashboard-node');
 const dashboardTaskElement = document.querySelector<HTMLElement>('#dashboard-task');
 const dashboardRevisionsElement = document.querySelector<HTMLElement>('#dashboard-revisions');
 const dashboardLunaElement = document.querySelector<HTMLElement>('#dashboard-luna');
 const dashboardCommitsElement = document.querySelector<HTMLElement>('#dashboard-commits');
 const dashboardErrorElement = document.querySelector<HTMLElement>('#dashboard-error');
 const dashboardSuggestionElement = document.querySelector<HTMLElement>('#dashboard-suggestion');
+const dashboardActionFeedbackElement = document.querySelector<HTMLElement>('#dashboard-action-feedback');
 const loopGraphElement = document.querySelector<HTMLElement>('#loop-graph');
 const loopGraphRoundElement = document.querySelector<HTMLElement>('#loop-graph-round');
 const loopGraphDetailsElement = document.querySelector<HTMLElement>('#loop-graph-details');
@@ -64,6 +66,7 @@ let contentPreviouslyFocused: HTMLElement | null = null;
 let savedProjectLoadCompleted = false;
 let selectedLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
 let lastCurrentLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
+let lastDashboardActionFeedback = '无';
 const loopGraphNodeButtons = new Map<LoopGraphNodeId, LoopGraphButtonParts>();
 const pendingDashboardCommands = new Set<DashboardCommandName>();
 
@@ -367,6 +370,13 @@ function getDashboardSuggestion(snapshot: DashboardSnapshot): string {
   return '当前没有需要用户处理的事项。';
 }
 
+function formatDashboardNode(snapshot: DashboardSnapshot): string {
+  const nodeId = snapshot.loopGraph.currentNodeId;
+  if (nodeId === null) return '无';
+  const node = snapshot.loopGraph.nodes.find((candidate) => candidate.id === nodeId);
+  return node === undefined ? nodeId : `${node.label}（${loopGraphStateLabels[node.state]}）`;
+}
+
 function loopGraphNode(snapshot: DashboardSnapshot, nodeId: LoopGraphNodeSnapshot['id']): LoopGraphNodeSnapshot {
   return (
     snapshot.loopGraph.nodes.find((node) => node.id === nodeId) ?? {
@@ -585,6 +595,7 @@ function renderDashboard(snapshot: DashboardSnapshot): void {
     dashboardStageElement.textContent = `${getStageLabel(rendererSnapshot.stage)} / ${statusLabel}`;
     dashboardStageElement.title = `${rendererSnapshot.stage} / ${rendererSnapshot.status}`;
   }
+  if (dashboardNodeElement !== null) dashboardNodeElement.textContent = formatDashboardNode(rendererSnapshot);
   if (dashboardTaskElement !== null) dashboardTaskElement.textContent = rendererSnapshot.taskId ?? '无';
   if (dashboardRevisionsElement !== null) {
     dashboardRevisionsElement.textContent = `${rendererSnapshot.governanceRevision ?? '—'} / ${rendererSnapshot.architectureRevisions.join(', ') || '—'}`;
@@ -606,6 +617,17 @@ function renderDashboard(snapshot: DashboardSnapshot): void {
   }
   if (dashboardSuggestionElement !== null)
     dashboardSuggestionElement.textContent = `建议：${getDashboardSuggestion(rendererSnapshot)}`;
+  if (dashboardActionFeedbackElement !== null) {
+    const continueAction = rendererSnapshot.actions['continue-interrupted'];
+    const recoveryBlocked =
+      rendererSnapshot.recovery !== null &&
+      rendererSnapshot.status === 'NEEDS_USER_ACTION' &&
+      !continueAction.enabled &&
+      continueAction.reason !== null;
+    dashboardActionFeedbackElement.textContent = recoveryBlocked
+      ? `当前动作不可用：${continueAction.reason}`
+      : `最近动作：${lastDashboardActionFeedback}`;
+  }
   renderLoopGraph(rendererSnapshot);
   applyDashboardActionStates(rendererSnapshot);
 }
@@ -631,7 +653,10 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
   if (currentSnapshot !== null) {
     const state = readActionState(currentSnapshot, command);
     if (!state.enabled || state.busy || pendingDashboardCommands.has(command)) {
-      setStatus(state.reason ?? '该动作当前不可用，请等待状态更新。');
+      const reason = state.reason ?? '该动作当前不可用，请等待状态更新。';
+      lastDashboardActionFeedback = `未发送：${reason}`;
+      setStatus(reason);
+      renderDashboard(currentSnapshot);
       return null;
     }
   }
@@ -664,10 +689,14 @@ async function executeDashboardCommandFromButton(button: HTMLButtonElement): Pro
   setStatus('动作已接受，后台处理中…');
   try {
     const result = await window.desktopApi.executeDashboardCommand(dashboardCommand);
-    setStatus(result.accepted ? `动作已接受，后台处理中：${result.message}` : `动作未执行：${result.message}`);
     await refreshDashboard();
+    const node = currentSnapshot === null ? '无' : formatDashboardNode(currentSnapshot);
+    lastDashboardActionFeedback = `${result.code}：${result.message} 当前节点：${node}`;
+    setStatus(result.accepted ? `动作已处理：${result.message}` : `动作未执行：${result.message}`);
+    if (currentSnapshot !== null) renderDashboard(currentSnapshot);
   } catch (error) {
     showOperationError(error, '状态面板命令执行失败');
+    lastDashboardActionFeedback = `命令异常：${error instanceof Error ? error.message : '未知错误'}`;
     await refreshDashboard();
   } finally {
     pendingDashboardCommands.delete(command);
