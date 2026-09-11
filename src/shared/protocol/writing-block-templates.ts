@@ -112,6 +112,8 @@ const writingBlockTemplates = {
     instructions: [
       '复制且只填写下面一个 variants 状态对象作为 block body；不要合并不同状态的字段。',
       'PASS 和 BLOCKED 的 files 必须省略或保持为空数组；CHANGES_REQUIRED 必须填写 baseline_commit 和至少一个 files 项。',
+      'CHANGES_REQUIRED.files[].sha256_before 必须是 canonical-text-v1 的 SHA-256：使用实际检查到的完整文件内容，以 UTF-8 解码，移除全部前导 BOM，将 CRLF 和 CR 转为 LF，保留所有其他字符（包括空格和末尾换行，不做 trim），再对规范化后的 UTF-8 字节计算。',
+      '只能基于实际检查到的完整文件内容计算 sha256_before，不得猜测或使用片段、摘要、旧哈希或原始字节哈希；无法可靠读取完整文件或计算规范化哈希时，返回 BLOCKED。',
     ],
     variants: {
       PASS: {

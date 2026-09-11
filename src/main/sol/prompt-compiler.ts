@@ -126,6 +126,10 @@ REQUIRED OUTPUT
 - If conflicts exist, return exactly one GOVERNANCE_RECONCILIATION block with status CHANGES_REQUIRED. For every file that needs an update, preserve all non-conflicting content and provide the complete replacement text, not a diff or excerpt. Include the current file SHA-256 and the current project commit.
 - If the repository cannot be inspected or the conflict cannot be safely resolved, return exactly one GOVERNANCE_RECONCILIATION block with status BLOCKED and a reason.
 
+HASH RULE
+- Every files[].sha256_before must be the SHA-256 of the file's canonical-text-v1 form: decode the actual complete file as UTF-8, remove all leading BOMs, convert CRLF and CR to LF, preserve every other character including spaces and trailing newlines (do not trim), then hash the resulting UTF-8 bytes.
+- Compute sha256_before only from the actual complete file content inspected during this check. Never guess it and never use a snippet, summary, old hash, or raw-byte hash. If the complete file cannot be reliably read or the canonical hash cannot be reliably computed, return BLOCKED instead of CHANGES_REQUIRED.
+
 Use the governance-reconciliation template from docs/governance/templates/writing-blocks/ and the same JSON-only rules. Use exactly the square-bracket wrapper [WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"] and [/WRITING_BLOCK], not XML/HTML angle brackets. Its block body must be one complete JSON object; do not use YAML, comments, trailing commas, Markdown code fences, or unescaped multiline strings. Before sending, serialize the complete body as JSON and verify it as if with JSON.parse. In particular, file content must escape every backslash as \\, every quote as \", every newline as \n, every carriage return as \r, and every tab as \t; never paste a raw line break or control character inside a quoted JSON string. If any replacement cannot be represented as valid JSON, return BLOCKED with a reason instead of an invalid CHANGES_REQUIRED block. The current project baseline is authoritative:
 
 ${WRITING_BLOCK_TEMPLATE_REFERENCE}`;

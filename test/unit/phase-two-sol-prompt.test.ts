@@ -397,4 +397,17 @@ describe('Sol initialization prompt compiler', () => {
     expect(prompt).toContain('return BLOCKED');
     expect(prompt).not.toContain('super-secret');
   });
+
+  it('requires canonical-text-v1 hashes from the actual complete file content', () => {
+    const prompt = compileSolGovernanceReconciliationPrompt({ project, baselineCommit: project.headCommit });
+
+    expect(prompt).toContain('canonical-text-v1');
+    expect(prompt).toContain('UTF-8');
+    expect(prompt).toContain('remove all leading BOMs');
+    expect(prompt).toContain('convert CRLF and CR to LF');
+    expect(prompt).toContain('do not trim');
+    expect(prompt).toContain('actual complete file content');
+    expect(prompt).toContain('Never guess');
+    expect(prompt).toContain('return BLOCKED instead of CHANGES_REQUIRED');
+  });
 });

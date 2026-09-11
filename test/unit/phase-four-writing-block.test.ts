@@ -99,6 +99,14 @@ line two"
     expect(Object.isFrozen(WRITING_BLOCK_TEMPLATES.GOVERNANCE_RECONCILIATION.variants.CHANGES_REQUIRED.files[0])).toBe(
       true,
     );
+    const reconciliationInstructions = WRITING_BLOCK_TEMPLATES.GOVERNANCE_RECONCILIATION.instructions.join('\n');
+    expect(reconciliationInstructions).toContain('canonical-text-v1');
+    expect(reconciliationInstructions).toContain('不做 trim');
+    expect(reconciliationInstructions).toContain('不得猜测');
+    expect(reconciliationInstructions).toContain('返回 BLOCKED');
+    expect(WRITING_BLOCK_TEMPLATES.GOVERNANCE_RECONCILIATION.variants.CHANGES_REQUIRED.files[0]).toHaveProperty(
+      'sha256_before',
+    );
     const originalPath = WRITING_BLOCK_TEMPLATE_PATHS.LUNA_TASK;
     const originalScope = WRITING_BLOCK_TEMPLATES.LUNA_TASK.scope[0];
     expect(() => {
