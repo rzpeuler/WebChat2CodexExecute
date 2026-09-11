@@ -47,6 +47,34 @@ describe('phase eight dashboard contract', () => {
     expect(snapshot.recentError?.message).not.toContain('secret');
   });
 
+  it('sanitizes an execution recovery summary and supports the explicit continue command', () => {
+    const snapshot = sanitizeDashboardSnapshot({
+      recovery: {
+        outputKey: 'output-1',
+        outputType: 'GOVERNANCE_RECONCILIATION',
+        taskId: null,
+        roundId: 'round-1',
+        startedAt: '2026-09-10T01:02:03.000Z',
+        updatedAt: '2026-09-10T01:02:04.000Z',
+        interruptedPhase: 'APPLYING_UPDATES',
+        interruptedNodeId: 'apply-updates',
+        completedNodeIds: ['read-sol', 'parse-task'],
+        error: { code: 'APPLY_FAILED', message: 'Token=secret' },
+      },
+    });
+
+    expect(snapshot.recovery).toMatchObject({
+      outputKey: 'output-1',
+      interruptedNodeId: 'apply-updates',
+      completedNodeIds: ['read-sol', 'parse-task'],
+      error: { message: '[REDACTED]' },
+    });
+    expect(validateDashboardCommand({ command: 'continue-interrupted', confirm: true })).toEqual({
+      command: 'continue-interrupted',
+      confirm: true,
+    });
+  });
+
   it('backfills a safe action contract for snapshots produced by older clients', () => {
     const snapshot = sanitizeDashboardSnapshot({ status: 'IDLE' });
 
@@ -54,6 +82,7 @@ describe('phase eight dashboard contract', () => {
       'start',
       'pause',
       'retry-current-stage',
+      'continue-interrupted',
       'rebind',
       'governance-consistency-check',
       'open-edge',

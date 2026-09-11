@@ -37,12 +37,14 @@ import {
   type OrchestratorSnapshots,
   type OrchestratorState,
   type OrchestratorStateStore,
+  type ExecutionRecoveryRecord,
   type PendingCodeSyncState,
   type PendingReconciliationSyncState,
   type SolMessageSource,
 } from './types.js';
 
 const MAX_RETRIES = 3;
+const LEGACY_RECOVERY_OUTPUT_KEY = '__legacy_recovery_pending__';
 
 const DEFAULT_STATE: OrchestratorState = {
   version: 1,
@@ -63,6 +65,7 @@ const DEFAULT_STATE: OrchestratorState = {
   loopGraph: createLoopGraph(null, new Date(0).toISOString()),
   pendingCodeSync: null,
   pendingReconciliationSync: null,
+  executionRecovery: null,
   activeSolSession: null,
 };
 
@@ -97,7 +100,6 @@ export class MainOrchestrator implements Orchestrator {
   private readonly expectedRemoteUrl: string | null | undefined;
   private readonly model: string | undefined;
   private readonly executablePath: string | undefined;
-  private readonly baselineOutputHash: string | null | undefined;
   private readonly now: () => Date;
   private state: OrchestratorState = cloneState(DEFAULT_STATE);
   private baseline: Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>> | null = null;
@@ -110,6 +112,7 @@ export class MainOrchestrator implements Orchestrator {
   private roundPromise: Promise<OrchestratorResult> | null = null;
   private reconciliationPromise: Promise<GovernanceReconciliationRunResult> | null = null;
   private retryPromise: Promise<OrchestratorResult> | null = null;
+  private continuePromise: Promise<OrchestratorResult> | null = null;
   private orchestrationTail: Promise<void> = Promise.resolve();
   private dashboardOperationPromise: Promise<void> | null = null;
   private readonly dashboardNavigationPromises = new Map<'open-edge' | 'open-project', Promise<void>>();
@@ -132,7 +135,6 @@ export class MainOrchestrator implements Orchestrator {
     this.expectedRemoteUrl = options.expectedRemoteUrl;
     this.model = options.model;
     this.executablePath = options.executablePath;
-    this.baselineOutputHash = options.baselineOutputHash;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -144,6 +146,7 @@ export class MainOrchestrator implements Orchestrator {
       if (stored !== null && stored !== undefined && stored.version === 1) this.state = normalizeState(stored);
       this.pendingCodeSync = clonePendingCodeSync(this.state.pendingCodeSync);
       this.pendingReconciliationSync = clonePendingReconciliationSync(this.state.pendingReconciliationSync);
+      this.state.executionRecovery = cloneExecutionRecovery(this.state.executionRecovery);
       const interrupted = this.state.active || this.state.status === 'RUNNING';
       this.state.active = false;
       if (interrupted) {
@@ -184,6 +187,7 @@ export class MainOrchestrator implements Orchestrator {
       luna: this.state.luna,
       commits: this.state.commits,
       recentError: this.state.recentError,
+      recovery: this.state.executionRecovery,
       loopGraph: this.state.loopGraph,
       actions: this.dashboardActions(),
     });
@@ -193,7 +197,11 @@ export class MainOrchestrator implements Orchestrator {
     const roundBusy = this.roundPromise !== null;
     const reconciliationBusy = this.reconciliationPromise !== null;
     const operationBusy =
-      roundBusy || reconciliationBusy || this.retryPromise !== null || this.dashboardOperationPromise !== null;
+      roundBusy ||
+      reconciliationBusy ||
+      this.retryPromise !== null ||
+      this.continuePromise !== null ||
+      this.dashboardOperationPromise !== null;
     const hasRecoverableError =
       this.state.retryCount < MAX_RETRIES &&
       (this.pendingCodeSync !== null ||
@@ -220,6 +228,11 @@ export class MainOrchestrator implements Orchestrator {
           : hasRecoverableError
             ? enabled()
             : disabled('当前没有可重试的阶段错误；如已修复 Sol 输出，请启动自动循环重新读取。'),
+      'continue-interrupted': operationBusy
+        ? disabled('已有操作正在处理中。', true)
+        : !this.state.active && this.state.executionRecovery?.awaitingConfirmation === true
+          ? enabled()
+          : disabled('当前没有等待确认的中断执行记录。'),
       rebind: operationBusy
         ? disabled('已有操作正在处理中。', operationBusy)
         : callbackAvailable('rebind')
@@ -249,6 +262,15 @@ export class MainOrchestrator implements Orchestrator {
 
   async start(): Promise<OrchestratorResult> {
     await this.initialize();
+    const hasInterruptedExecution =
+      this.state.executionRecovery !== null ||
+      this.state.loopGraph.nodes.some(
+        (node) => node.state === 'RECOVERABLE_BLOCKED' || node.state === 'NEEDS_USER_ACTION',
+      );
+    if (this.state.executionRecovery === null && hasInterruptedExecution) {
+      const legacy = this.legacyRecoveryRecord();
+      if (legacy !== null) this.state.executionRecovery = legacy;
+    }
     if (this.pendingReconciliationSync !== null) {
       if (this.state.retryCount >= MAX_RETRIES) return this.pauseForRetryLimit();
       this.state.active = true;
@@ -308,6 +330,36 @@ export class MainOrchestrator implements Orchestrator {
       return await operation;
     } finally {
       this.retryPromise = null;
+    }
+  }
+
+  async continueInterrupted(): Promise<OrchestratorResult> {
+    await this.initialize();
+    if (this.continuePromise !== null) return this.continuePromise;
+    const operation = this.withOrchestrationLock(async () => {
+      const recovery = this.state.executionRecovery;
+      if (recovery === null || !recovery.awaitingConfirmation)
+        return result('PAUSED', this.state, '当前没有等待确认的中断执行记录。');
+      this.state.executionRecovery = { ...recovery, awaitingConfirmation: false, updatedAt: this.now().toISOString() };
+      this.state.active = true;
+      this.state.status = 'RUNNING';
+      this.state.recentError = null;
+      this.state.taskId = recovery.taskId;
+      const nodeId = recovery.interruptedNodeId ?? nodeForPhase(recovery.interruptedPhase) ?? 'parse-task';
+      this.state.phase =
+        recovery.interruptedPhase === 'PAUSED' || recovery.interruptedPhase === 'FAILED'
+          ? 'PARSING'
+          : recovery.interruptedPhase;
+      this.activateGraphNode(nodeId, recovery.taskId);
+      this.touchState();
+      await this.persist();
+      return this.processRound();
+    });
+    this.continuePromise = operation;
+    try {
+      return await operation;
+    } finally {
+      this.continuePromise = null;
     }
   }
 
@@ -394,6 +446,9 @@ export class MainOrchestrator implements Orchestrator {
         case 'retry-current-stage':
           void this.retryCurrentStage().catch(() => undefined);
           return accepted('RETRY_ACCEPTED', '已接受当前阶段重试。');
+        case 'continue-interrupted':
+          void this.continueInterrupted().catch(() => undefined);
+          return accepted('CONTINUE_ACCEPTED', '已接受继续执行，将从中断节点恢复。');
         case 'rebind':
           return await this.invokeCallback('rebind', '重新绑定回调不可用。');
         case 'governance-consistency-check':
@@ -481,6 +536,13 @@ export class MainOrchestrator implements Orchestrator {
     } else if (this.state.phase === 'PAUSED' || this.state.phase === 'FAILED') this.state.phase = 'WAITING_FOR_SOL';
     if (this.state.phase === 'WAITING_FOR_SOL') this.resumeWaitingGraph();
     this.state.recentError = null;
+    if (this.state.executionRecovery !== null) {
+      this.state.executionRecovery = {
+        ...this.state.executionRecovery,
+        awaitingConfirmation: false,
+        updatedAt: this.now().toISOString(),
+      };
+    }
     this.touchState();
     await this.persist();
     return this.processRound().catch((error) =>
@@ -595,6 +657,7 @@ export class MainOrchestrator implements Orchestrator {
       );
     }
     if (this.baseline === null) this.baseline = { ...input.baseline, worktree: [...input.baseline.worktree] };
+    this.prepareRecoveryRecord(outputKey, 'GOVERNANCE_RECONCILIATION', null);
 
     await this.setPhase('PARSING', 'RUNNING', null);
     const parsed = parseWritingBlocks(input.solOutput);
@@ -695,6 +758,7 @@ export class MainOrchestrator implements Orchestrator {
   }
 
   private async finishIndependentRound(wasActive: boolean): Promise<void> {
+    this.state.executionRecovery = null;
     await this.setPhase(wasActive ? 'WAITING_FOR_SOL' : 'IDLE', wasActive ? 'RUNNING' : 'IDLE', null);
   }
 
@@ -726,15 +790,6 @@ export class MainOrchestrator implements Orchestrator {
         return result('WAITING', this.state, message);
       }
       if (
-        this.baselineOutputHash !== undefined &&
-        observation.latestAssistantHash === this.baselineOutputHash &&
-        !isGovernanceReconciliationOutput(observation.latestAssistantText)
-      ) {
-        const message = '已确认绑定时的历史消息，不执行该消息。';
-        await this.enterWaiting(message);
-        return result('WAITING', this.state, message);
-      }
-      if (
         this.state.processedOutputKey === outputKeyFor(observation) ||
         (this.baseline !== null &&
           this.state.processedOutputKey ===
@@ -744,6 +799,7 @@ export class MainOrchestrator implements Orchestrator {
         await this.enterWaiting(message);
         return result('WAITING', this.state, message);
       }
+      this.prepareRecoveryRecord(outputKeyFor(observation), 'UNKNOWN', null);
       await this.beginRound();
     } else {
       await this.setPhase('READING_SOL', 'RUNNING');
@@ -775,14 +831,6 @@ export class MainOrchestrator implements Orchestrator {
       await this.enterWaiting('Sol 尚未产生稳定的可执行完成输出。');
       return result('WAITING', this.state, 'Sol 尚未产生稳定的可执行完成输出。');
     }
-    if (
-      !waitingForNextOutput &&
-      this.baselineOutputHash !== undefined &&
-      observation.latestAssistantHash === this.baselineOutputHash &&
-      !isGovernanceReconciliationOutput(observation.latestAssistantText)
-    )
-      return this.finishWaiting(observation, '已确认绑定时的历史消息，不执行该消息。');
-
     const outputKey = outputKeyFor(observation);
     if (!waitingForNextOutput && this.state.processedOutputKey === outputKey) {
       this.markNodesNotApplicable([
@@ -799,9 +847,12 @@ export class MainOrchestrator implements Orchestrator {
     if (observation.projectFingerprint === null)
       return this.pauseForCode('SOL_PROJECT_UNKNOWN', '无法确认 Sol 输出属于绑定 Project。');
 
+    this.prepareRecoveryRecord(outputKey, 'UNKNOWN', null);
+
     const userMessage = extractUserMessage(observation.latestAssistantText);
     if (userMessage !== null) {
       this.state.processedOutputKey = outputKey;
+      this.state.executionRecovery = null;
       this.markNodesNotApplicable([
         'parse-task',
         'apply-updates',
@@ -838,12 +889,33 @@ export class MainOrchestrator implements Orchestrator {
         ],
       });
     } catch (error) {
+      this.prepareRecoveryRecord(outputKey, 'UNKNOWN', null);
       return this.pauseFor(error, 'Writing Block 协议无效，已拒绝启动 Luna。');
     }
     if (parsed.blocked.length > 0) {
       return this.pauseForCode('SOL_BLOCKED', parsed.blocked.map((block) => block.fields.reason).join('\n'), true);
     }
     if (!this.state.active) return result('PAUSED', this.state, '编排器已暂停。');
+
+    this.prepareRecoveryRecord(
+      outputKey,
+      parsed.governanceReconciliation === null
+        ? parsed.lunaTask === null
+          ? 'UNKNOWN'
+          : 'LUNA_TASK'
+        : 'GOVERNANCE_RECONCILIATION',
+      parsed.lunaTask?.fields.task_id ?? null,
+    );
+    if (this.state.executionRecovery?.awaitingConfirmation === true) {
+      const message = '检测到该 Sol 输出已有未完成的执行记录，请确认是否从中断节点继续。';
+      await this.setPhase('PARSING', 'RUNNING', this.state.taskId);
+      return this.pauseForCode(
+        'EXECUTION_RECOVERY_CONFIRMATION_REQUIRED',
+        message,
+        true,
+        '请查看解析任务书节点的执行摘要并选择继续。',
+      );
+    }
 
     try {
       await this.ensureBaseline();
@@ -860,6 +932,7 @@ export class MainOrchestrator implements Orchestrator {
       if (!this.state.active) return result('PAUSED', this.state, '编排器已暂停。');
       if (parsed.lunaTask === null) {
         this.state.processedOutputKey = outputKey;
+        this.state.executionRecovery = null;
         this.markNodesNotApplicable(['run-luna', 'sync-code', 'notify-sol']);
         await this.setPhase('WAITING_FOR_SOL', 'RUNNING');
         return result(
@@ -1057,6 +1130,7 @@ export class MainOrchestrator implements Orchestrator {
     this.state.pendingCodeSync = null;
     this.pendingCodeSync = null;
     this.clearPendingReconciliationRetry();
+    this.state.executionRecovery = null;
     this.state.retryCount = 0;
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
     return result('COMPLETED', this.state, `任务 ${pending.taskId} 已完成并同步。`);
@@ -1108,11 +1182,6 @@ export class MainOrchestrator implements Orchestrator {
     }
   }
 
-  private finishWaiting(observation: EdgeSolObservation, message: string): Promise<OrchestratorResult> {
-    this.state.processedOutputKey = outputKeyFor(observation);
-    return this.enterWaiting(message).then(() => result('WAITING', this.state, message));
-  }
-
   private async setPhase(
     phase: OrchestratorState['phase'],
     status: OrchestratorState['status'],
@@ -1148,10 +1217,13 @@ export class MainOrchestrator implements Orchestrator {
     needsUser = false,
     suggestion = '请检查状态面板后重试。',
   ): Promise<OrchestratorResult> {
+    const interruptedPhase = this.state.phase;
+    const interruptedNodeId = this.state.loopGraph.currentNodeId;
     this.state.active = false;
     this.state.status = needsUser ? 'NEEDS_USER_ACTION' : 'PAUSED';
     this.state.phase = 'PAUSED';
     this.state.recentError = { code, message };
+    this.markRecoveryInterrupted(interruptedPhase, interruptedNodeId, { code, message });
     this.blockActiveGraphNode(
       needsUser || dashboardNeedsNewSol({ code, message }) ? 'NEEDS_USER_ACTION' : 'RECOVERABLE_BLOCKED',
       code,
@@ -1177,10 +1249,13 @@ export class MainOrchestrator implements Orchestrator {
   private async failFor(error: unknown): Promise<OrchestratorResult> {
     const code = errorCode(error);
     const message = error instanceof Error ? error.message : String(error);
+    const interruptedPhase = this.state.phase;
+    const interruptedNodeId = this.state.loopGraph.currentNodeId;
     this.state.active = false;
     this.state.status = 'FAILED';
     this.state.phase = 'FAILED';
     this.state.recentError = { code, message };
+    this.markRecoveryInterrupted(interruptedPhase, interruptedNodeId, { code, message });
     this.blockActiveGraphNode(
       dashboardNeedsNewSol({ code, message }) ? 'NEEDS_USER_ACTION' : 'RECOVERABLE_BLOCKED',
       code,
@@ -1218,6 +1293,92 @@ export class MainOrchestrator implements Orchestrator {
     const now = this.now().toISOString();
     this.state.loopGraph = createLoopGraph(`round-${this.state.revision + 1}-${this.now().getTime()}`, now);
     await this.setPhase('READING_SOL', 'RUNNING', null);
+  }
+
+  private prepareRecoveryRecord(
+    outputKey: string,
+    outputType: ExecutionRecoveryRecord['outputType'],
+    taskId: string | null,
+  ): void {
+    const existing = this.state.executionRecovery;
+    if (existing !== null && (existing.outputKey === outputKey || existing.outputKey === LEGACY_RECOVERY_OUTPUT_KEY)) {
+      this.state.executionRecovery = {
+        ...existing,
+        outputKey,
+        outputType: existing.outputType === 'UNKNOWN' ? outputType : existing.outputType,
+        taskId: taskId ?? existing.taskId,
+        updatedAt: this.now().toISOString(),
+      };
+      return;
+    }
+
+    const legacy = this.legacyRecoveryRecord();
+    const now = this.now().toISOString();
+    this.state.executionRecovery = {
+      outputKey,
+      outputType,
+      taskId,
+      roundId: this.state.loopGraph.roundId,
+      startedAt: legacy?.startedAt ?? now,
+      updatedAt: now,
+      interruptedPhase: legacy?.interruptedPhase ?? this.state.phase,
+      interruptedNodeId: legacy?.interruptedNodeId ?? null,
+      completedNodeIds: legacy?.completedNodeIds ?? [],
+      error: legacy?.error ?? null,
+      awaitingConfirmation: legacy !== null,
+    };
+  }
+
+  private legacyRecoveryRecord(): ExecutionRecoveryRecord | null {
+    const interruptedNode = this.state.loopGraph.nodes.find(
+      (node) => node.state === 'RECOVERABLE_BLOCKED' || node.state === 'NEEDS_USER_ACTION',
+    );
+    if (interruptedNode === undefined || this.state.recentError === null || this.state.loopGraph.roundId === null)
+      return null;
+    return {
+      outputKey: LEGACY_RECOVERY_OUTPUT_KEY,
+      outputType: 'UNKNOWN',
+      taskId: this.state.taskId,
+      roundId: this.state.loopGraph.roundId,
+      startedAt: interruptedNode.startedAt ?? this.state.updatedAt,
+      updatedAt: this.state.updatedAt,
+      interruptedPhase: phaseForNode(interruptedNode.id),
+      interruptedNodeId: interruptedNode.id,
+      completedNodeIds: this.state.loopGraph.nodes.filter((node) => node.state === 'COMPLETED').map((node) => node.id),
+      error: { ...this.state.recentError },
+      awaitingConfirmation: true,
+    };
+  }
+
+  private markRecoveryInterrupted(
+    interruptedPhase: OrchestratorState['phase'],
+    interruptedNodeId: LoopGraphNodeId | null,
+    error: { code: string; message: string },
+  ): void {
+    const recovery = this.state.executionRecovery;
+    if (recovery === null) return;
+    this.state.executionRecovery = {
+      ...recovery,
+      updatedAt: this.now().toISOString(),
+      interruptedPhase,
+      interruptedNodeId,
+      completedNodeIds: this.state.loopGraph.nodes.filter((node) => node.state === 'COMPLETED').map((node) => node.id),
+      error: { ...error },
+      awaitingConfirmation: true,
+    };
+  }
+
+  private recoveryDetails(): string[] {
+    const recovery = this.state.executionRecovery;
+    if (recovery === null) return [];
+    return compactDetails([
+      `执行类型：${recovery.outputType}`,
+      recovery.taskId === null ? '' : `任务：${recovery.taskId}`,
+      `已完成节点：${recovery.completedNodeIds.join('、') || '无'}`,
+      `中断节点：${recovery.interruptedNodeId ?? '未知'}`,
+      recovery.error === null ? '' : `中断原因：${recovery.error.code}：${recovery.error.message}`,
+      '请确认是否从中断节点继续。',
+    ]);
   }
 
   private async enterWaiting(message: string): Promise<void> {
@@ -1304,8 +1465,13 @@ export class MainOrchestrator implements Orchestrator {
     const active = this.state.loopGraph.nodes.find((node) => node.state === 'ACTIVE');
     if (active === undefined) return;
     active.state = state;
-    active.summary = state === 'NEEDS_USER_ACTION' ? '需要用户处理后继续。' : '可恢复错误，等待重试。';
-    active.details = compactDetails([`错误：${code}`, message]);
+    active.summary =
+      code === 'EXECUTION_RECOVERY_CONFIRMATION_REQUIRED'
+        ? '检测到上次未完成的执行，等待确认恢复。'
+        : state === 'NEEDS_USER_ACTION'
+          ? '需要用户处理后继续。'
+          : '可恢复错误，等待重试。';
+    active.details = compactDetails([`错误：${code}`, message, ...this.recoveryDetails()]);
     active.updatedAt = this.now().toISOString();
     this.state.loopGraph.currentNodeId = active.id;
   }
@@ -1373,8 +1539,57 @@ function cloneState(state: OrchestratorState): OrchestratorState {
     loopGraph: sanitized.loopGraph,
     pendingCodeSync: clonePendingCodeSync(state.pendingCodeSync),
     pendingReconciliationSync: clonePendingReconciliationSync(state.pendingReconciliationSync),
+    executionRecovery: cloneExecutionRecovery(state.executionRecovery),
     activeSolSession: state.activeSolSession === null ? null : { ...state.activeSolSession },
   };
+}
+
+function cloneExecutionRecovery(value: unknown): ExecutionRecoveryRecord | null {
+  const recovery = normalizeExecutionRecovery(value);
+  if (recovery === null) return null;
+  return {
+    ...recovery,
+    completedNodeIds: [...recovery.completedNodeIds],
+    error: recovery.error === null ? null : { ...recovery.error },
+  };
+}
+
+function normalizeExecutionRecovery(value: unknown): ExecutionRecoveryRecord | null {
+  if (!isRecord(value)) return null;
+  const outputKey = boundedPendingText(value.outputKey, 128);
+  const outputType = value.outputType;
+  const taskId = boundedPendingText(value.taskId, 256);
+  const roundId = boundedPendingText(value.roundId, 256);
+  const startedAt = boundedPendingText(value.startedAt, 64);
+  const updatedAt = boundedPendingText(value.updatedAt, 64);
+  const interruptedPhase = value.interruptedPhase;
+  const interruptedNodeId = isLoopGraphNodeId(value.interruptedNodeId) ? value.interruptedNodeId : null;
+  const completedNodeIds = Array.isArray(value.completedNodeIds)
+    ? value.completedNodeIds.filter(isLoopGraphNodeId).slice(0, LOOP_GRAPH_NODE_DEFINITIONS.length)
+    : [];
+  const error = normalizeRecoveryError(value.error);
+  if (outputKey === null || !isRecoveryOutputType(outputType) || startedAt === null || updatedAt === null) return null;
+  if (!isOrchestratorPhase(interruptedPhase) || typeof value.awaitingConfirmation !== 'boolean') return null;
+  return {
+    outputKey,
+    outputType,
+    taskId,
+    roundId,
+    startedAt,
+    updatedAt,
+    interruptedPhase,
+    interruptedNodeId,
+    completedNodeIds,
+    error,
+    awaitingConfirmation: value.awaitingConfirmation,
+  };
+}
+
+function normalizeRecoveryError(value: unknown): { code: string; message: string } | null {
+  if (!isRecord(value)) return null;
+  const code = boundedPendingText(value.code, 128);
+  const message = boundedPendingText(value.message, 2048);
+  return code === null || message === null ? null : { code, message };
 }
 
 function normalizeState(state: OrchestratorState): OrchestratorState {
@@ -1391,6 +1606,7 @@ function normalizeState(state: OrchestratorState): OrchestratorState {
       .loopGraph,
     pendingCodeSync: normalizePendingCodeSync(source.pendingCodeSync),
     pendingReconciliationSync: normalizePendingReconciliationSync(source.pendingReconciliationSync),
+    executionRecovery: normalizeExecutionRecovery(source.executionRecovery),
     activeSolSession:
       source.activeSolSession === null || source.activeSolSession === undefined ? null : { ...source.activeSolSession },
   };
@@ -1570,6 +1786,53 @@ function nodeForPhase(phase: OrchestratorState['phase']): LoopGraphNodeId | null
   }
 }
 
+function phaseForNode(nodeId: LoopGraphNodeId): OrchestratorState['phase'] {
+  switch (nodeId) {
+    case 'read-sol':
+      return 'READING_SOL';
+    case 'parse-task':
+      return 'PARSING';
+    case 'apply-updates':
+      return 'APPLYING_UPDATES';
+    case 'sync-governance':
+      return 'SYNCING_GOVERNANCE';
+    case 'run-luna':
+      return 'RUNNING_LUNA';
+    case 'sync-code':
+      return 'SYNCING_CODE';
+    case 'notify-sol':
+      return 'NOTIFYING_SOL';
+    case 'wait-sol':
+      return 'WAITING_FOR_SOL';
+  }
+}
+
+function isOrchestratorPhase(value: unknown): value is OrchestratorState['phase'] {
+  return (
+    value === 'IDLE' ||
+    value === 'READING_SOL' ||
+    value === 'PARSING' ||
+    value === 'APPLYING_UPDATES' ||
+    value === 'SYNCING_GOVERNANCE' ||
+    value === 'RUNNING_LUNA' ||
+    value === 'SYNCING_CODE' ||
+    value === 'NOTIFYING_SOL' ||
+    value === 'WAITING_FOR_SOL' ||
+    value === 'PAUSED' ||
+    value === 'FAILED'
+  );
+}
+
+function isRecoveryOutputType(value: unknown): value is ExecutionRecoveryRecord['outputType'] {
+  return (
+    value === 'UNKNOWN' || value === 'LUNA_TASK' || value === 'GOVERNANCE_RECONCILIATION' || value === 'USER_MESSAGE'
+  );
+}
+
+function isLoopGraphNodeId(value: unknown): value is LoopGraphNodeId {
+  return LOOP_GRAPH_NODE_DEFINITIONS.some((definition) => definition.id === value);
+}
+
 function phaseSummary(nodeId: LoopGraphNodeId, taskId: string | null, state: OrchestratorState): string {
   switch (nodeId) {
     case 'read-sol':
@@ -1625,15 +1888,6 @@ function outputKeyFor(observation: EdgeSolObservation): string {
 
 function reconciliationOutputKey(solOutput: string, baselineHead: string): string {
   return createHash('sha256').update(`governance-reconciliation\n${baselineHead}\n${solOutput}`).digest('hex');
-}
-
-function isGovernanceReconciliationOutput(solOutput: string): boolean {
-  try {
-    const parsed = parseWritingBlocks(solOutput);
-    return parsed.blocks.length === 1 && parsed.governanceReconciliation !== null;
-  } catch {
-    return false;
-  }
 }
 
 function contextEventId(observation: EdgeSolObservation): string {

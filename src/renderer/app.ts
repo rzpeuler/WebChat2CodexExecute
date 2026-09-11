@@ -67,11 +67,18 @@ let lastCurrentLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
 const loopGraphNodeButtons = new Map<LoopGraphNodeId, LoopGraphButtonParts>();
 const pendingDashboardCommands = new Set<DashboardCommandName>();
 
-const dangerousDashboardCommands = new Set<DashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
+const dangerousDashboardCommands = new Set<DashboardCommandName>([
+  'start',
+  'pause',
+  'retry-current-stage',
+  'continue-interrupted',
+  'rebind',
+]);
 const dashboardCommandNames: DashboardCommandName[] = [
   'start',
   'pause',
   'retry-current-stage',
+  'continue-interrupted',
   'rebind',
   'governance-consistency-check',
   'open-edge',
@@ -136,6 +143,7 @@ interface LoopGraphButtonParts {
   startButton: HTMLButtonElement;
   pauseButton: HTMLButtonElement;
   retryButton: HTMLButtonElement;
+  continueButton: HTMLButtonElement;
 }
 
 function setStatus(message: string): void {
@@ -457,7 +465,8 @@ function ensureLoopGraphButtons(): void {
     const startButton = createActionButton('start', '启动');
     const pauseButton = createActionButton('pause', '暂停');
     const retryButton = createActionButton('retry-current-stage', '重试');
-    actions.append(startButton, pauseButton, retryButton);
+    const continueButton = createActionButton('continue-interrupted', '继续执行');
+    actions.append(startButton, pauseButton, retryButton, continueButton);
     wrapper.append(button, actions);
     loopGraphElement.append(wrapper);
     loopGraphNodeButtons.set(definition.id, {
@@ -471,6 +480,7 @@ function ensureLoopGraphButtons(): void {
       startButton,
       pauseButton,
       retryButton,
+      continueButton,
     });
   }
 }
@@ -505,7 +515,14 @@ function renderLoopGraph(snapshot: DashboardSnapshot): void {
       currentNodeId === node.id &&
       (node.state === 'RECOVERABLE_BLOCKED' || node.state === 'NEEDS_USER_ACTION' || node.state === 'PAUSED')
     );
-    parts.actions.hidden = parts.startButton.hidden && parts.pauseButton.hidden && parts.retryButton.hidden;
+    parts.continueButton.hidden = !(
+      snapshot.recovery !== null &&
+      snapshot.recovery.interruptedNodeId === node.id &&
+      snapshot.recovery.error !== null &&
+      node.state === 'NEEDS_USER_ACTION'
+    );
+    parts.actions.hidden =
+      parts.startButton.hidden && parts.pauseButton.hidden && parts.retryButton.hidden && parts.continueButton.hidden;
   }
   if (loopGraphRoundElement !== null)
     loopGraphRoundElement.textContent = `当前轮次：${snapshot.loopGraph.roundId ?? '—'}`;
@@ -626,10 +643,14 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
       start: '启动自动循环',
       pause: '暂停自动循环',
       'retry-current-stage': '重试当前阶段',
+      'continue-interrupted': '继续上次中断的执行',
       rebind: '重新绑定 Sol 会话',
     };
     if (!window.confirm(`确认执行“${labels[command]}”？`)) return null;
-    return { command: command as 'start' | 'pause' | 'retry-current-stage' | 'rebind', confirm: true };
+    return {
+      command: command as 'start' | 'pause' | 'retry-current-stage' | 'continue-interrupted' | 'rebind',
+      confirm: true,
+    };
   }
   return { command: command as 'governance-consistency-check' | 'open-edge' | 'open-project' | 'view-report' };
 }

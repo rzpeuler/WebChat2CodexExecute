@@ -5,6 +5,7 @@ export const DASHBOARD_COMMANDS = [
   'start',
   'pause',
   'retry-current-stage',
+  'continue-interrupted',
   'rebind',
   'governance-consistency-check',
   'open-edge',
@@ -13,7 +14,8 @@ export const DASHBOARD_COMMANDS = [
 ] as const;
 
 export type DashboardCommandName = (typeof DASHBOARD_COMMANDS)[number];
-export type DangerousDashboardCommandName = 'start' | 'pause' | 'retry-current-stage' | 'rebind';
+export type DangerousDashboardCommandName =
+  'start' | 'pause' | 'retry-current-stage' | 'continue-interrupted' | 'rebind';
 
 export interface DashboardActionState {
   enabled: boolean;
@@ -80,6 +82,19 @@ export interface DashboardLunaSnapshot {
 export interface DashboardErrorSnapshot {
   code: string;
   message: string;
+}
+
+export interface DashboardRecoverySnapshot {
+  outputKey: string;
+  outputType: string;
+  taskId: string | null;
+  roundId: string | null;
+  startedAt: string;
+  updatedAt: string;
+  interruptedPhase: string;
+  interruptedNodeId: LoopGraphNodeId | null;
+  completedNodeIds: LoopGraphNodeId[];
+  error: DashboardErrorSnapshot | null;
 }
 
 export const LOOP_GRAPH_NODE_DEFINITIONS = [
@@ -149,6 +164,7 @@ export interface DashboardSnapshot {
     remote: string | null;
   };
   recentError: DashboardErrorSnapshot | null;
+  recovery: DashboardRecoverySnapshot | null;
   loopGraph: LoopGraphSnapshot;
   actions: DashboardActions;
 }
@@ -166,11 +182,18 @@ export interface DashboardSnapshotSource {
   luna?: Partial<DashboardLunaSnapshot>;
   commits?: Partial<DashboardSnapshot['commits']>;
   recentError?: unknown;
+  recovery?: unknown;
   loopGraph?: LoopGraphSnapshotSource | null;
   actions?: Partial<Record<DashboardCommandName, Partial<DashboardActionState>>>;
 }
 
-const DANGEROUS_COMMANDS = new Set<DangerousDashboardCommandName>(['start', 'pause', 'retry-current-stage', 'rebind']);
+const DANGEROUS_COMMANDS = new Set<DangerousDashboardCommandName>([
+  'start',
+  'pause',
+  'retry-current-stage',
+  'continue-interrupted',
+  'rebind',
+]);
 
 export function validateDashboardCommand(value: unknown): DashboardCommand {
   if (!isRecord(value) || typeof value.command !== 'string' || !isDashboardCommandName(value.command)) {
@@ -241,8 +264,39 @@ export function sanitizeDashboardSnapshot(source: DashboardSnapshotSource): Dash
       remote: sanitizeCommit(source.commits?.remote),
     },
     recentError,
+    recovery: sanitizeDashboardRecovery(source.recovery),
     loopGraph: sanitizeLoopGraph(source.loopGraph),
     actions: sanitizeDashboardActions(source.actions),
+  };
+}
+
+function sanitizeDashboardRecovery(value: unknown): DashboardRecoverySnapshot | null {
+  if (!isRecord(value)) return null;
+  const outputKey = sanitizeSafeText(value.outputKey, 128);
+  const outputType = sanitizeSafeText(value.outputType, 64);
+  const taskId = sanitizeSafeText(value.taskId, 128) || null;
+  const roundId = sanitizeOptionalIdentifier(value.roundId);
+  const startedAt = sanitizeTimestamp(value.startedAt);
+  const updatedAt = sanitizeTimestamp(value.updatedAt);
+  const interruptedPhase = sanitizeSafeText(value.interruptedPhase, 64);
+  const interruptedNodeId = isLoopGraphNodeId(value.interruptedNodeId) ? value.interruptedNodeId : null;
+  const completedNodeIds = Array.isArray(value.completedNodeIds)
+    ? value.completedNodeIds.filter(isLoopGraphNodeId).slice(0, LOOP_GRAPH_NODE_DEFINITIONS.length)
+    : [];
+  const error = sanitizeDashboardError(value.error);
+  if (outputKey === '' || outputType === '' || startedAt === null || updatedAt === null || interruptedPhase === '')
+    return null;
+  return {
+    outputKey,
+    outputType,
+    taskId,
+    roundId,
+    startedAt,
+    updatedAt,
+    interruptedPhase,
+    interruptedNodeId,
+    completedNodeIds,
+    error,
   };
 }
 

@@ -2,6 +2,7 @@ import type {
   DashboardCommand,
   DashboardCommandResult,
   DashboardSnapshot,
+  LoopGraphNodeId,
   LoopGraphSnapshot,
 } from '../../shared/contracts/dashboard.js';
 import type { TopLevelStatus } from '../../shared/contracts/top-level-state.js';
@@ -66,6 +67,20 @@ export interface PendingReconciliationSyncState {
   outputKey: string;
 }
 
+export interface ExecutionRecoveryRecord {
+  outputKey: string;
+  outputType: 'UNKNOWN' | 'LUNA_TASK' | 'GOVERNANCE_RECONCILIATION' | 'USER_MESSAGE';
+  taskId: string | null;
+  roundId: string | null;
+  startedAt: string;
+  updatedAt: string;
+  interruptedPhase: OrchestratorPhase;
+  interruptedNodeId: LoopGraphNodeId | null;
+  completedNodeIds: LoopGraphNodeId[];
+  error: { code: string; message: string } | null;
+  awaitingConfirmation: boolean;
+}
+
 export interface OrchestratorState {
   version: 1;
   revision: number;
@@ -86,6 +101,7 @@ export interface OrchestratorState {
   loopGraph: LoopGraphSnapshot;
   pendingCodeSync: PendingCodeSyncState | null;
   pendingReconciliationSync: PendingReconciliationSyncState | null;
+  executionRecovery: ExecutionRecoveryRecord | null;
   activeSolSession: {
     sessionId: string;
     conversationId: string | null;
@@ -192,7 +208,6 @@ export interface OrchestratorOptions {
   expectedRemoteUrl?: string | null;
   model?: string;
   executablePath?: string;
-  baselineOutputHash?: string | null;
   now?: () => Date;
 }
 
@@ -229,6 +244,7 @@ export interface Orchestrator {
   start(): Promise<OrchestratorResult>;
   pause(): Promise<OrchestratorResult>;
   retryCurrentStage(): Promise<OrchestratorResult>;
+  continueInterrupted(): Promise<OrchestratorResult>;
   runRound(): Promise<OrchestratorResult>;
   beginGovernanceReconciliationWait(): Promise<void>;
   pauseGovernanceReconciliation(error: unknown): Promise<void>;

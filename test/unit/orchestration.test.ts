@@ -1146,7 +1146,7 @@ ${invalidTask}`),
     expect(options.reconciliation?.apply).toHaveBeenCalledOnce();
   });
 
-  it('does not skip a baseline message when it is a valid governance reconciliation output', async () => {
+  it('processes the latest reconciliation output without a baseline history shortcut', async () => {
     const reconciliation = `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
 {
   "schema_version": 1,
@@ -1168,7 +1168,6 @@ ${invalidTask}`),
       .mockResolvedValue(reconciliationObservation);
     const options = baseOptions({
       edge: { observe },
-      baselineOutputHash: reconciliationObservation.latestAssistantHash,
       reconciliation: {
         apply: vi.fn(async () => ({
           runId: 'reconciliation-baseline',
@@ -1189,6 +1188,90 @@ ${invalidTask}`),
     expect(options.reconciliation?.apply).toHaveBeenCalledOnce();
     expect(options.git.syncGovernance).toHaveBeenCalledOnce();
     expect(orchestrator.getState()).toMatchObject({ phase: 'WAITING_FOR_SOL', recentError: null });
+  });
+
+  it('parses the latest output and asks before resuming a matching interrupted execution', async () => {
+    const reconciliation = `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
+{
+  "schema_version": 1,
+  "status": "CHANGES_REQUIRED",
+  "baseline_commit": "base-commit",
+  "files": [{
+    "path": "docs/governance/policy.md",
+    "action": "replace",
+    "reason": "clarify policy",
+    "sha256_before": "0000000000000000000000000000000000000000000000000000000000000000",
+    "content": "Updated policy"
+  }]
+}
+[/WRITING_BLOCK]`;
+    let saved: OrchestratorState | null = null;
+    const first = new MainOrchestrator(
+      baseOptions({
+        edge: { observe: vi.fn(async () => observation(reconciliation)) },
+        reconciliation: {
+          apply: vi.fn(async () => {
+            throw new OrchestratorError('GOVERNANCE_RECONCILIATION_APPLY_FAILED', '一致性文件写入失败。');
+          }),
+        },
+        stateStore: {
+          load: vi.fn(async () => null),
+          save: vi.fn(async (state) => {
+            saved = state;
+          }),
+        },
+      }),
+    );
+    await first.start();
+    await first.runRound();
+    expect(saved?.executionRecovery).toMatchObject({
+      outputType: 'GOVERNANCE_RECONCILIATION',
+      interruptedNodeId: 'apply-updates',
+      awaitingConfirmation: true,
+      error: { code: 'GOVERNANCE_RECONCILIATION_APPLY_FAILED' },
+    });
+
+    const second = new MainOrchestrator(
+      baseOptions({
+        edge: { observe: vi.fn(async () => observation(reconciliation)) },
+        reconciliation: {
+          apply: vi.fn(async () => ({
+            runId: 'reconciliation-resumed',
+            changedPaths: ['docs/governance/policy.md'],
+            backupPaths: [],
+          })),
+        },
+        stateStore: {
+          load: vi.fn(async () => saved),
+          save: vi.fn(async (state) => {
+            saved = state;
+          }),
+        },
+      }),
+    );
+    await second.start();
+    const waiting = await second.runRound();
+
+    expect(waiting).toMatchObject({ status: 'PAUSED', phase: 'PAUSED' });
+    expect(second.getDashboardSnapshot()).toMatchObject({
+      status: 'NEEDS_USER_ACTION',
+      recentError: { code: 'EXECUTION_RECOVERY_CONFIRMATION_REQUIRED' },
+      recovery: {
+        outputType: 'GOVERNANCE_RECONCILIATION',
+        interruptedNodeId: 'parse-task',
+        error: { code: 'EXECUTION_RECOVERY_CONFIRMATION_REQUIRED' },
+      },
+      actions: { 'continue-interrupted': { enabled: true, busy: false } },
+      loopGraph: { currentNodeId: 'parse-task' },
+    });
+    expect(second.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'parse-task')?.details).toEqual(
+      expect.arrayContaining([expect.stringContaining('中断原因')]),
+    );
+
+    const resumed = await second.continueInterrupted();
+    expect(resumed).toMatchObject({ status: 'COMPLETED', phase: 'WAITING_FOR_SOL' });
+    expect(second.getState().executionRecovery).toBeNull();
+    expect(second.getState().processedOutputKey).not.toBeNull();
   });
 
   it('retries only governance sync after the real applier has already changed files', async () => {
