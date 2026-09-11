@@ -129,8 +129,14 @@ function isValidBranchName(branch: string): boolean {
 }
 
 function matchesPath(path: string, pattern: string): boolean {
+  const rawPattern = pattern.replaceAll('\\', '/').replace(/^\.\//, '');
   const normalizedPath = normalizePath(path);
   const normalizedPattern = normalizePath(pattern);
+  // Older task books used a trailing slash to mean a recursive directory.
+  // Keep that spelling compatible while emitting /** in new templates.
+  if (rawPattern.endsWith('/')) {
+    return normalizedPath === normalizedPattern || normalizedPath.startsWith(`${normalizedPattern}/`);
+  }
   if (normalizedPattern.endsWith('/**')) {
     const prefix = normalizedPattern.slice(0, -3).replace(/\/$/, '');
     return normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
@@ -143,7 +149,11 @@ function matchesPath(path: string, pattern: string): boolean {
 }
 
 function assertSafePathList(paths: string[], label: string): string[] {
-  const normalized = paths.map(normalizePath);
+  const normalized = paths.map((path) => {
+    const rawPath = path.replaceAll('\\', '/').replace(/^\.\//, '');
+    const value = normalizePath(path);
+    return rawPath.endsWith('/') ? `${value}/**` : value;
+  });
   const invalid = normalized.find((path) => !isValidRelativePath(path));
   if (invalid !== undefined) {
     throw new GitControllerError('UNAUTHORIZED_CHANGE', `${label} contains an unsafe path`, { paths: [invalid] });

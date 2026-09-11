@@ -232,7 +232,7 @@ function promptForTask(task: LunaTaskBlock, snapshots: CodexSnapshots): string {
       architecture_snapshot: snapshots.architecture,
       instructions: {
         implementation:
-          'Decide implementation details inside the approved scope without asking for ordinary confirmation.',
+          'Decide implementation details inside the approved scope without asking for ordinary confirmation. Treat scope entries ending in /** as recursive directories; use exact relative paths for individual files. A legacy trailing slash may appear in an existing task and has the same recursive-directory meaning.',
         blocking:
           'Emit BLOCKED_EXTERNAL_SETUP for external credentials, conflicts, scope expansion, or high-risk operations.',
         result:

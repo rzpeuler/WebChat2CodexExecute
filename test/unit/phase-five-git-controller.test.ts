@@ -465,4 +465,24 @@ describe('GitController', () => {
     ).rejects.toMatchObject({ code: 'TESTS_NOT_PASSED' });
     expect(await readFile(join(root, 'change.ts'), 'utf8')).toContain('value');
   });
+
+  it('treats legacy trailing-slash directory scopes as recursive without widening exact file scopes', async () => {
+    const { root } = await repository();
+    const controller = new GitController();
+    const baseline = await controller.captureBaseline(root);
+    await mkdir(join(root, 'knowledge', 'production'), { recursive: true });
+    await mkdir(join(root, 'reports', 'nested'), { recursive: true });
+    await writeFile(join(root, 'knowledge', 'production', 'gateway.ts'), 'export const gateway = true;\n', 'utf8');
+    await writeFile(join(root, 'reports', 'nested', 'task.md'), '# Report\n', 'utf8');
+
+    await expect(
+      controller.syncCode({
+        baseline,
+        taskId: 'legacy-scope-task',
+        reportPath: 'reports/nested/task.md',
+        testsPassed: true,
+        allowedPaths: ['knowledge/production/', 'reports/'],
+      }),
+    ).resolves.toMatchObject({ kind: 'code' });
+  });
 });
