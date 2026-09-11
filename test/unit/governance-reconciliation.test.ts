@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -297,6 +297,109 @@ describe('governance reconciliation', () => {
     ).resolves.toBeUndefined();
     expect(await readFile(join(root, 'SECOND.md'), 'utf8')).toBe(second);
     expect(await readFile(join(root, 'THIRD.md'), 'utf8')).toBe('third concurrent\n');
+  });
+
+  it('retains the backup when an installed target is deleted before rollback', async () => {
+    const root = await project();
+    const original = '# Legacy\nKeep feature notes.\n';
+    const second = 'second legacy\n';
+    const third = 'third legacy\n';
+    await writeFile(join(root, 'SECOND.md'), second, 'utf8');
+    await writeFile(join(root, 'THIRD.md'), third, 'utf8');
+
+    await expect(
+      new GovernanceReconciliationApplier(root, {
+        runId: () => 'run-rollback-delete',
+        beforeReplace: async (_path, index) => {
+          if (index === 2) await rm(join(root, 'AGENTS.md'));
+        },
+      }).apply(
+        block({
+          status: 'CHANGES_REQUIRED',
+          baseline_commit: 'base',
+          files: [
+            {
+              path: 'AGENTS.md',
+              action: 'replace',
+              reason: 'update first',
+              sha256_before: canonicalSha(original),
+              content: '# Updated\n',
+            },
+            {
+              path: 'SECOND.md',
+              action: 'replace',
+              reason: 'update second',
+              sha256_before: canonicalSha(second),
+              content: 'second updated\n',
+            },
+            {
+              path: 'THIRD.md',
+              action: 'replace',
+              reason: 'force rollback',
+              sha256_before: canonicalSha(third),
+              content: 'third updated\n',
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'GOVERNANCE_RECONCILIATION_FILE_NOT_FOUND' });
+    await expect(access(join(root, 'AGENTS.md'))).rejects.toThrow();
+    await expect(
+      access(join(root, '.web-chat2codex/backups/reconciliation/run-rollback-delete/AGENTS.md')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('retains the backup when an installed target is replaced with a directory before rollback', async () => {
+    const root = await project();
+    const original = '# Legacy\nKeep feature notes.\n';
+    const second = 'second legacy\n';
+    const third = 'third legacy\n';
+    await writeFile(join(root, 'SECOND.md'), second, 'utf8');
+    await writeFile(join(root, 'THIRD.md'), third, 'utf8');
+
+    await expect(
+      new GovernanceReconciliationApplier(root, {
+        runId: () => 'run-rollback-directory',
+        beforeReplace: async (_path, index) => {
+          if (index === 2) {
+            await rm(join(root, 'AGENTS.md'));
+            await mkdir(join(root, 'AGENTS.md'));
+          }
+        },
+      }).apply(
+        block({
+          status: 'CHANGES_REQUIRED',
+          baseline_commit: 'base',
+          files: [
+            {
+              path: 'AGENTS.md',
+              action: 'replace',
+              reason: 'update first',
+              sha256_before: canonicalSha(original),
+              content: '# Updated\n',
+            },
+            {
+              path: 'SECOND.md',
+              action: 'replace',
+              reason: 'update second',
+              sha256_before: canonicalSha(second),
+              content: 'second updated\n',
+            },
+            {
+              path: 'THIRD.md',
+              action: 'replace',
+              reason: 'force rollback',
+              sha256_before: canonicalSha(third),
+              content: 'third updated\n',
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'GOVERNANCE_RECONCILIATION_NOT_REGULAR_TEXT' });
+    await expect(access(join(root, 'AGENTS.md'))).resolves.toBeUndefined();
+    await expect(
+      access(join(root, '.web-chat2codex/backups/reconciliation/run-rollback-directory/AGENTS.md')),
+    ).resolves.toBeUndefined();
   });
 
   it('fails closed when an earlier installed target is externally reformatted before success', async () => {

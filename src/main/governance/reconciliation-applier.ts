@@ -84,6 +84,24 @@ function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && 'code' in error && error.code === code;
 }
 
+type RollbackTargetState = 'missing' | 'regular' | 'other' | 'unknown';
+
+async function rollbackTargetState(path: string): Promise<RollbackTargetState> {
+  try {
+    const stats = await lstat(path);
+    if (!stats.isFile() || stats.isSymbolicLink()) return 'other';
+    try {
+      await readFile(path);
+      return 'regular';
+    } catch {
+      return 'unknown';
+    }
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return 'missing';
+    return 'unknown';
+  }
+}
+
 function hasUtf8Bom(content: Uint8Array): boolean {
   return content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf;
 }
@@ -374,14 +392,25 @@ export class GovernanceReconciliationApplier {
         try {
           let restoreBackup = item.movedToBackup;
           if (item.installed) {
-            const installed = await readRegularTextFile(item.absolutePath, item.relativePath);
-            // Compare exact installed bytes here: formatting-only external
-            // edits are still external edits and must be retained.
-            if (item.installedBytes !== null && installed.rawBytes.equals(item.installedBytes)) {
-              await rm(item.absolutePath, { force: true });
+            const state = await rollbackTargetState(item.absolutePath);
+            if (state === 'regular' && item.installedBytes !== null) {
+              const installed = await readFile(item.absolutePath);
+              // Compare exact installed bytes here: formatting-only external
+              // edits are still external edits and must be retained.
+              if (!installed.equals(item.installedBytes)) {
+                restoreBackup = false;
+              } else {
+                await rm(item.absolutePath, { force: true });
+              }
             } else {
+              // A missing, non-regular, unreadable, or otherwise uncertain
+              // target is external state. Never delete or overwrite it.
               restoreBackup = false;
             }
+          } else if (restoreBackup && (await rollbackTargetState(item.absolutePath)) !== 'missing') {
+            // The backup was created, but the target is no longer the expected
+            // empty path. Preserve external state instead of overwriting it.
+            restoreBackup = false;
           }
           if (restoreBackup) await rename(item.backupPath, item.absolutePath);
         } catch {
