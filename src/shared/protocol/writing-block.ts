@@ -295,6 +295,15 @@ export const WRITING_BLOCK_JSON_SCHEMAS = {
 
 const OPEN_MARKER = '[WRITING_BLOCK';
 const CLOSE_MARKER = '[/WRITING_BLOCK]';
+const ANGLE_OPEN_MARKER_PATTERN = /<WRITING_BLOCK\s+type="([^"]+)">/g;
+const ANGLE_CLOSE_MARKER_PATTERN = /<\/WRITING_BLOCK>/g;
+
+/** Normalize the XML-shaped wrapper observed in ChatGPT DOM output. */
+export function normalizeWritingBlockMarkers(input: string): string {
+  return input
+    .replace(ANGLE_OPEN_MARKER_PATTERN, '[WRITING_BLOCK type="$1"]')
+    .replace(ANGLE_CLOSE_MARKER_PATTERN, CLOSE_MARKER);
+}
 
 function decodeUnicodeEscapes(value: string): string {
   return value.replace(/\\u([0-9a-f]{4})/gi, (_match, code: string) => String.fromCharCode(Number.parseInt(code, 16)));
@@ -795,11 +804,12 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
   if (typeof input !== 'string') {
     throw new WritingBlockProtocolError('WRITING_BLOCK_INPUT_INVALID', 'Writing block input must be a string');
   }
+  const inputText = normalizeWritingBlockMarkers(input);
   const blocks: WritingBlock[] = [];
   let cursor = 0;
-  while (cursor < input.length) {
-    const nextOpen = input.indexOf(OPEN_MARKER, cursor);
-    const nextClose = input.indexOf(CLOSE_MARKER, cursor);
+  while (cursor < inputText.length) {
+    const nextOpen = inputText.indexOf(OPEN_MARKER, cursor);
+    const nextClose = inputText.indexOf(CLOSE_MARKER, cursor);
     if (nextClose >= 0 && (nextOpen < 0 || nextClose < nextOpen)) {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
@@ -808,7 +818,7 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
       );
     }
     if (nextOpen < 0) {
-      if (input.slice(cursor).trim() !== '') {
+      if (inputText.slice(cursor).trim() !== '') {
         throw new WritingBlockProtocolError(
           'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
           `第 ${blocks.length} 个 Writing Block 之外存在非空白文本。请删除块外说明文字。`,
@@ -817,7 +827,7 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
       }
       break;
     }
-    if (input.slice(cursor, nextOpen).trim() !== '') {
+    if (inputText.slice(cursor, nextOpen).trim() !== '') {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
         `第 ${blocks.length} 个 Writing Block 之外存在非空白文本。请删除块外说明文字。`,
@@ -825,8 +835,8 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
       );
     }
     const blockIndex = blocks.length;
-    const header = parseHeader(input, nextOpen, blockIndex);
-    const bodyEnd = input.indexOf(CLOSE_MARKER, header.end);
+    const header = parseHeader(inputText, nextOpen, blockIndex);
+    const bodyEnd = inputText.indexOf(CLOSE_MARKER, header.end);
     if (bodyEnd < 0) {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_UNCLOSED',
@@ -834,7 +844,7 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
         { blockIndex, blockType: header.type },
       );
     }
-    const body = input.slice(header.end, bodyEnd);
+    const body = inputText.slice(header.end, bodyEnd);
     if (body.includes(OPEN_MARKER)) {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_NESTED',

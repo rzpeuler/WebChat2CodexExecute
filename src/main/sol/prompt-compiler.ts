@@ -73,6 +73,7 @@ DEFAULT EXECUTION SEMANTICS
 
 WRITING BLOCK PROTOCOL
 Every task book and every actionable instruction must be inside a closed WRITING_BLOCK. Its body must be one complete JSON object.
+Use exactly the square-bracket wrapper [WRITING_BLOCK type="TYPE"] and [/WRITING_BLOCK]; do not use XML/HTML angle brackets.
 Use the corresponding template under docs/governance/templates/writing-blocks/ as the source of structure; do not recreate a field table in this prompt.
 Copy the template structure and replace placeholders only. Do not add or remove known fields. Preserve every template JSON type: string, array, object, boolean, or null.
 Use JSON only: no YAML, comments, trailing commas, Markdown code fences, or unescaped multiline strings. Escape quotes, backslashes, and newlines as required by JSON.
@@ -110,7 +111,7 @@ REQUIRED OUTPUT
 - If conflicts exist, return exactly one GOVERNANCE_RECONCILIATION block with status CHANGES_REQUIRED. For every file that needs an update, preserve all non-conflicting content and provide the complete replacement text, not a diff or excerpt. Include the current file SHA-256 and the current project commit.
 - If the repository cannot be inspected or the conflict cannot be safely resolved, return exactly one GOVERNANCE_RECONCILIATION block with status BLOCKED and a reason.
 
-Use the governance-reconciliation template from docs/governance/templates/writing-blocks/ and the same JSON-only rules. Its block body must be one complete JSON object; do not use YAML, comments, trailing commas, Markdown code fences, or unescaped multiline strings. The current project baseline is authoritative:
+Use the governance-reconciliation template from docs/governance/templates/writing-blocks/ and the same JSON-only rules. Use exactly the square-bracket wrapper [WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"] and [/WRITING_BLOCK], not XML/HTML angle brackets. Its block body must be one complete JSON object; do not use YAML, comments, trailing commas, Markdown code fences, or unescaped multiline strings. The current project baseline is authoritative:
 
 ${WRITING_BLOCK_TEMPLATE_REFERENCE}`;
 

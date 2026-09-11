@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { CdpTransport, EdgeAdapterRules, EdgePageSnapshot, EdgeSolObservation, CdpTarget } from './types.js';
+import { normalizeWritingBlockMarkers } from '../../shared/protocol/writing-block.js';
 import { hasKnownIdentity, isAllowedChatGptUrl } from './url-security.js';
 
 export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
@@ -24,6 +25,10 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
   return `(() => {
   const OPEN_MARKER = '[WRITING_BLOCK';
   const CLOSE_MARKER = '[/WRITING_BLOCK]';
+  const ANGLE_OPEN_MARKER = '<WRITING_BLOCK';
+  const ANGLE_CLOSE_MARKER = '</WRITING_BLOCK>';
+  const hasOpenMarker = (value) => value.includes(OPEN_MARKER) || value.includes(ANGLE_OPEN_MARKER);
+  const hasCloseMarker = (value) => value.includes(CLOSE_MARKER) || value.includes(ANGLE_CLOSE_MARKER);
   const isVisible = (node) => {
     if (!(node instanceof HTMLElement)) return false;
     const style = window.getComputedStyle(node);
@@ -41,11 +46,11 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
     : [assistantNode, ...Array.from(assistantNode.querySelectorAll('*'))]
         .filter(isVisible)
         .map((node) => ({ node, value: text(node) }))
-        .filter(({ value }) => value.includes(OPEN_MARKER) && value.includes(CLOSE_MARKER))
+        .filter(({ value }) => hasOpenMarker(value) && hasCloseMarker(value))
         .filter(({ node }) => !Array.from(node.children).some((child) => {
           if (!isVisible(child)) return false;
           const childText = text(child);
-          return childText.includes(OPEN_MARKER) && childText.includes(CLOSE_MARKER);
+          return hasOpenMarker(childText) && hasCloseMarker(childText);
         }));
   const finalAssistant = assistantCandidates.at(-1)?.value || text(assistantNode);
   const errors = all(${JSON.stringify(rules.errorSelectors)}).map(text).filter(Boolean).join('\\n');
@@ -106,6 +111,7 @@ export function hashMessage(text: string): string | null {
 }
 
 export function hasIncompleteWritingBlock(text: string): boolean {
+  text = normalizeWritingBlockMarkers(text);
   const startCount = (text.match(/\[WRITING_BLOCK\b/g) ?? []).length;
   const endCount = (text.match(/\[\/WRITING_BLOCK\]/g) ?? []).length;
   return startCount > endCount;
@@ -145,7 +151,9 @@ export class EdgeStateAdapter {
 
   async readPage(targetId: string): Promise<EdgePageSnapshot> {
     const raw = await this.transport.evaluate<Record<string, unknown>>(targetId, domSnapshotScript(this.rules));
-    const text = typeof raw.latestAssistantText === 'string' ? raw.latestAssistantText : '';
+    const text = normalizeWritingBlockMarkers(
+      typeof raw.latestAssistantText === 'string' ? raw.latestAssistantText : '',
+    );
     const errorText = typeof raw.errorText === 'string' ? raw.errorText : '';
     const statusText = typeof raw.statusText === 'string' ? raw.statusText : '';
     const combined = `${errorText}\n${statusText}`;

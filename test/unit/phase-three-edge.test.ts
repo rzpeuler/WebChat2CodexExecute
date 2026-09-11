@@ -12,6 +12,7 @@ import {
   projectFingerprintFromChatGptUrl,
   selectChatGptProjectTargets,
 } from '../../src/main/edge/state-adapter.js';
+import { normalizeWritingBlockMarkers } from '../../src/shared/protocol/writing-block.js';
 import { SolBindingError, SolSessionBindingStore } from '../../src/main/edge/session-binding.js';
 import { CdpTransportError, HttpCdpTransport } from '../../src/main/edge/cdp.js';
 import {
@@ -623,9 +624,21 @@ describe('dedicated Edge profile and CDP state adapter', () => {
   it('extracts a visible complete Writing Block candidate inside the assistant message', () => {
     const script = domSnapshotScript();
     expect(script).toContain("const OPEN_MARKER = '[WRITING_BLOCK';");
+    expect(script).toContain("const ANGLE_OPEN_MARKER = '<WRITING_BLOCK';");
     expect(script).toContain('const assistantCandidates = assistantNode === null');
     expect(script).toContain('const finalAssistant = assistantCandidates.at(-1)?.value || text(assistantNode);');
     expect(script).toContain('const loginWall = authPath || explicitLoginNodes.length > 0');
+  });
+
+  it('normalizes the angle-bracket wrapper observed in the ChatGPT DOM', async () => {
+    const source = '<WRITING_BLOCK type="LUNA_TASK">\n{}\n</WRITING_BLOCK>';
+    expect(normalizeWritingBlockMarkers(source)).toBe('[WRITING_BLOCK type="LUNA_TASK"]\n{}\n[/WRITING_BLOCK]');
+    const transport = new FakeTransport();
+    transport.value = { ...transport.value, latestAssistantText: source };
+    const adapter = new EdgeStateAdapter(transport);
+    await expect(adapter.readPage('target-1')).resolves.toMatchObject({
+      latestAssistantText: '[WRITING_BLOCK type="LUNA_TASK"]\n{}\n[/WRITING_BLOCK]',
+    });
   });
 
   it('does not infer Project identity from an untrusted hostname and selects only known identities', async () => {

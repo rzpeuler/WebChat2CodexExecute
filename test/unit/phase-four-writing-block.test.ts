@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ARCHITECTURE_FREEZE_REQUIRED_FIELDS,
   DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS,
+  normalizeWritingBlockMarkers,
   parseWritingBlocks,
   WRITING_BLOCK_JSON_SCHEMAS,
   WritingBlockProtocolError,
@@ -38,6 +39,16 @@ const task = {
 };
 
 describe('Writing Block protocol', () => {
+  it('accepts the angle-bracket wrapper emitted by the ChatGPT DOM as a compatibility alias', () => {
+    const parsed = parseWritingBlocks(
+      '<WRITING_BLOCK type="BLOCKED">\n{"code":"BLOCKED","reason":"external setup"}\n</WRITING_BLOCK>',
+    );
+    expect(parsed.blocked[0]?.fields.reason).toBe('external setup');
+    expect(normalizeWritingBlockMarkers('<WRITING_BLOCK type="BLOCKED"></WRITING_BLOCK>')).toBe(
+      '[WRITING_BLOCK type="BLOCKED"][/WRITING_BLOCK]',
+    );
+  });
+
   it('exports five JSON-safe reusable templates and shared governance metadata', () => {
     expect(WRITING_BLOCK_TEMPLATE_VERSION).toBe(1);
     expect(WRITING_BLOCK_TEMPLATE_DIRECTORY).toBe('docs/governance/templates/writing-blocks');
