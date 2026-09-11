@@ -299,6 +299,52 @@ describe('governance reconciliation', () => {
     expect(await readFile(join(root, 'THIRD.md'), 'utf8')).toBe('third concurrent\n');
   });
 
+  it('fails closed when an earlier installed target is externally reformatted before success', async () => {
+    const root = await project();
+    const original = '# Legacy\nKeep feature notes.\n';
+    const second = 'second legacy\n';
+    const external = '# Updated\r\nKeep feature notes.\r\n';
+    await writeFile(join(root, 'SECOND.md'), second, 'utf8');
+
+    await expect(
+      new GovernanceReconciliationApplier(root, {
+        runId: () => 'run-final-check-race',
+        beforeReplace: async (_path, index) => {
+          if (index === 1) await writeFile(join(root, 'AGENTS.md'), external, 'utf8');
+        },
+      }).apply(
+        block({
+          status: 'CHANGES_REQUIRED',
+          baseline_commit: 'base',
+          files: [
+            {
+              path: 'AGENTS.md',
+              action: 'replace',
+              reason: 'update first',
+              sha256_before: canonicalSha(original),
+              content: '# Updated\nKeep feature notes.\n',
+            },
+            {
+              path: 'SECOND.md',
+              action: 'replace',
+              reason: 'update second',
+              sha256_before: canonicalSha(second),
+              content: 'second updated\n',
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'GOVERNANCE_RECONCILIATION_SHA_CONFLICT' });
+    expect(await readFile(join(root, 'AGENTS.md'))).toEqual(Buffer.from(external, 'utf8'));
+    expect(
+      await readFile(join(root, '.web-chat2codex/backups/reconciliation/run-final-check-race/AGENTS.md'), 'utf8'),
+    ).toBe(original);
+    expect(await readFile(join(root, 'SECOND.md'), 'utf8')).toBe(second);
+    await expect(
+      access(join(root, '.web-chat2codex/backups/reconciliation/run-final-check-race/SECOND.md')),
+    ).rejects.toThrow();
+  });
+
   it('uses commit-stage BOM and line endings when formatting drift follows planning', async () => {
     const root = await project();
     const original = '# Legacy\nKeep feature notes.\n';

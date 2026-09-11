@@ -352,6 +352,17 @@ export class GovernanceReconciliationApplier {
         item.installed = true;
         item.installedBytes = replacement;
       }
+      for (const item of planned) {
+        if (!item.installed || item.installedBytes === null) continue;
+        const installed = await readRegularTextFile(item.absolutePath, item.relativePath);
+        if (!installed.rawBytes.equals(item.installedBytes)) {
+          throw new GovernanceReconciliationError(
+            'GOVERNANCE_RECONCILIATION_SHA_CONFLICT',
+            `Reconciliation target changed after replacement: ${item.relativePath}`,
+            { path: item.relativePath },
+          );
+        }
+      }
       await rm(stageRoot, { recursive: true, force: true });
       return {
         runId,
