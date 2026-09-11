@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createRuntimeLifecycleController, createSingleFlightEnsure } from '../../src/main/automation-runtime.js';
+import {
+  createRuntimeLifecycleController,
+  createSingleFlightEnsure,
+  waitForReconciliationOutput,
+} from '../../src/main/automation-runtime.js';
+import type { EdgeSolObservation } from '../../src/main/edge/types.js';
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -9,7 +14,66 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
+function observation(overrides: Partial<EdgeSolObservation> = {}): EdgeSolObservation {
+  return {
+    targetId: 'target-1',
+    title: 'Sol',
+    url: 'https://chatgpt.com/g/project/c/conversation',
+    projectFingerprint: 'project',
+    accountFingerprint: 'account',
+    latestAssistantText: 'old',
+    latestAssistantHash: 'old-hash',
+    statusText: '',
+    errorText: '',
+    loginWall: false,
+    sessionMissing: false,
+    contextLimit: false,
+    networkError: false,
+    isThinking: false,
+    writingBlockIncomplete: false,
+    sampledAt: new Date(0).toISOString(),
+    status: 'COMPLETED_CANDIDATE',
+    adapterVersion: 'test',
+    consecutiveStableSamples: 2,
+    ...overrides,
+  };
+}
+
 describe('automation runtime lifecycle', () => {
+  it('keeps polling while Sol is thinking beyond the old two-minute cutoff', async () => {
+    const outputs = [
+      observation({
+        latestAssistantText: 'partial',
+        latestAssistantHash: 'partial-hash',
+        status: 'THINKING',
+        isThinking: true,
+      }),
+      observation({
+        latestAssistantText: 'partial',
+        latestAssistantHash: 'partial-hash',
+        status: 'THINKING',
+        isThinking: true,
+      }),
+      observation({ latestAssistantText: 'complete', latestAssistantHash: 'complete-hash' }),
+    ];
+    const delays: number[] = [];
+    let now = 0;
+    const result = await waitForReconciliationOutput({
+      before: observation(),
+      observe: async () => {
+        now += 121_000;
+        return outputs.shift()!;
+      },
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+      now: () => now,
+    });
+
+    expect(result.latestAssistantText).toBe('complete');
+    expect(delays).toEqual([2_000, 2_000, 2_000]);
+  });
+
   it('shares concurrent Edge startup and rejects new startup after stop begins', async () => {
     const startup = deferred<void>();
     let starts = 0;

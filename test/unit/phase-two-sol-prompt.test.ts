@@ -366,6 +366,8 @@ describe('Sol initialization prompt compiler', () => {
     expect(prompt).toContain('GOVERNANCE_RECONCILIATION');
     expect(prompt).not.toContain('软件不会替你筛选候选文件');
     expect(prompt).not.toContain('你必须自行判断哪些文件值得检查');
+    expect(prompt).toContain('JSON.parse');
+    expect(prompt).toContain('return BLOCKED');
     expect(prompt).not.toContain('super-secret');
   });
 });
