@@ -40,4 +40,19 @@ describe('renderer UI layout', () => {
     expect(css).toContain('position: fixed;');
     expect(css).toContain('padding-bottom: 82px;');
   });
+
+  it('places compact loop controls beside the relevant graph nodes', async () => {
+    const html = await readRendererFile('index.html');
+    const app = await readRendererFile('app.ts');
+    const css = await readRendererFile('styles.css');
+    expect(html).not.toContain('data-dashboard-command="start"');
+    expect(html).not.toContain('data-dashboard-command="pause"');
+    expect(html).not.toContain('data-dashboard-command="retry-current-stage"');
+    expect(app).toContain("createActionButton('start', '启动')");
+    expect(app).toContain("createActionButton('pause', '暂停')");
+    expect(app).toContain("createActionButton('retry-current-stage', '重试')");
+    expect(app).toContain("node.id !== 'read-sol'");
+    expect(css).toContain('.loop-node-wrapper');
+    expect(css).toContain('.loop-node-actions');
+  });
 });

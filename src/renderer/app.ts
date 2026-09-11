@@ -126,11 +126,16 @@ const loopGraphStateLabels: Record<LoopGraphNodeState, string> = {
 };
 
 interface LoopGraphButtonParts {
+  wrapper: HTMLElement;
   button: HTMLButtonElement;
   id: HTMLElement;
   label: HTMLElement;
   summary: HTMLElement;
   stateLabel: HTMLElement;
+  actions: HTMLElement;
+  startButton: HTMLButtonElement;
+  pauseButton: HTMLButtonElement;
+  retryButton: HTMLButtonElement;
 }
 
 function setStatus(message: string): void {
@@ -414,6 +419,9 @@ function selectLoopGraphNode(nodeId: LoopGraphNodeSnapshot['id']): void {
 function ensureLoopGraphButtons(): void {
   if (loopGraphElement === null || loopGraphNodeButtons.size === LOOP_GRAPH_NODE_DEFINITIONS.length) return;
   for (const definition of LOOP_GRAPH_NODE_DEFINITIONS) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'loop-node-wrapper';
+    wrapper.setAttribute('role', 'listitem');
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'loop-node state-pending';
@@ -435,8 +443,35 @@ function ensureLoopGraphButtons(): void {
     state.append(marker, stateLabel);
     button.append(id, label, summary, state);
     button.addEventListener('click', () => selectLoopGraphNode(definition.id));
-    loopGraphElement.append(button);
-    loopGraphNodeButtons.set(definition.id, { button, id, label, summary, stateLabel });
+    const actions = document.createElement('div');
+    actions.className = 'loop-node-actions';
+    actions.setAttribute('aria-label', `${definition.label}操作`);
+    const createActionButton = (command: DashboardCommandName, text: string): HTMLButtonElement => {
+      const actionButton = document.createElement('button');
+      actionButton.type = 'button';
+      actionButton.className = 'loop-node-action button-secondary';
+      actionButton.dataset.dashboardCommand = command;
+      actionButton.textContent = text;
+      return actionButton;
+    };
+    const startButton = createActionButton('start', '启动');
+    const pauseButton = createActionButton('pause', '暂停');
+    const retryButton = createActionButton('retry-current-stage', '重试');
+    actions.append(startButton, pauseButton, retryButton);
+    wrapper.append(button, actions);
+    loopGraphElement.append(wrapper);
+    loopGraphNodeButtons.set(definition.id, {
+      wrapper,
+      button,
+      id,
+      label,
+      summary,
+      stateLabel,
+      actions,
+      startButton,
+      pauseButton,
+      retryButton,
+    });
   }
 }
 
@@ -464,6 +499,13 @@ function renderLoopGraph(snapshot: DashboardSnapshot): void {
     parts.label.textContent = node.label;
     parts.summary.textContent = node.summary || '暂无摘要。';
     parts.stateLabel.textContent = loopGraphStateLabels[node.state];
+    parts.startButton.hidden = node.id !== 'read-sol' || snapshot.status === 'RUNNING';
+    parts.pauseButton.hidden = !(currentNodeId === node.id && node.state === 'ACTIVE');
+    parts.retryButton.hidden = !(
+      currentNodeId === node.id &&
+      (node.state === 'RECOVERABLE_BLOCKED' || node.state === 'NEEDS_USER_ACTION' || node.state === 'PAUSED')
+    );
+    parts.actions.hidden = parts.startButton.hidden && parts.pauseButton.hidden && parts.retryButton.hidden;
   }
   if (loopGraphRoundElement !== null)
     loopGraphRoundElement.textContent = `当前轮次：${snapshot.loopGraph.roundId ?? '—'}`;

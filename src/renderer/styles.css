@@ -382,10 +382,6 @@ input::placeholder {
   line-height: 1.5;
 }
 
-.dashboard-actions {
-  padding-top: 2px;
-}
-
 .loop-graph-section {
   display: grid;
   gap: 14px;
@@ -419,10 +415,17 @@ input::placeholder {
   scrollbar-color: #405a91 #111b2b;
 }
 
-.loop-node {
+.loop-node-wrapper {
   position: relative;
   display: grid;
   flex: 0 0 132px;
+  gap: 7px;
+}
+
+.loop-node {
+  position: relative;
+  display: grid;
+  width: 100%;
   gap: 9px;
   min-height: 148px;
   padding: 13px 12px 12px;
@@ -490,6 +493,20 @@ input::placeholder {
   border: 1px solid currentColor;
   border-radius: 50%;
   background: currentColor;
+}
+
+.loop-node-actions {
+  display: flex;
+  gap: 5px;
+  min-height: 30px;
+}
+
+.loop-node-action {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 6px 5px;
+  font-size: 0.72rem;
+  line-height: 1.1;
 }
 
 .loop-node.state-pending {
