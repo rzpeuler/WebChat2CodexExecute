@@ -19,6 +19,7 @@ import { applyGovernanceReconciliation } from './governance/reconciliation-appli
 import { GovernanceManifestError, GovernanceManifestStore } from './governance/manifest.js';
 import { ArchitectureFreezeDownloader } from './architecture/freeze-downloader.js';
 import { GitController } from './git/index.js';
+import type { GitBaseline } from './git/types.js';
 import { CodexRunner } from './codex/index.js';
 import { MainOrchestrator, OrchestratorError, type OrchestratorState } from './orchestration/index.js';
 import type { NotificationService } from './notify/index.js';
@@ -353,6 +354,7 @@ export async function createAutomationRuntime(
   config: ProjectConfig,
   userDataDirectory: string,
   notifier: NotificationService,
+  options: { baselineRefreshed?: (baseline: GitBaseline) => Promise<void> } = {},
 ): Promise<AutomationRuntime> {
   assertFixedGovernanceManifestPath(config.localPath, config.governanceManifestPath);
   const stateDirectory = join(userDataDirectory, 'state');
@@ -617,6 +619,7 @@ export async function createAutomationRuntime(
     expectedRemoteUrl: config.remoteUrl,
     notifier: guardedNotifier,
     callbacks: {
+      ...(options.baselineRefreshed === undefined ? {} : { baselineRefreshed: options.baselineRefreshed }),
       rebind,
       governanceConsistencyCheck: (): Promise<void> =>
         orchestrator.runDashboardOperation(async () => {

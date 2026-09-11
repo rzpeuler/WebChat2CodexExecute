@@ -555,11 +555,8 @@ export class MainOrchestrator implements Orchestrator {
       }
       this.updateManualGitOperation('ALIGNING_BASELINE');
       await this.persist();
-      const previous = this.baseline;
       const next = await this.captureConfiguredBaseline();
-      this.baseline = next;
-      this.state.commits = { local: next.head, remote: next.remoteTip };
-      this.invalidateStaleTask(previous, next);
+      await this.adoptBaseline(next);
       this.state.executionRecovery = null;
       this.state.recentError = null;
       this.state.active = false;
@@ -589,7 +586,6 @@ export class MainOrchestrator implements Orchestrator {
       if (this.git.readRepositoryStatus === undefined || this.git.commitAndPushProject === undefined)
         throw new OrchestratorError('GIT_MAINTENANCE_UNAVAILABLE', '当前运行时不支持 Git 提交同步。');
       const before = await this.git.readRepositoryStatus(this.project.localPath);
-      const previous = this.baseline;
       this.updateManualGitOperation(before.clean ? 'PUSHING' : 'COMMITTING');
       await this.persist();
       let synced;
@@ -598,8 +594,7 @@ export class MainOrchestrator implements Orchestrator {
       } catch (error) {
         if (!before.clean || errorCode(error) !== 'NO_CHANGES') throw error;
         const baseline = await this.captureConfiguredBaseline();
-        this.baseline = baseline;
-        this.state.commits = { local: baseline.head, remote: baseline.remoteTip };
+        await this.adoptBaseline(baseline);
         this.updateManualGitOperation('COMPLETED', {
           phase: 'COMPLETED',
           localCommit: baseline.head,
@@ -617,9 +612,8 @@ export class MainOrchestrator implements Orchestrator {
         return result('COMPLETED', this.state, '工作区已干净，无需提交；软件基线已刷新。');
       }
       const next = await this.captureConfiguredBaseline();
-      this.baseline = next;
+      await this.adoptBaseline(next);
       this.state.commits = { local: synced.localCommit, remote: synced.remoteCommit };
-      this.invalidateStaleTask(previous, next);
       this.state.executionRecovery = null;
       this.state.recentError = null;
       this.state.active = false;
@@ -1155,6 +1149,14 @@ export class MainOrchestrator implements Orchestrator {
 
     try {
       await this.ensureBaseline();
+      this.updateGraphNode('parse-task', {
+        summary: `已验证 ${writingBlockCount(parsed)} 个 Writing Block。`,
+        details: [
+          `Luna 任务：${parsed.lunaTask?.fields.task_id ?? '无'}`,
+          `治理变更：${parsed.governanceChanges.length}`,
+          `实时基线：${this.baseline?.head ?? '不可用'}`,
+        ],
+      });
       if (parsed.governanceReconciliation !== null) {
         const reconciliation = await this.processGovernanceReconciliation({
           solOutput: observation.latestAssistantText,
@@ -1177,7 +1179,10 @@ export class MainOrchestrator implements Orchestrator {
           updated ? '治理/架构同步完成，本轮没有 Luna 任务。' : '本轮没有 Luna 任务。',
         );
       }
-      return await this.runLuna(parsed.lunaTask, observation, outputKey);
+      const executionTask = updated
+        ? taskWithBaseCommit(parsed.lunaTask, this.baseline?.head ?? parsed.lunaTask.fields.base_commit)
+        : parsed.lunaTask;
+      return await this.runLuna(executionTask, observation, outputKey);
     } catch (error) {
       const repaired = await this.tryAutoRepair(
         error,
@@ -1198,8 +1203,11 @@ export class MainOrchestrator implements Orchestrator {
   }
 
   private async ensureBaseline(): Promise<void> {
-    if (this.baseline !== null) return;
-    this.baseline = await this.captureConfiguredBaseline();
+    // A loop may stay alive while a previous Luna result is committed outside
+    // the current round. Always recapture at the existing parse-task boundary;
+    // never reuse a cached HEAD as the authority for a new task.
+    const next = await this.captureConfiguredBaseline();
+    await this.adoptBaseline(next);
   }
 
   private captureConfiguredBaseline(): Promise<Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>>> {
@@ -1207,6 +1215,25 @@ export class MainOrchestrator implements Orchestrator {
       ...(this.targetBranch === undefined ? {} : { expectedBranch: this.targetBranch }),
       ...(this.expectedRemoteUrl === undefined ? {} : { expectedRemoteUrl: this.expectedRemoteUrl }),
     });
+  }
+
+  private async adoptBaseline(
+    next: Awaited<ReturnType<GitOrchestratorPort['captureBaseline']>>,
+  ): Promise<void> {
+    const previous = this.baseline;
+    this.baseline = next;
+    this.state.commits = { local: next.head, remote: next.remoteTip };
+    this.invalidateStaleTask(previous, next);
+    if (
+      this.callbacks.baselineRefreshed !== undefined &&
+      (previous === null ||
+        previous.head !== next.head ||
+        previous.branch !== next.branch ||
+        previous.remoteTip !== next.remoteTip ||
+        previous.remoteUrl !== next.remoteUrl)
+    ) {
+      await this.callbacks.baselineRefreshed(next);
+    }
   }
 
   private dashboardBaseline(): DashboardBaselineSnapshot | null {
@@ -1300,12 +1327,12 @@ export class MainOrchestrator implements Orchestrator {
       summary: '治理同步完成。',
       details: commitDetails(sync.commit, sync.remoteCommit),
     });
-    this.baseline = {
+    await this.adoptBaseline({
       ...this.baseline,
       head: sync.commit,
       remoteTip: sync.remoteCommit ?? this.baseline.remoteTip,
       worktree: [],
-    };
+    });
     await this.persist();
     return true;
   }
@@ -1315,6 +1342,10 @@ export class MainOrchestrator implements Orchestrator {
     observation: EdgeSolObservation,
     outputKey: string,
   ): Promise<OrchestratorResult> {
+    // Recheck at the existing run-luna boundary immediately before spawning
+    // Codex. This closes the race where a commit lands after parse-task.
+    await this.ensureBaseline();
+    this.assertTaskBase(task);
     if (this.baseline === null) throw new OrchestratorError('BASELINE_MISSING', 'Luna 执行缺少 Git 基线。');
     await this.setPhase('RUNNING_LUNA', 'RUNNING', task.fields.task_id);
     this.state.luna = { status: 'RUNNING', sessionId: null };
@@ -1377,6 +1408,12 @@ export class MainOrchestrator implements Orchestrator {
       protectedPaths: pending.protectedPaths,
     });
     this.state.commits = { local: sync.commit, remote: sync.remoteCommit };
+    await this.adoptBaseline({
+      ...pending.baseline,
+      head: sync.commit,
+      remoteTip: sync.remoteCommit ?? pending.baseline.remoteTip,
+      worktree: [],
+    });
     this.updateGraphNode('sync-code', {
       summary: `代码同步完成：${sync.commit}。`,
       details: [
@@ -2352,6 +2389,16 @@ function writingBlockCount(parsed: ReturnType<typeof parseWritingBlocks>): numbe
     (parsed.governanceReconciliation === null ? 0 : 1) +
     parsed.blocked.length
   );
+}
+
+function taskWithBaseCommit(task: LunaTaskBlock, baseCommit: string): LunaTaskBlock {
+  return {
+    ...task,
+    fields: {
+      ...task.fields,
+      base_commit: baseCommit,
+    },
+  };
 }
 
 function reconciliationOrchestratorResult(run: GovernanceReconciliationRunResult): OrchestratorResult {

@@ -115,7 +115,16 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
         }
         await stopRuntime();
         if (runtimeWindowClosed || generation !== runtimeWindowGeneration) return;
-        const nextRuntime = await createAutomationRuntime(config, app.getPath('userData'), notificationService);
+        const nextRuntime = await createAutomationRuntime(config, app.getPath('userData'), notificationService, {
+          baselineRefreshed: async (baseline) => {
+            const refreshed = await projectConfigService.save({
+              ...config,
+              currentBranch: baseline.branch,
+              headCommit: baseline.head,
+            });
+            Object.assign(config, refreshed);
+          },
+        });
         if (runtimeWindowClosed || generation !== runtimeWindowGeneration) {
           await nextRuntime.stop();
           return;

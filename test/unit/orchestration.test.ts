@@ -211,8 +211,13 @@ describe('P0 main orchestration', () => {
   });
 
   it('projects a completed task round onto the graph including the repair branch', async () => {
+    const postGovernanceBaseline = { ...baseline, head: 'abcdef2', remoteTip: 'abcdef2' };
     const options = baseOptions({
       edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${taskText()}`)) },
+      git: {
+        ...baseOptions().git,
+        captureBaseline: vi.fn().mockResolvedValueOnce(baseline).mockResolvedValue(postGovernanceBaseline),
+      },
     });
     const orchestrator = new MainOrchestrator(options);
 
@@ -282,6 +287,42 @@ describe('P0 main orchestration', () => {
     const graph = orchestrator.getDashboardSnapshot().loopGraph;
     expect(graph.nodes.find((node) => node.id === 'run-luna')).toMatchObject({ state: 'COMPLETED' });
     expect(graph.nodes.find((node) => node.id === 'sync-code')).toMatchObject({ state: 'COMPLETED' });
+  });
+
+  it('refreshes the live baseline before Luna and auto-repairs a stale task without spawning Codex', async () => {
+    const current = { ...baseline, head: 'c'.repeat(40), remoteTip: 'c'.repeat(40) };
+    const captureBaseline = vi
+      .fn<OrchestratorOptions['git']['captureBaseline']>()
+      .mockResolvedValueOnce(baseline)
+      .mockResolvedValue(current);
+    const options = baseOptions({
+      git: { ...baseOptions().git, captureBaseline },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    const result = await orchestrator.runRound();
+
+    expect(result).toMatchObject({ status: 'WAITING', message: expect.stringContaining('自动修复提示词') });
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+    expect(options.sol?.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining(`当前真实 base_commit：${current.head}`) }),
+    );
+    expect(orchestrator.getDashboardSnapshot()).toMatchObject({
+      currentBaseline: { localCommit: current.head },
+      autoRepair: { errorCode: 'BASELINE_CHANGED', status: 'WAITING_FOR_SOL' },
+    });
+  });
+
+  it('publishes the adopted post-sync baseline to the runtime metadata callback', async () => {
+    const baselineRefreshed = vi.fn(async () => undefined);
+    const options = baseOptions({ callbacks: { baselineRefreshed } });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    await orchestrator.runRound();
+
+    expect(baselineRefreshed).toHaveBeenCalledWith(expect.objectContaining({ head: 'abcdef3' }));
   });
 
   it('persists and restores the minimal pending code sync after Luna returns during a pause', async () => {
@@ -963,8 +1004,13 @@ describe('P0 main orchestration', () => {
   });
 
   it('runs governance sync, Luna, code sync, and Sol acknowledgement in order', async () => {
+    const postGovernanceBaseline = { ...baseline, head: 'abcdef2', remoteTip: 'abcdef2' };
     const options = baseOptions({
       edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${taskText()}`)) },
+      git: {
+        ...baseOptions().git,
+        captureBaseline: vi.fn().mockResolvedValueOnce(baseline).mockResolvedValue(postGovernanceBaseline),
+      },
     });
     const orchestrator = new MainOrchestrator(options);
 

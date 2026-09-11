@@ -209,6 +209,7 @@ export interface OrchestratorNotifier {
 export interface OrchestratorCallbacks {
   rebind?: () => Promise<void>;
   governanceConsistencyCheck?: () => Promise<void>;
+  baselineRefreshed?: (baseline: GitBaseline) => Promise<void>;
   openEdge?: () => Promise<void>;
   openProject?: () => Promise<void>;
   viewReport?: (reportPath: string | null) => Promise<void>;
