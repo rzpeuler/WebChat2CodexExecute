@@ -131,7 +131,7 @@ describe('phase eight dashboard contract', () => {
     });
 
     expect(snapshot.loopGraph.nodes.map((node) => node.id)).toEqual(LOOP_GRAPH_NODE_DEFINITIONS.map(({ id }) => id));
-    const lunaNode = snapshot.loopGraph.nodes[4];
+    const lunaNode = snapshot.loopGraph.nodes.find((node) => node.id === 'run-luna');
     expect(lunaNode).toBeDefined();
     expect(lunaNode).toMatchObject({
       id: 'run-luna',
@@ -170,7 +170,7 @@ describe('phase eight dashboard contract', () => {
     });
 
     expect(snapshot.loopGraph.currentNodeId).toBe('run-luna');
-    expect(snapshot.loopGraph.nodes[4]?.updatedAt).toBe('1970-01-01T00:00:00.000Z');
+    expect(snapshot.loopGraph.nodes.find((node) => node.id === 'run-luna')?.updatedAt).toBe('1970-01-01T00:00:00.000Z');
 
     const pendingCurrent = sanitizeDashboardSnapshot({
       loopGraph: {
@@ -249,14 +249,16 @@ describe('phase eight dashboard contract', () => {
 
     const oversizedNodeSnapshot = sanitizeDashboardSnapshot({ loopGraph: { nodes: oversizedNodes } });
     expect(oversizedNodeSnapshot.loopGraph.nodes).toHaveLength(LOOP_GRAPH_NODE_DEFINITIONS.length);
-    expect(oversizedNodeSnapshot.loopGraph.nodes[4]?.state).toBe('PENDING');
+    expect(oversizedNodeSnapshot.loopGraph.nodes.find((node) => node.id === 'run-luna')?.state).toBe('PENDING');
 
     const oversizedDetailSnapshot = sanitizeDashboardSnapshot({
       loopGraph: {
         nodes: [{ id: 'run-luna', state: 'ACTIVE', details: oversizedDetails }],
       },
     });
-    expect(oversizedDetailSnapshot.loopGraph.nodes[4]?.details).toHaveLength(LOOP_GRAPH_MAX_DETAILS);
+    expect(oversizedDetailSnapshot.loopGraph.nodes.find((node) => node.id === 'run-luna')?.details).toHaveLength(
+      LOOP_GRAPH_MAX_DETAILS,
+    );
   });
 
   it('sanitizes action flags and reasons without trusting malformed input', () => {

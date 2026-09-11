@@ -510,6 +510,7 @@ function renderLoopGraph(snapshot: DashboardSnapshot): void {
     const node = loopGraphNode(snapshot, definition.id);
     const parts = loopGraphNodeButtons.get(node.id);
     if (parts === undefined) continue;
+    parts.wrapper.classList.toggle('loop-node-wrapper-repair', node.id === 'repair-sol');
     parts.button.className = `loop-node state-${node.state.toLowerCase()}`;
     parts.button.setAttribute('aria-expanded', String(selectedLoopGraphNodeId === node.id));
     parts.button.setAttribute('aria-current', String(currentNodeId === node.id));

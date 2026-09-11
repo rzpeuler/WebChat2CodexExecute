@@ -210,7 +210,7 @@ describe('P0 main orchestration', () => {
     });
   });
 
-  it('projects a completed task round onto the fixed eight-node graph', async () => {
+  it('projects a completed task round onto the fixed loop graph', async () => {
     const options = baseOptions({
       edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${taskText()}`)) },
     });
@@ -225,6 +225,7 @@ describe('P0 main orchestration', () => {
     expect(graph.nodes.map((node) => node.id)).toEqual([
       'read-sol',
       'parse-task',
+      'repair-sol',
       'apply-updates',
       'sync-governance',
       'run-luna',
@@ -235,6 +236,7 @@ describe('P0 main orchestration', () => {
     expect(graph.nodes.map((node) => node.state)).toEqual([
       'COMPLETED',
       'COMPLETED',
+      'PENDING',
       'COMPLETED',
       'COMPLETED',
       'COMPLETED',
@@ -242,7 +244,7 @@ describe('P0 main orchestration', () => {
       'COMPLETED',
       'ACTIVE',
     ]);
-    expect(graph.nodes[4]).toMatchObject({
+    expect(graph.nodes.find((node) => node.id === 'run-luna')).toMatchObject({
       summary: 'Luna 已完成任务 task-1。',
       details: expect.arrayContaining(['任务：task-1', '会话：luna-1', '报告：docs/task-reports/task-1.md']),
       startedAt: expect.any(String),
@@ -419,6 +421,7 @@ describe('P0 main orchestration', () => {
     expect(graph.nodes.map((node) => node.state)).toEqual([
       'COMPLETED',
       'COMPLETED',
+      'PENDING',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
@@ -476,6 +479,7 @@ describe('P0 main orchestration', () => {
     await running.start();
     const inFlight = running.runRound();
     await vi.waitFor(() => expect(options.edge.observe).toHaveBeenCalledOnce());
+    const releaseInitialObservation = releaseObservation;
 
     const restarted = new MainOrchestrator(options);
     await restarted.initialize();
@@ -487,13 +491,17 @@ describe('P0 main orchestration', () => {
     expect(options.codex.startTask).not.toHaveBeenCalled();
 
     await restarted.start();
-    expect(restarted.getState()).toMatchObject({ active: true, status: 'RUNNING', phase: 'WAITING_FOR_SOL' });
-    expect(restarted.getDashboardSnapshot().loopGraph).toMatchObject({ currentNodeId: 'wait-sol' });
-    expect(restarted.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+    expect(restarted.getState()).toMatchObject({ active: true, status: 'RUNNING', phase: 'READING_SOL' });
+    expect(restarted.getDashboardSnapshot().loopGraph).toMatchObject({ currentNodeId: 'read-sol' });
+    expect(restarted.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
       state: 'ACTIVE',
     });
 
-    releaseObservation(observation(''));
+    await vi.waitFor(() => expect(options.edge.observe).toHaveBeenCalledTimes(2));
+    const releaseRestartedObservation = releaseObservation;
+    releaseRestartedObservation(observation(''));
+    await restarted.runRound();
+    releaseInitialObservation(observation(''));
     await inFlight;
   });
 
@@ -512,12 +520,12 @@ describe('P0 main orchestration', () => {
     await orchestrator.start();
     expect(orchestrator.getDashboardSnapshot().loopGraph).toMatchObject({
       roundId,
-      currentNodeId: 'wait-sol',
+      currentNodeId: 'read-sol',
     });
-    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
       state: 'ACTIVE',
     });
-    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'WAITING' });
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'DUPLICATE' });
     expect(orchestrator.getDashboardSnapshot().loopGraph.roundId).toBe(roundId);
   });
 
@@ -633,12 +641,14 @@ describe('P0 main orchestration', () => {
     await orchestrator.start();
     await orchestrator.runRound();
 
-    expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({ enabled: true, busy: false });
+    expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({ enabled: false, busy: false });
     await expect(orchestrator.start()).resolves.toMatchObject({
       status: 'WAITING',
-      message: '编排器已启动，等待 Sol 完成输出。',
+      message: '自动循环已经在运行中。',
     });
+    expect(options.sol?.sendMessage).toHaveBeenCalledOnce();
     expect(orchestrator.getState()).toMatchObject({ active: true, status: 'RUNNING', recentError: null });
+    expect(orchestrator.getDashboardSnapshot().loopGraph).toMatchObject({ currentNodeId: 'repair-sol' });
   });
 
   it('rechecks action state before executing commands and keeps open navigation available while a round is busy', async () => {
@@ -769,7 +779,7 @@ describe('P0 main orchestration', () => {
       });
       await expect(orchestrator.start()).resolves.toMatchObject({
         status: 'WAITING',
-        message: '编排器已启动，等待 Sol 完成输出。',
+        message: '编排器已启动，正在读取 Sol。',
       });
     },
   );
@@ -838,7 +848,7 @@ describe('P0 main orchestration', () => {
       enabled: false,
       busy: false,
     });
-    expect(blocked.getDashboardSnapshot().actions['retry-current-stage'].reason).toContain('启动自动循环');
+    expect(blocked.getDashboardSnapshot().actions['retry-current-stage'].reason).toContain('自动循环运行中');
   });
 
   it('uses a stable three-button state machine for idle, running, and paused states', async () => {
@@ -851,6 +861,7 @@ describe('P0 main orchestration', () => {
     });
 
     await orchestrator.start();
+    await orchestrator.runRound();
     expect(orchestrator.getDashboardSnapshot().actions).toMatchObject({
       start: { enabled: false, busy: false },
       pause: { enabled: true, busy: false },
@@ -1009,7 +1020,7 @@ describe('P0 main orchestration', () => {
     const saved = saves.at(-1);
     expect(saved).toBeDefined();
     const graph = saved!.loopGraph;
-    expect(graph.nodes).toHaveLength(8);
+    expect(graph.nodes).toHaveLength(9);
     expect(graph.nodes.filter((node) => node.state === 'ACTIVE')).toHaveLength(0);
     for (const node of graph.nodes) {
       expect(node.summary.length).toBeLessThanOrEqual(240);
@@ -1028,13 +1039,77 @@ describe('P0 main orchestration', () => {
     await orchestrator.start();
     const result = await orchestrator.runRound();
 
-    expect(result.status).toBe('PAUSED');
+    expect(result.status).toBe('WAITING');
     expect(orchestrator.getState()).toMatchObject({
-      status: 'PAUSED',
-      recentError: { code: 'WRITING_BLOCK_DUPLICATE_LUNA_TASK' },
+      active: true,
+      status: 'RUNNING',
+      phase: 'WAITING_FOR_SOL',
+      recentError: null,
     });
+    expect(orchestrator.getDashboardSnapshot().loopGraph).toMatchObject({ currentNodeId: 'repair-sol' });
+    expect(options.sol?.sendMessage).toHaveBeenCalledOnce();
     expect(options.codex.startTask).not.toHaveBeenCalled();
     expect(options.git.syncGovernance).not.toHaveBeenCalled();
+  });
+
+  it('repairs an unsafe reconciliation output once and then requires user action', async () => {
+    const reconciliation = `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
+{
+  "schema_version": 1,
+  "status": "CHANGES_REQUIRED",
+  "baseline_commit": "base-commit",
+  "files": [{
+    "path": "docs/governance/policy.md",
+    "action": "replace",
+    "reason": "clarify policy",
+    "sha256_before": "0000000000000000000000000000000000000000000000000000000000000000",
+    "content": "Updated policy"
+  }]
+}
+[/WRITING_BLOCK]`;
+    const apply = vi.fn(async () => {
+      throw new OrchestratorError('GOVERNANCE_RECONCILIATION_PATH_PROTECTED', '禁止修改受保护路径：.git/config。');
+    });
+    const options = baseOptions({ reconciliation: { apply } });
+    const orchestrator = new MainOrchestrator(options);
+
+    const first = await orchestrator.runGovernanceReconciliation({
+      solOutput: reconciliation,
+      baseline,
+      outputKey: 'reconciliation-output-1',
+    });
+
+    expect(first).toMatchObject({ status: 'WAITING', reconciliationStatus: null });
+    expect(orchestrator.getState()).toMatchObject({
+      active: true,
+      status: 'RUNNING',
+      phase: 'WAITING_FOR_SOL',
+      autoRepair: {
+        sourceOutputKey: 'reconciliation-output-1',
+        errorCode: 'GOVERNANCE_RECONCILIATION_PATH_PROTECTED',
+        attempt: 1,
+      },
+    });
+    expect(orchestrator.getDashboardSnapshot().loopGraph).toMatchObject({ currentNodeId: 'repair-sol' });
+    expect(options.sol?.sendMessage).toHaveBeenCalledOnce();
+    expect(options.sol?.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining('不删除任何本地文件') }),
+    );
+
+    const second = await orchestrator.runGovernanceReconciliation({
+      solOutput: reconciliation,
+      baseline,
+      outputKey: 'reconciliation-output-2',
+    });
+
+    expect(second).toMatchObject({ status: 'PAUSED' });
+    expect(orchestrator.getState()).toMatchObject({
+      active: false,
+      status: 'NEEDS_USER_ACTION',
+      recentError: { code: 'GOVERNANCE_RECONCILIATION_PATH_PROTECTED' },
+    });
+    expect(options.sol?.sendMessage).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledTimes(2);
   });
 
   it('validates every block before applying an earlier governance block or starting Luna', async () => {
@@ -1047,11 +1122,10 @@ describe('P0 main orchestration', () => {
 
     const result = await orchestrator.runRound();
 
-    expect(result.status).toBe('PAUSED');
-    expect(orchestrator.getState().recentError).toMatchObject({ code: 'WRITING_BLOCK_INVALID_FIELD' });
-    expect(orchestrator.getState().recentError?.message).toContain('第 1 个 Writing Block');
-    expect(orchestrator.getState().recentError?.message).toContain('类型 LUNA_TASK');
-    expect(orchestrator.getState().recentError?.message).toContain('字段 validation_commands');
+    expect(result.status).toBe('WAITING');
+    expect(orchestrator.getState()).toMatchObject({ active: true, status: 'RUNNING', phase: 'WAITING_FOR_SOL' });
+    expect(orchestrator.getDashboardSnapshot().loopGraph).toMatchObject({ currentNodeId: 'repair-sol' });
+    expect(options.sol?.sendMessage).toHaveBeenCalledOnce();
     expect(options.git.captureBaseline).not.toHaveBeenCalled();
     expect(options.governance?.applyAll).not.toHaveBeenCalled();
     expect(options.architecture?.download).not.toHaveBeenCalled();
@@ -1074,17 +1148,17 @@ ${invalidTask}`),
     const retry = await orchestrator.retryCurrentStage();
 
     expect(retry).toMatchObject({
-      status: 'PAUSED',
-      phase: 'PAUSED',
-      message: '当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。',
+      status: 'WAITING',
+      phase: 'WAITING_FOR_SOL',
+      message: '等待 Sol 产生新的未处理输出。',
     });
     expect(orchestrator.getState()).toMatchObject({
-      active: false,
-      status: 'PAUSED',
-      phase: 'PAUSED',
-      recentError: { code: 'WRITING_BLOCK_INVALID_FIELD' },
+      active: true,
+      status: 'RUNNING',
+      phase: 'WAITING_FOR_SOL',
+      recentError: null,
     });
-    expect(observe).toHaveBeenCalledOnce();
+    expect(observe).toHaveBeenCalledTimes(2);
     expect(options.git.captureBaseline).not.toHaveBeenCalled();
     expect(options.governance?.applyAll).not.toHaveBeenCalled();
     expect(options.architecture?.download).not.toHaveBeenCalled();
@@ -1376,7 +1450,6 @@ ${invalidTask}`),
         pushRetried: false,
       });
     const orchestrator = new MainOrchestrator(options);
-    await orchestrator.start();
 
     const first = await orchestrator.runGovernanceReconciliation({
       solOutput: reconciliation,
@@ -1592,7 +1665,6 @@ ${invalidTask}`),
       };
     });
     const orchestrator = new MainOrchestrator(options);
-    await orchestrator.start();
     const reconciliationRun = orchestrator.runGovernanceReconciliation({
       solOutput: `[WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"]
 {
@@ -1618,9 +1690,9 @@ ${invalidTask}`),
 
     releaseApply();
     await expect(reconciliationRun).resolves.toMatchObject({ status: 'COMPLETED' });
-    await expect(ordinaryRun).resolves.toMatchObject({ status: 'PAUSED' });
-    expect(events.indexOf('sync')).toBeLessThan(events.indexOf('edge'));
+    await expect(ordinaryRun).resolves.toMatchObject({ status: 'IDLE' });
     expect(events.indexOf('apply:end')).toBeLessThan(events.indexOf('sync'));
+    expect(events).not.toContain('edge');
   });
 
   it('counts governance reconciliation in dedicated parse diagnostics', async () => {

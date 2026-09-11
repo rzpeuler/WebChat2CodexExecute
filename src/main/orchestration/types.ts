@@ -81,6 +81,12 @@ export interface ExecutionRecoveryRecord {
   awaitingConfirmation: boolean;
 }
 
+export interface AutoRepairState {
+  sourceOutputKey: string;
+  errorCode: string;
+  attempt: 1;
+}
+
 export interface OrchestratorState {
   version: 1;
   revision: number;
@@ -102,6 +108,7 @@ export interface OrchestratorState {
   pendingCodeSync: PendingCodeSyncState | null;
   pendingReconciliationSync: PendingReconciliationSyncState | null;
   executionRecovery: ExecutionRecoveryRecord | null;
+  autoRepair?: AutoRepairState | null;
   activeSolSession: {
     sessionId: string;
     conversationId: string | null;
@@ -223,9 +230,11 @@ export interface GovernanceReconciliationRunInput {
   baseline: GitBaseline;
   /** Stable observation key when the block came from the ordinary loop. */
   outputKey?: string;
+  /** Existing Edge observation used when a repair prompt must be sent. */
+  observation?: EdgeSolObservation;
 }
 
-export type GovernanceReconciliationRunStatus = 'PASS' | 'COMPLETED' | 'DUPLICATE' | 'PAUSED';
+export type GovernanceReconciliationRunStatus = 'PASS' | 'COMPLETED' | 'DUPLICATE' | 'WAITING' | 'PAUSED';
 
 export interface GovernanceReconciliationRunResult {
   status: GovernanceReconciliationRunStatus;
