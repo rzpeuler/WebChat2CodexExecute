@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +8,7 @@ import {
 } from '../../src/main/governance/reconciliation-applier.js';
 import { parseWritingBlock, type GovernanceReconciliationBlock } from '../../src/shared/protocol/writing-block.js';
 import { MainOrchestrator } from '../../src/main/orchestration/index.js';
+import { hashCanonicalGovernanceText } from '../../src/main/governance/canonical-text-hash.js';
 
 const roots: string[] = [];
 
@@ -16,8 +16,12 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-function sha256(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
+function canonicalSha(value: string): string {
+  return hashCanonicalGovernanceText(Buffer.from(value, 'utf8'));
+}
+
+function canonicalShaBytes(bytes: Uint8Array): string {
+  return hashCanonicalGovernanceText(bytes);
 }
 
 function block(fields: Record<string, unknown>): GovernanceReconciliationBlock {
@@ -45,7 +49,7 @@ describe('governance reconciliation', () => {
           path: 'AGENTS.md',
           action: 'replace',
           reason: 'Align the agent role wording.',
-          sha256_before: sha256('# Legacy\nKeep feature notes.\n'),
+          sha256_before: canonicalSha('# Legacy\nKeep feature notes.\n'),
           content: source,
           sol_note: 'kept',
         },
@@ -69,7 +73,7 @@ describe('governance reconciliation', () => {
             path: 'AGENTS.md',
             action: 'replace',
             reason: 'Align rules.',
-            sha256_before: sha256(original),
+            sha256_before: canonicalSha(original),
             content: replacement,
           },
         ],
@@ -82,6 +86,37 @@ describe('governance reconciliation', () => {
       changedPaths: ['AGENTS.md'],
       backupPaths: ['.web-chat2codex/backups/reconciliation/run-1/AGENTS.md'],
     });
+  });
+
+  it('allows formatting-only drift and preserves the original BOM and line endings', async () => {
+    const root = await project();
+    const original = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from('# Legacy\r\nKeep feature notes.\r\n', 'utf8'),
+    ]);
+    const replacement = '# Updated\nKeep feature notes.\n';
+    await writeFile(join(root, 'AGENTS.md'), original);
+
+    await new GovernanceReconciliationApplier(root, { runId: () => 'run-format' }).apply(
+      block({
+        status: 'CHANGES_REQUIRED',
+        baseline_commit: 'base',
+        files: [
+          {
+            path: 'AGENTS.md',
+            action: 'replace',
+            reason: 'Align rules.',
+            sha256_before: canonicalShaBytes(Buffer.from('# Legacy\nKeep feature notes.\n', 'utf8')),
+            content: replacement,
+          },
+        ],
+      }),
+    );
+
+    expect(await readFile(join(root, 'AGENTS.md'))).toEqual(
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('# Updated\r\nKeep feature notes.\r\n', 'utf8')]),
+    );
+    expect(await readFile(join(root, '.web-chat2codex/backups/reconciliation/run-format/AGENTS.md'))).toEqual(original);
   });
 
   it('fails closed on SHA drift and protected paths without modifying files', async () => {
@@ -97,7 +132,7 @@ describe('governance reconciliation', () => {
               path: 'AGENTS.md',
               action: 'replace',
               reason: 'stale',
-              sha256_before: sha256('different'),
+              sha256_before: canonicalSha('different'),
               content: '# Updated\n',
             },
           ],
@@ -117,13 +152,65 @@ describe('governance reconciliation', () => {
               path: '.web-chat2codex/secret.txt',
               action: 'replace',
               reason: 'unsafe',
-              sha256_before: sha256('x'),
+              sha256_before: canonicalSha('x'),
               content: '# no',
             },
           ],
         }),
       ),
     ).rejects.toBeInstanceOf(GovernanceReconciliationError);
+  });
+
+  it('blocks an actual body change even when the submitted hash is canonical', async () => {
+    const root = await project();
+    const changed = '# Changed\nKeep feature notes.\n';
+    await writeFile(join(root, 'AGENTS.md'), changed, 'utf8');
+
+    await expect(
+      new GovernanceReconciliationApplier(root, { runId: () => 'run-body-drift' }).apply(
+        block({
+          status: 'CHANGES_REQUIRED',
+          baseline_commit: 'base',
+          files: [
+            {
+              path: 'AGENTS.md',
+              action: 'replace',
+              reason: 'stale',
+              sha256_before: canonicalSha('# Legacy\nKeep feature notes.\n'),
+              content: '# Updated\n',
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'GOVERNANCE_RECONCILIATION_SHA_CONFLICT' });
+    await expect(access(join(root, '.web-chat2codex/backups'))).rejects.toThrow();
+  });
+
+  it('blocks a concurrent modification after the commit preflight and before replacement', async () => {
+    const root = await project();
+    const original = '# Legacy\nKeep feature notes.\n';
+    await expect(
+      new GovernanceReconciliationApplier(root, {
+        runId: () => 'run-concurrent',
+        beforeReplace: async () => writeFile(join(root, 'AGENTS.md'), '# Concurrent\n', 'utf8'),
+      }).apply(
+        block({
+          status: 'CHANGES_REQUIRED',
+          baseline_commit: 'base',
+          files: [
+            {
+              path: 'AGENTS.md',
+              action: 'replace',
+              reason: 'stale',
+              sha256_before: canonicalSha(original),
+              content: '# Updated\n',
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'GOVERNANCE_RECONCILIATION_SHA_CONFLICT' });
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toBe('# Concurrent\n');
+    await expect(access(join(root, '.web-chat2codex/backups'))).resolves.toBeUndefined();
   });
 
   it('does not accept a reconciliation block as an ordinary Luna round output', () => {
@@ -178,7 +265,7 @@ describe('governance reconciliation', () => {
             path: 'AGENTS.md',
             action: 'replace',
             reason: 'Align rules.',
-            sha256_before: sha256('# Legacy\nKeep feature notes.\n'),
+            sha256_before: canonicalSha('# Legacy\nKeep feature notes.\n'),
             content: '# Updated\nKeep feature notes.\n',
           },
         ],

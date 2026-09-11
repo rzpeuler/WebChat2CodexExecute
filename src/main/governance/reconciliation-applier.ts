@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import type {
@@ -12,6 +12,11 @@ import {
   resolveProjectPath,
 } from '../security/path-safety.js';
 import { withSharedStateTransactionLock } from '../state/persistence.js';
+import {
+  canonicalizeGovernanceText,
+  GovernanceTextHashError,
+  type CanonicalGovernanceText,
+} from './canonical-text-hash.js';
 
 const PROTECTED_PREFIXES = ['.git', '.web-chat2codex', 'node_modules', 'dist'];
 
@@ -77,39 +82,25 @@ function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && 'code' in error && error.code === code;
 }
 
-function sha256(content: Uint8Array): string {
-  return createHash('sha256').update(content).digest('hex');
+function hasUtf8Bom(content: Uint8Array): boolean {
+  return content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf;
 }
 
-function assertOrdinaryText(content: Buffer, path: string, label: 'existing file' | 'replacement content'): void {
-  if (content.length === 0 || content.includes(0)) {
-    throw new GovernanceReconciliationError(
-      'GOVERNANCE_RECONCILIATION_NOT_REGULAR_TEXT',
-      `${label} is empty or binary: ${path}`,
-      { path },
-    );
-  }
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(content);
-  } catch (error) {
-    throw new GovernanceReconciliationError(
-      'GOVERNANCE_RECONCILIATION_NOT_REGULAR_TEXT',
-      `${label} is not valid UTF-8 text: ${path}`,
-      { path, cause: error },
-    );
-  }
-  const controls = [...text].filter((character) => {
-    const code = character.charCodeAt(0);
-    return code < 32 && character !== '\t' && character !== '\n' && character !== '\r';
-  }).length;
-  if (controls > Math.max(1, Math.floor(text.length / 100))) {
-    throw new GovernanceReconciliationError(
-      'GOVERNANCE_RECONCILIATION_NOT_REGULAR_TEXT',
-      `${label} contains binary control data: ${path}`,
-      { path },
-    );
-  }
+function preferredLineEnding(text: string): '\n' | '\r\n' | '\r' {
+  const endings = [...text.matchAll(/\r\n|\r|\n/g)].map(([ending]) => ending as '\n' | '\r\n' | '\r');
+  if (endings.length === 0) return '\n';
+  const counts = new Map<string, number>();
+  for (const ending of endings) counts.set(ending, (counts.get(ending) ?? 0) + 1);
+  return endings.reduce((preferred, ending) =>
+    (counts.get(ending) ?? 0) > (counts.get(preferred) ?? 0) ? ending : preferred,
+  );
+}
+
+function formatReplacement(original: CanonicalGovernanceText, replacement: CanonicalGovernanceText): Buffer {
+  const lineEnding = preferredLineEnding(original.text);
+  const text = replacement.canonicalText.replaceAll('\n', lineEnding);
+  const bytes = Buffer.from(text, 'utf8');
+  return hasUtf8Bom(original.rawBytes) ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), bytes]) : bytes;
 }
 
 function validatedRunId(value: string): string {
@@ -164,7 +155,7 @@ async function safeTargetPath(projectRoot: string, candidate: string): Promise<s
   }
 }
 
-async function readRegularTextFile(path: string, relativePath: string): Promise<Buffer> {
+async function readRegularTextFile(path: string, relativePath: string): Promise<CanonicalGovernanceText> {
   try {
     const stats = await lstat(path);
     if (!stats.isFile() || stats.isSymbolicLink()) {
@@ -175,10 +166,16 @@ async function readRegularTextFile(path: string, relativePath: string): Promise<
       );
     }
     const content = await readFile(path);
-    assertOrdinaryText(content, relativePath, 'existing file');
-    return content;
+    return canonicalizeGovernanceText(content, relativePath);
   } catch (error) {
     if (error instanceof GovernanceReconciliationError) throw error;
+    if (error instanceof GovernanceTextHashError) {
+      throw new GovernanceReconciliationError(
+        'GOVERNANCE_RECONCILIATION_NOT_REGULAR_TEXT',
+        `Reconciliation target is not regular UTF-8 text: ${relativePath}`,
+        { path: relativePath, cause: error },
+      );
+    }
     if (isNodeError(error, 'ENOENT')) {
       throw new GovernanceReconciliationError(
         'GOVERNANCE_RECONCILIATION_FILE_NOT_FOUND',
@@ -250,21 +247,33 @@ export class GovernanceReconciliationApplier {
       }
       seen.add(key);
       const original = await readRegularTextFile(absolutePath, relativePath);
-      if (sha256(original) !== input.sha256_before.toLowerCase()) {
+      if (original.sha256 !== input.sha256_before.toLowerCase()) {
         throw new GovernanceReconciliationError(
           'GOVERNANCE_RECONCILIATION_SHA_CONFLICT',
           `Reconciliation before SHA does not match: ${relativePath}`,
           { path: relativePath },
         );
       }
-      const replacement = Buffer.from(input.content, 'utf8');
-      assertOrdinaryText(replacement, relativePath, 'replacement content');
+      let replacementText: CanonicalGovernanceText;
+      try {
+        replacementText = canonicalizeGovernanceText(Buffer.from(input.content, 'utf8'), relativePath);
+      } catch (error) {
+        if (error instanceof GovernanceTextHashError) {
+          throw new GovernanceReconciliationError(
+            'GOVERNANCE_RECONCILIATION_NOT_REGULAR_TEXT',
+            `Replacement content is not regular UTF-8 text: ${relativePath}`,
+            { path: relativePath, cause: error },
+          );
+        }
+        throw error;
+      }
+      const replacement = formatReplacement(original, replacementText);
       const backupRelativePath = `.web-chat2codex/backups/reconciliation/${runIdFrom(backupRoot)}/${relativePath}`;
       planned.push({
         input,
         relativePath,
         absolutePath,
-        original,
+        original: original.rawBytes,
         replacement,
         backupPath: resolve(backupRoot, relativePath),
         backupRelativePath,
@@ -303,7 +312,7 @@ export class GovernanceReconciliationApplier {
       for (const item of planned) {
         await safeTargetPath(this.projectRoot, item.relativePath);
         const current = await readRegularTextFile(item.absolutePath, item.relativePath);
-        if (sha256(current) !== item.input.sha256_before.toLowerCase()) {
+        if (current.sha256 !== item.input.sha256_before.toLowerCase()) {
           throw new GovernanceReconciliationError(
             'GOVERNANCE_RECONCILIATION_SHA_CONFLICT',
             `Reconciliation target changed before replacement: ${item.relativePath}`,
@@ -312,12 +321,18 @@ export class GovernanceReconciliationApplier {
         }
       }
 
-      for (const item of planned) {
-        await rename(item.absolutePath, item.backupPath);
-        item.movedToBackup = true;
-      }
       for (const [index, item] of planned.entries()) {
         await this.beforeReplace?.(item.relativePath, index);
+        const current = await readRegularTextFile(item.absolutePath, item.relativePath);
+        if (current.sha256 !== item.input.sha256_before.toLowerCase()) {
+          throw new GovernanceReconciliationError(
+            'GOVERNANCE_RECONCILIATION_SHA_CONFLICT',
+            `Reconciliation target changed before replacement: ${item.relativePath}`,
+            { path: item.relativePath },
+          );
+        }
+        await rename(item.absolutePath, item.backupPath);
+        item.movedToBackup = true;
         await rename(item.stagePath, item.absolutePath);
         item.installed = true;
       }
