@@ -210,7 +210,7 @@ describe('P0 main orchestration', () => {
     });
   });
 
-  it('projects a completed task round onto the fixed eight-node graph', async () => {
+  it('projects a completed task round onto the graph including the repair branch', async () => {
     const options = baseOptions({
       edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${taskText()}`)) },
     });
@@ -225,6 +225,7 @@ describe('P0 main orchestration', () => {
     expect(graph.nodes.map((node) => node.id)).toEqual([
       'read-sol',
       'parse-task',
+      'auto-repair',
       'apply-updates',
       'sync-governance',
       'run-luna',
@@ -235,6 +236,7 @@ describe('P0 main orchestration', () => {
     expect(graph.nodes.map((node) => node.state)).toEqual([
       'COMPLETED',
       'COMPLETED',
+      'PENDING',
       'COMPLETED',
       'COMPLETED',
       'COMPLETED',
@@ -242,7 +244,7 @@ describe('P0 main orchestration', () => {
       'COMPLETED',
       'ACTIVE',
     ]);
-    expect(graph.nodes[4]).toMatchObject({
+    expect(graph.nodes[5]).toMatchObject({
       summary: 'Luna 已完成任务 task-1。',
       details: expect.arrayContaining(['任务：task-1', '会话：luna-1', '报告：docs/task-reports/task-1.md']),
       startedAt: expect.any(String),
@@ -419,6 +421,7 @@ describe('P0 main orchestration', () => {
     expect(graph.nodes.map((node) => node.state)).toEqual([
       'COMPLETED',
       'COMPLETED',
+      'PENDING',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
@@ -632,18 +635,66 @@ describe('P0 main orchestration', () => {
     await expect(first).resolves.toMatchObject({ accepted: true });
   });
 
-  it('does not start again after a Sol protocol error has blocked the old output', async () => {
-    const options = baseOptions({ edge: { observe: vi.fn(async () => observation(`${taskText()}\n${taskText()}`)) } });
+  it('automatically asks Sol to repair a malformed output and waits for a new block', async () => {
+    let currentOutput = `${taskText()}\n${taskText()}`;
+    const observe = vi.fn(async () => observation(currentOutput));
+    const options = baseOptions({ edge: { observe } });
     const orchestrator = new MainOrchestrator(options);
     await orchestrator.start();
-    await orchestrator.runRound();
+    const first = await orchestrator.runRound();
 
-    expect(orchestrator.getDashboardSnapshot().actions.start).toMatchObject({ enabled: true, busy: false });
-    await expect(orchestrator.start()).resolves.toMatchObject({
+    expect(first).toMatchObject({
       status: 'WAITING',
-      message: '编排器已启动，正在读取 Sol。',
     });
-    expect(orchestrator.getState()).toMatchObject({ active: true, status: 'RUNNING', recentError: null });
+    expect(orchestrator.getState()).toMatchObject({
+      active: true,
+      status: 'RUNNING',
+      phase: 'WAITING_FOR_SOL',
+      autoRepair: { errorCode: 'WRITING_BLOCK_DUPLICATE_LUNA_TASK', status: 'WAITING_FOR_SOL', attempt: 1 },
+    });
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+    expect(options.sol?.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining('ORCHESTRATOR_AUTO_REPAIR') }),
+    );
+
+    currentOutput = taskText();
+    await orchestrator.runRound();
+    expect(options.codex.startTask).toHaveBeenCalledOnce();
+    expect(orchestrator.getState().autoRepair).toBeNull();
+  });
+
+  it('does not auto-repair an external setup block from Luna', async () => {
+    const options = baseOptions({
+      codex: {
+        startTask: vi.fn(async (input) => ({
+          sessionId: 'luna-1',
+          status: 'RUNNING' as const,
+          result: Promise.resolve({
+            ...completedRun(input.task),
+            status: 'FAILED' as const,
+            protocolResult: {
+              identifier: 'LUNA_RESULT' as const,
+              status: 'BLOCKED_EXTERNAL_SETUP' as const,
+              summary: '需要配置外部平台。',
+              reportPath: input.task.fields.report_path,
+              tests: [],
+            },
+          }),
+        })),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    const result = await orchestrator.runRound();
+
+    expect(result.status).toBe('PAUSED');
+    expect(orchestrator.getState()).toMatchObject({
+      status: 'NEEDS_USER_ACTION',
+      recentError: { code: 'BLOCKED_EXTERNAL_SETUP' },
+      autoRepair: null,
+    });
+    expect(options.sol?.sendMessage).not.toHaveBeenCalled();
   });
 
   it('rechecks action state before executing commands and keeps open navigation available while a round is busy', async () => {
@@ -842,8 +893,8 @@ describe('P0 main orchestration', () => {
     expect(blocked.getDashboardSnapshot().actions['retry-current-stage']).toMatchObject({
       enabled: false,
       busy: false,
+      reason: expect.stringContaining('自动循环运行中'),
     });
-    expect(blocked.getDashboardSnapshot().actions['retry-current-stage'].reason).toContain('启动自动循环');
   });
 
   it('uses a stable three-button state machine for idle, running, and paused states', async () => {
@@ -1015,7 +1066,7 @@ describe('P0 main orchestration', () => {
     const saved = saves.at(-1);
     expect(saved).toBeDefined();
     const graph = saved!.loopGraph;
-    expect(graph.nodes).toHaveLength(8);
+    expect(graph.nodes).toHaveLength(9);
     expect(graph.nodes.filter((node) => node.state === 'ACTIVE')).toHaveLength(0);
     for (const node of graph.nodes) {
       expect(node.summary.length).toBeLessThanOrEqual(240);
@@ -1027,23 +1078,25 @@ describe('P0 main orchestration', () => {
     expect(saved!.recentError?.message.length).toBeLessThanOrEqual(240);
   });
 
-  it('pauses on malformed or multi-task output before any side effect', async () => {
+  it('auto-repairs malformed or multi-task output before any side effect', async () => {
     const duplicateTaskOutput = `${taskText()}\n${taskText().replace('task-1', 'task-2')}`;
     const options = baseOptions({ edge: { observe: vi.fn(async () => observation(duplicateTaskOutput)) } });
     const orchestrator = new MainOrchestrator(options);
     await orchestrator.start();
     const result = await orchestrator.runRound();
 
-    expect(result.status).toBe('PAUSED');
+    expect(result.status).toBe('WAITING');
     expect(orchestrator.getState()).toMatchObject({
-      status: 'PAUSED',
-      recentError: { code: 'WRITING_BLOCK_DUPLICATE_LUNA_TASK' },
+      status: 'RUNNING',
+      phase: 'WAITING_FOR_SOL',
+      recentError: null,
+      autoRepair: { errorCode: 'WRITING_BLOCK_DUPLICATE_LUNA_TASK', status: 'WAITING_FOR_SOL' },
     });
     expect(options.codex.startTask).not.toHaveBeenCalled();
     expect(options.git.syncGovernance).not.toHaveBeenCalled();
   });
 
-  it('validates every block before applying an earlier governance block or starting Luna', async () => {
+  it('auto-repairs invalid task fields before applying an earlier governance block or starting Luna', async () => {
     const invalidTask = taskText().replace('"validation_commands": ["npm test"]', '"validation_commands": "npm test"');
     const options = baseOptions({
       edge: { observe: vi.fn(async () => observation(`${governanceText()}\n${invalidTask}`)) },
@@ -1053,11 +1106,12 @@ describe('P0 main orchestration', () => {
 
     const result = await orchestrator.runRound();
 
-    expect(result.status).toBe('PAUSED');
-    expect(orchestrator.getState().recentError).toMatchObject({ code: 'WRITING_BLOCK_INVALID_FIELD' });
-    expect(orchestrator.getState().recentError?.message).toContain('第 1 个 Writing Block');
-    expect(orchestrator.getState().recentError?.message).toContain('类型 LUNA_TASK');
-    expect(orchestrator.getState().recentError?.message).toContain('字段 validation_commands');
+    expect(result.status).toBe('WAITING');
+    expect(orchestrator.getState()).toMatchObject({
+      phase: 'WAITING_FOR_SOL',
+      recentError: null,
+      autoRepair: { errorCode: 'WRITING_BLOCK_INVALID_FIELD', status: 'WAITING_FOR_SOL' },
+    });
     expect(options.git.captureBaseline).not.toHaveBeenCalled();
     expect(options.governance?.applyAll).not.toHaveBeenCalled();
     expect(options.architecture?.download).not.toHaveBeenCalled();
@@ -1066,7 +1120,7 @@ describe('P0 main orchestration', () => {
     expect(options.codex.startTask).not.toHaveBeenCalled();
   });
 
-  it('refuses retry when the previous output requires new Sol output', async () => {
+  it('does not duplicate an automatic repair while waiting for Sol', async () => {
     const invalidTask = taskText().replace('"validation_commands": ["npm test"]', '"validation_commands": "npm test"');
     const observe = vi.fn(async () =>
       observation(`${governanceText()}
@@ -1079,18 +1133,15 @@ ${invalidTask}`),
 
     const retry = await orchestrator.retryCurrentStage();
 
-    expect(retry).toMatchObject({
-      status: 'PAUSED',
-      phase: 'PAUSED',
-      message: '当前输出不可重试，请让 Sol 重新输出或规划任务（需要新的 Sol 输出）。',
-    });
+    expect(retry).toMatchObject({ status: 'WAITING', phase: 'WAITING_FOR_SOL' });
     expect(orchestrator.getState()).toMatchObject({
-      active: false,
-      status: 'PAUSED',
-      phase: 'PAUSED',
-      recentError: { code: 'WRITING_BLOCK_INVALID_FIELD' },
+      active: true,
+      status: 'RUNNING',
+      phase: 'WAITING_FOR_SOL',
+      recentError: null,
     });
-    expect(observe).toHaveBeenCalledOnce();
+    expect(observe).toHaveBeenCalledTimes(2);
+    expect(options.sol?.sendMessage).toHaveBeenCalledOnce();
     expect(options.git.captureBaseline).not.toHaveBeenCalled();
     expect(options.governance?.applyAll).not.toHaveBeenCalled();
     expect(options.architecture?.download).not.toHaveBeenCalled();

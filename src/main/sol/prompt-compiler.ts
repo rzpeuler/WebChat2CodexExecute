@@ -49,7 +49,18 @@ export interface GovernanceReconciliationPromptInput {
   baselineCommit: string;
 }
 
+export interface SolAutoRepairPromptInput {
+  errorCode: string;
+  errorMessage: string;
+  outputType: WritingBlockType | 'UNKNOWN';
+  taskId?: string | null;
+  currentBaseline?: string | null;
+  attempt: number;
+  maxAttempts: number;
+}
+
 export const SOL_INITIALIZATION_PROMPT_MAX_CHARACTERS = 8000;
+export const SOL_AUTO_REPAIR_PROMPT_MAX_CHARACTERS = 8000;
 
 export class SolPromptCompilationError extends Error {
   readonly code = 'SOL_INITIALIZATION_PROMPT_TOO_LONG';
@@ -59,6 +70,15 @@ export class SolPromptCompilationError extends Error {
       `Sol 初始化提示词过长：当前 ${length} 个字符，不能超过 ${SOL_INITIALIZATION_PROMPT_MAX_CHARACTERS} 个字符。请缩短项目路径或联系开发者精简固定提示词。`,
     );
     this.name = 'SolPromptCompilationError';
+  }
+}
+
+export class SolAutoRepairPromptCompilationError extends Error {
+  readonly code = 'SOL_AUTO_REPAIR_PROMPT_TOO_LONG';
+
+  constructor(length: number) {
+    super(`Sol 自动修复提示词过长：当前 ${length} 个字符，不能超过 ${SOL_AUTO_REPAIR_PROMPT_MAX_CHARACTERS} 个字符。`);
+    this.name = 'SolAutoRepairPromptCompilationError';
   }
 }
 
@@ -331,6 +351,41 @@ export function compileSolRoundContext(input: SolPromptInput): string {
 
 export function compileSolGovernanceReconciliationPrompt(input: GovernanceReconciliationPromptInput): string {
   return new SolPromptCompiler().compileGovernanceReconciliationPrompt(input);
+}
+
+export function compileSolAutoRepairPrompt(input: SolAutoRepairPromptInput): string {
+  const outputType =
+    input.outputType === 'UNKNOWN' ? '目标 Writing Block 类型请根据当前任务上下文确定' : input.outputType;
+  const baselineLine =
+    input.errorCode === 'BASELINE_CHANGED'
+      ? `当前真实 base_commit：${sanitizeText(input.currentBaseline ?? '[unavailable]')}`
+      : '';
+  const taskLine = input.taskId === null || input.taskId === undefined ? '' : `任务 ID：${sanitizeText(input.taskId)}`;
+  const prompt = [
+    '[ORCHESTRATOR_AUTO_REPAIR]',
+    '',
+    '当前 Sol 输出无法被本地 ORCHESTRATOR 安全接受。',
+    `错误码：${sanitizeText(input.errorCode).slice(0, 128)}`,
+    `诊断：${sanitizeText(input.errorMessage).slice(0, 2048)}`,
+    `输出类型：${outputType}`,
+    taskLine,
+    baselineLine,
+    `这是本回合第 ${input.attempt} 次自动修复，最多 ${input.maxAttempts} 次。`,
+    '',
+    '请保持原任务 ID、目标、范围和验收标准不变，只修复上述错误。',
+    ...(input.errorCode === 'BASELINE_CHANGED'
+      ? ['请只更新 base_commit 为当前真实 base_commit，不要改变其他任务内容。']
+      : []),
+    `请重新输出一个完整、合法的 ${outputType} Writing Block。`,
+    '只能输出目标 Writing Block，不得输出解释、Markdown 代码围栏或块外文本。',
+    '不要执行代码，不要修改仓库，不要 commit，不要 push。',
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
+  if (prompt.length > SOL_AUTO_REPAIR_PROMPT_MAX_CHARACTERS) {
+    throw new SolAutoRepairPromptCompilationError(prompt.length);
+  }
+  return prompt;
 }
 
 export function hashSolPrompt(prompt: string): string {

@@ -70,6 +70,22 @@ export interface PendingReconciliationSyncState {
   outputKey: string;
 }
 
+export type AutoRepairStatus = 'PENDING' | 'SENT' | 'WAITING_FOR_SOL' | 'SUCCEEDED' | 'EXHAUSTED';
+
+export interface AutoRepairState {
+  errorCode: string;
+  errorMessage: string;
+  outputKey: string;
+  outputType: 'UNKNOWN' | 'LUNA_TASK' | 'GOVERNANCE_RECONCILIATION';
+  taskId: string | null;
+  roundId: string | null;
+  attempt: number;
+  maxAttempts: number;
+  status: AutoRepairStatus;
+  sentAt: string | null;
+  updatedAt: string;
+}
+
 export interface ExecutionRecoveryRecord {
   outputKey: string;
   outputType: 'UNKNOWN' | 'LUNA_TASK' | 'GOVERNANCE_RECONCILIATION' | 'USER_MESSAGE';
@@ -104,6 +120,7 @@ export interface OrchestratorState {
   loopGraph: LoopGraphSnapshot;
   pendingCodeSync: PendingCodeSyncState | null;
   pendingReconciliationSync: PendingReconciliationSyncState | null;
+  autoRepair: AutoRepairState | null;
   executionRecovery: ExecutionRecoveryRecord | null;
   /** Optional for backwards compatibility with state files written before manual Git maintenance. */
   manualGitOperation?: GitManualOperationRecord;

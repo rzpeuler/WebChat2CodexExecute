@@ -150,9 +150,23 @@ export interface DashboardRecoverySnapshot {
   error: DashboardErrorSnapshot | null;
 }
 
+export interface DashboardAutoRepairSnapshot {
+  errorCode: string;
+  errorMessage: string;
+  outputType: string;
+  taskId: string | null;
+  roundId: string | null;
+  attempt: number;
+  maxAttempts: number;
+  status: 'PENDING' | 'SENT' | 'WAITING_FOR_SOL' | 'SUCCEEDED' | 'EXHAUSTED';
+  sentAt: string | null;
+  updatedAt: string;
+}
+
 export const LOOP_GRAPH_NODE_DEFINITIONS = [
   { id: 'read-sol', label: '读取 Sol' },
   { id: 'parse-task', label: '解析任务书' },
+  { id: 'auto-repair', label: '自动修复' },
   { id: 'apply-updates', label: '应用治理/架构更新' },
   { id: 'sync-governance', label: '同步治理' },
   { id: 'run-luna', label: 'Luna 执行' },
@@ -221,6 +235,7 @@ export interface DashboardSnapshot {
   manualGitOperation: DashboardManualGitOperationSnapshot | null;
   recentError: DashboardErrorSnapshot | null;
   recovery: DashboardRecoverySnapshot | null;
+  autoRepair: DashboardAutoRepairSnapshot | null;
   loopGraph: LoopGraphSnapshot;
   actions: DashboardActions;
 }
@@ -242,6 +257,7 @@ export interface DashboardSnapshotSource {
   manualGitOperation?: unknown;
   recentError?: unknown;
   recovery?: unknown;
+  autoRepair?: unknown;
   loopGraph?: LoopGraphSnapshotSource | null;
   actions?: Partial<Record<DashboardCommandName, Partial<DashboardActionState>>>;
 }
@@ -325,8 +341,41 @@ export function sanitizeDashboardSnapshot(source: DashboardSnapshotSource): Dash
     manualGitOperation: sanitizeManualGitOperation(source.manualGitOperation),
     recentError,
     recovery: sanitizeDashboardRecovery(source.recovery),
+    autoRepair: sanitizeDashboardAutoRepair(source.autoRepair),
     loopGraph: sanitizeLoopGraph(source.loopGraph),
     actions: sanitizeDashboardActions(source.actions),
+  };
+}
+
+function sanitizeDashboardAutoRepair(value: unknown): DashboardAutoRepairSnapshot | null {
+  if (!isRecord(value)) return null;
+  const status = value.status;
+  if (
+    status !== 'PENDING' &&
+    status !== 'SENT' &&
+    status !== 'WAITING_FOR_SOL' &&
+    status !== 'SUCCEEDED' &&
+    status !== 'EXHAUSTED'
+  )
+    return null;
+  const errorCode = sanitizeSafeText(value.errorCode, 128);
+  const errorMessage = sanitizeSafeText(value.errorMessage, 2048);
+  const outputType = sanitizeSafeText(value.outputType, 64);
+  const attempt = normalizeBoundedInteger(value.attempt, 0, 10);
+  const maxAttempts = normalizeBoundedInteger(value.maxAttempts, 1, 10);
+  const updatedAt = sanitizeTimestamp(value.updatedAt);
+  if (errorCode === '' || errorMessage === '' || outputType === '' || updatedAt === null) return null;
+  return {
+    errorCode,
+    errorMessage,
+    outputType,
+    taskId: sanitizeSafeText(value.taskId, 128) || null,
+    roundId: sanitizeOptionalIdentifier(value.roundId),
+    attempt,
+    maxAttempts,
+    status,
+    sentAt: sanitizeTimestamp(value.sentAt),
+    updatedAt,
   };
 }
 
@@ -544,6 +593,11 @@ function sanitizeTimestamp(value: unknown): string | null {
     parsed.getUTCMilliseconds() === milliseconds
     ? sanitized
     : null;
+}
+
+function normalizeBoundedInteger(value: unknown, minimum: number, maximum: number): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return minimum;
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
 function sanitizeOptionalIdentifier(value: unknown): string | null {

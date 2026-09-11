@@ -22,6 +22,7 @@ import {
   type LunaTaskBlock,
 } from '../../shared/protocol/writing-block.js';
 import { resolve } from 'node:path';
+import { compileSolAutoRepairPrompt } from '../sol/prompt-compiler.js';
 import type { EdgeSolObservation } from '../edge/types.js';
 import type { CodexRunResult } from '../codex/types.js';
 import type { GitManualOperationRecord } from '../git/types.js';
@@ -40,13 +41,16 @@ import {
   type OrchestratorSnapshots,
   type OrchestratorState,
   type OrchestratorStateStore,
+  type AutoRepairState,
   type ExecutionRecoveryRecord,
   type PendingCodeSyncState,
   type PendingReconciliationSyncState,
   type SolMessageSource,
+  type AutoRepairStatus,
 } from './types.js';
 
 const MAX_RETRIES = 3;
+const MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND = 2;
 const LEGACY_RECOVERY_OUTPUT_KEY = '__legacy_recovery_pending__';
 
 const DEFAULT_STATE: OrchestratorState = {
@@ -68,6 +72,7 @@ const DEFAULT_STATE: OrchestratorState = {
   loopGraph: createLoopGraph(null, new Date(0).toISOString()),
   pendingCodeSync: null,
   pendingReconciliationSync: null,
+  autoRepair: null,
   executionRecovery: null,
   activeSolSession: null,
 };
@@ -196,6 +201,7 @@ export class MainOrchestrator implements Orchestrator {
       manualGitOperation: this.state.manualGitOperation ?? null,
       recentError: this.state.recentError,
       recovery: this.state.executionRecovery,
+      autoRepair: this.state.autoRepair,
       loopGraph: this.state.loopGraph,
       actions: this.dashboardActions(),
     });
@@ -1111,8 +1117,17 @@ export class MainOrchestrator implements Orchestrator {
       });
     } catch (error) {
       this.prepareRecoveryRecord(outputKey, 'UNKNOWN', null);
+      const repaired = await this.tryAutoRepair(
+        error,
+        observation,
+        outputKey,
+        inferAutoRepairOutputType(observation.latestAssistantText),
+        null,
+      );
+      if (repaired !== null) return repaired;
       return this.pauseFor(error, 'Writing Block 协议无效，已拒绝启动 Luna。');
     }
+    this.state.autoRepair = null;
     if (parsed.blocked.length > 0) {
       return this.pauseForCode('SOL_BLOCKED', parsed.blocked.map((block) => block.fields.reason).join('\n'), true);
     }
@@ -1164,6 +1179,18 @@ export class MainOrchestrator implements Orchestrator {
       }
       return await this.runLuna(parsed.lunaTask, observation, outputKey);
     } catch (error) {
+      const repaired = await this.tryAutoRepair(
+        error,
+        observation,
+        outputKey,
+        parsed.governanceReconciliation !== null
+          ? 'GOVERNANCE_RECONCILIATION'
+          : parsed.lunaTask === null
+            ? 'UNKNOWN'
+            : 'LUNA_TASK',
+        parsed.lunaTask?.fields.task_id ?? null,
+      );
+      if (repaired !== null) return repaired;
       return this.isTerminalFailure(error)
         ? this.failFor(error)
         : this.pauseFor(error, '当前阶段执行失败，已暂停以等待重试或人工处理。');
@@ -1388,6 +1415,114 @@ export class MainOrchestrator implements Orchestrator {
     return result('COMPLETED', this.state, `任务 ${pending.taskId} 已完成并同步。`);
   }
 
+  private async tryAutoRepair(
+    error: unknown,
+    observation: EdgeSolObservation,
+    outputKey: string,
+    outputType: AutoRepairState['outputType'],
+    taskId: string | null,
+  ): Promise<OrchestratorResult | null> {
+    const code = error instanceof OrchestratorError ? error.code : errorCode(error);
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isAutoRepairableError(code, this.state.phase)) return null;
+    if (this.sol === undefined) return null;
+
+    const previous = this.state.autoRepair;
+    if (previous !== null && previous.errorCode === code) return null;
+    const attempt = previous === null ? 1 : previous.attempt + 1;
+    if (attempt > MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND) {
+      this.state.autoRepair = {
+        ...(previous ?? {
+          errorCode: code,
+          errorMessage: message,
+          outputKey,
+          outputType,
+          taskId,
+          roundId: this.state.loopGraph.roundId,
+          attempt: MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND,
+          maxAttempts: MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND,
+          sentAt: null,
+          updatedAt: this.now().toISOString(),
+        }),
+        status: 'EXHAUSTED',
+        updatedAt: this.now().toISOString(),
+      };
+      return null;
+    }
+
+    const currentBaseline = this.baseline?.head ?? null;
+    let prompt: string;
+    try {
+      prompt = compileSolAutoRepairPrompt({
+        errorCode: code,
+        errorMessage: message,
+        outputType,
+        taskId,
+        currentBaseline,
+        attempt,
+        maxAttempts: MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND,
+      });
+    } catch (promptError) {
+      return this.pauseFor(promptError, '自动修复提示词无法安全生成，请人工处理当前 Sol 输出。');
+    }
+
+    const now = this.now().toISOString();
+    this.state.autoRepair = {
+      errorCode: code,
+      errorMessage: message,
+      outputKey,
+      outputType,
+      taskId,
+      roundId: this.state.loopGraph.roundId,
+      attempt,
+      maxAttempts: MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND,
+      status: 'PENDING',
+      sentAt: null,
+      updatedAt: now,
+    };
+    this.updateGraphNode('parse-task', {
+      summary: `检测到 ${code}，准备自动修复。`,
+      details: [`错误：${code}`, message, `自动修复：第 ${attempt}/${MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND} 次`],
+    });
+    this.activateGraphNode('auto-repair', taskId);
+    this.touchState();
+    await this.persist();
+
+    try {
+      await this.sol.sendMessage({ observation, text: prompt });
+    } catch (sendError) {
+      this.state.autoRepair = { ...this.state.autoRepair, status: 'EXHAUSTED', updatedAt: this.now().toISOString() };
+      await this.persist();
+      return this.pauseForCode(
+        'SOL_AUTO_REPAIR_SEND_FAILED',
+        sendError instanceof Error ? sendError.message : String(sendError),
+        true,
+        '自动修复提示词未能确认发送，请检查专用 Edge 会话后重试。',
+      );
+    }
+
+    this.state.autoRepair = {
+      ...this.state.autoRepair,
+      status: 'WAITING_FOR_SOL',
+      sentAt: this.now().toISOString(),
+      updatedAt: this.now().toISOString(),
+    };
+    this.state.processedOutputKey = outputKey;
+    this.state.executionRecovery = null;
+    this.state.recentError = null;
+    await this.setPhase('WAITING_FOR_SOL', 'RUNNING', taskId);
+    this.updateGraphNode('wait-sol', {
+      summary: '正在等待 Sol 输出修复后的 Writing Block。',
+      details: [
+        `修复错误：${code}`,
+        `自动修复：第 ${attempt}/${MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND} 次`,
+        '已发送修复提示词，未执行 Luna。',
+      ],
+    });
+    await this.persist();
+    return result('WAITING', this.state, '已向 Sol 发送自动修复提示词，正在等待新的 Writing Block。');
+  }
+
   private async readSnapshots(task: LunaTaskBlock): Promise<OrchestratorSnapshots> {
     if (this.snapshots !== undefined) {
       const value = await this.snapshots.read();
@@ -1541,6 +1676,8 @@ export class MainOrchestrator implements Orchestrator {
 
   private async beginRound(): Promise<void> {
     this.clearPendingReconciliationRetry();
+    const pendingAutoRepair = this.state.autoRepair?.status === 'WAITING_FOR_SOL' ? this.state.autoRepair : null;
+    this.state.autoRepair = pendingAutoRepair;
     this.state.retryCount = 0;
     const now = this.now().toISOString();
     this.state.loopGraph = createLoopGraph(`round-${this.state.revision + 1}-${this.now().getTime()}`, now);
@@ -1806,6 +1943,7 @@ function cloneState(state: OrchestratorState): OrchestratorState {
     loopGraph: sanitized.loopGraph,
     pendingCodeSync: clonePendingCodeSync(state.pendingCodeSync),
     pendingReconciliationSync: clonePendingReconciliationSync(state.pendingReconciliationSync),
+    autoRepair: cloneAutoRepair(state.autoRepair),
     executionRecovery: cloneExecutionRecovery(state.executionRecovery),
     ...(state.manualGitOperation === undefined
       ? {}
@@ -1818,6 +1956,53 @@ function cloneState(state: OrchestratorState): OrchestratorState {
         }),
     activeSolSession: state.activeSolSession === null ? null : { ...state.activeSolSession },
   };
+}
+
+function cloneAutoRepair(value: unknown): AutoRepairState | null {
+  const repair = normalizeAutoRepair(value);
+  return repair === null ? null : { ...repair };
+}
+
+function normalizeAutoRepair(value: unknown): AutoRepairState | null {
+  if (!isRecord(value)) return null;
+  const errorCode = boundedPendingText(value.errorCode, 128);
+  const errorMessage = boundedPendingText(value.errorMessage, 2048);
+  const outputKey = boundedPendingText(value.outputKey, 128);
+  const outputType = value.outputType;
+  const taskId = boundedPendingText(value.taskId, 256);
+  const roundId = boundedPendingText(value.roundId, 256);
+  const attempt = boundedInteger(value.attempt, 0, MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND);
+  const maxAttempts = boundedInteger(value.maxAttempts, 1, MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND);
+  const status = value.status;
+  const sentAt = value.sentAt === null ? null : boundedPendingText(value.sentAt, 64);
+  const updatedAt = boundedPendingText(value.updatedAt, 64);
+  if (
+    errorCode === null ||
+    errorMessage === null ||
+    outputKey === null ||
+    updatedAt === null ||
+    !isAutoRepairOutputType(outputType) ||
+    !isAutoRepairStatus(status)
+  )
+    return null;
+  return {
+    errorCode,
+    errorMessage,
+    outputKey,
+    outputType,
+    taskId,
+    roundId,
+    attempt,
+    maxAttempts,
+    status,
+    sentAt,
+    updatedAt,
+  };
+}
+
+function boundedInteger(value: unknown, minimum: number, maximum: number): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return minimum;
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
 function cloneExecutionRecovery(value: unknown): ExecutionRecoveryRecord | null {
@@ -1882,6 +2067,7 @@ function normalizeState(state: OrchestratorState): OrchestratorState {
       .loopGraph,
     pendingCodeSync: normalizePendingCodeSync(source.pendingCodeSync),
     pendingReconciliationSync: normalizePendingReconciliationSync(source.pendingReconciliationSync),
+    autoRepair: normalizeAutoRepair(source.autoRepair),
     executionRecovery: normalizeExecutionRecovery(source.executionRecovery),
     activeSolSession:
       source.activeSolSession === null || source.activeSolSession === undefined ? null : { ...source.activeSolSession },
@@ -2068,6 +2254,8 @@ function phaseForNode(nodeId: LoopGraphNodeId): OrchestratorState['phase'] {
       return 'READING_SOL';
     case 'parse-task':
       return 'PARSING';
+    case 'auto-repair':
+      return 'PARSING';
     case 'apply-updates':
       return 'APPLYING_UPDATES';
     case 'sync-governance':
@@ -2105,6 +2293,20 @@ function isRecoveryOutputType(value: unknown): value is ExecutionRecoveryRecord[
   );
 }
 
+function isAutoRepairOutputType(value: unknown): value is AutoRepairState['outputType'] {
+  return value === 'UNKNOWN' || value === 'LUNA_TASK' || value === 'GOVERNANCE_RECONCILIATION';
+}
+
+function isAutoRepairStatus(value: unknown): value is AutoRepairStatus {
+  return (
+    value === 'PENDING' ||
+    value === 'SENT' ||
+    value === 'WAITING_FOR_SOL' ||
+    value === 'SUCCEEDED' ||
+    value === 'EXHAUSTED'
+  );
+}
+
 function isLoopGraphNodeId(value: unknown): value is LoopGraphNodeId {
   return LOOP_GRAPH_NODE_DEFINITIONS.some((definition) => definition.id === value);
 }
@@ -2115,6 +2317,10 @@ function phaseSummary(nodeId: LoopGraphNodeId, taskId: string | null, state: Orc
       return '正在读取 Sol 会话。';
     case 'parse-task':
       return '正在校验 Writing Block。';
+    case 'auto-repair':
+      return state.autoRepair === null
+        ? '正在准备自动修复。'
+        : `正在修复 ${state.autoRepair.errorCode}，等待 Sol 重新输出。`;
     case 'apply-updates':
       return '正在应用治理或架构更新。';
     case 'sync-governance':
@@ -2213,6 +2419,28 @@ const LOCALLY_REPROCESSABLE_WRITING_BLOCK_ERROR_CODES = new Set([
   'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
   'WRITING_BLOCK_BODY_INVALID_JSON',
 ]);
+
+const AUTO_REPAIRABLE_WRITING_BLOCK_ERROR_CODES = new Set([
+  'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
+  'WRITING_BLOCK_HEADER_INVALID',
+  'WRITING_BLOCK_UNCLOSED',
+  'WRITING_BLOCK_BODY_INVALID_JSON',
+  'WRITING_BLOCK_BODY_INVALID_YAML',
+  'WRITING_BLOCK_UNKNOWN_TYPE',
+  'WRITING_BLOCK_MISSING_FIELD',
+  'WRITING_BLOCK_INVALID_FIELD',
+  'WRITING_BLOCK_DUPLICATE_LUNA_TASK',
+]);
+
+function isAutoRepairableError(code: string, phase: OrchestratorState['phase']): boolean {
+  if (phase !== 'PARSING') return false;
+  return code === 'BASELINE_CHANGED' || AUTO_REPAIRABLE_WRITING_BLOCK_ERROR_CODES.has(code);
+}
+
+function inferAutoRepairOutputType(value: string): AutoRepairState['outputType'] {
+  const match = /\[WRITING_BLOCK\s+type="(LUNA_TASK|GOVERNANCE_RECONCILIATION)"\]/.exec(value);
+  return match?.[1] === 'LUNA_TASK' || match?.[1] === 'GOVERNANCE_RECONCILIATION' ? match[1] : 'UNKNOWN';
+}
 
 function dashboardNeedsNewSol(error: { code: string; message: string } | null): boolean {
   if (error === null) return false;

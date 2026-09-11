@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { indexGovernanceManifest } from '../../src/main/governance/manifest.js';
 import {
+  compileSolAutoRepairPrompt,
   compileSolGovernanceReconciliationPrompt,
   compileSolInitializationPrompt,
   compileSolRoundContext,
@@ -395,6 +396,23 @@ describe('Sol initialization prompt compiler', () => {
     expect(prompt).not.toContain('你必须自行判断哪些文件值得检查');
     expect(prompt).toContain('JSON.parse');
     expect(prompt).toContain('return BLOCKED');
+    expect(prompt).not.toContain('super-secret');
+  });
+
+  it('compiles a bounded baseline repair prompt without exposing credentials', () => {
+    const prompt = compileSolAutoRepairPrompt({
+      errorCode: 'BASELINE_CHANGED',
+      errorMessage: 'Luna task base_commit does not match the captured repository baseline. token=super-secret',
+      outputType: 'LUNA_TASK',
+      taskId: 'task-1',
+      currentBaseline: '996b14c7d9645898e67b155f1ef5246b0343d577',
+      attempt: 1,
+      maxAttempts: 2,
+    });
+    expect(prompt).toContain('[ORCHESTRATOR_AUTO_REPAIR]');
+    expect(prompt).toContain('996b14c7d9645898e67b155f1ef5246b0343d577');
+    expect(prompt).toContain('只更新 base_commit');
+    expect(prompt).toContain('不要 commit，不要 push');
     expect(prompt).not.toContain('super-secret');
   });
 
