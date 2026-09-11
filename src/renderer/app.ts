@@ -467,6 +467,7 @@ function ensureLoopGraphButtons(): void {
       actionButton.className = 'loop-node-action button-secondary';
       actionButton.dataset.dashboardCommand = command;
       actionButton.textContent = text;
+      actionButton.addEventListener('click', () => void executeDashboardCommandFromButton(actionButton));
       return actionButton;
     };
     const startButton = createActionButton('start', '启动');

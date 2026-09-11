@@ -51,6 +51,7 @@ describe('renderer UI layout', () => {
     expect(app).toContain("createActionButton('start', '启动')");
     expect(app).toContain("createActionButton('pause', '暂停')");
     expect(app).toContain("createActionButton('retry-current-stage', '重试')");
+    expect(app).toContain('actionButton.addEventListener');
     expect(app).toContain("node.id !== 'read-sol'");
     expect(css).toContain('.loop-node-wrapper');
     expect(css).toContain('.loop-node-actions');
