@@ -352,6 +352,9 @@ function actionReasonSuggestion(snapshot: DashboardSnapshot): string | null {
 }
 
 function getDashboardSuggestion(snapshot: DashboardSnapshot): string {
+  if (snapshot.recentError?.code === 'EXECUTION_RECOVERY_CONFIRMATION_REQUIRED') {
+    return '请查看解析任务书节点的执行摘要，确认无误后点击“继续执行”。';
+  }
   if (
     snapshot.recentError !== null &&
     /WRITING_BLOCK|PROTOCOL|INVALID_RESULT|BASELINE_CHANGED|GOVERNANCE.*(?:CONFLICT|BLOCKED)|CONFLICT|SCOPE|SOL_BLOCKED|WRONG_ENTRYPOINT/i.test(

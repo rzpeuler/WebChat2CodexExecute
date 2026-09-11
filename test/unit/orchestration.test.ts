@@ -1224,7 +1224,7 @@ ${invalidTask}`),
     );
     await first.start();
     await first.runRound();
-    expect(saved?.executionRecovery).toMatchObject({
+    expect((saved as OrchestratorState | null)?.executionRecovery).toMatchObject({
       outputType: 'GOVERNANCE_RECONCILIATION',
       interruptedNodeId: 'apply-updates',
       awaitingConfirmation: true,
