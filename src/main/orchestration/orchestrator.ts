@@ -1630,9 +1630,14 @@ const DASHBOARD_NON_RETRYABLE_ERROR_CODES = new Set([
   'UNAUTHORIZED_CHANGE',
 ]);
 
+const LOCALLY_REPROCESSABLE_WRITING_BLOCK_ERROR_CODES = new Set([
+  'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
+  'WRITING_BLOCK_BODY_INVALID_JSON',
+]);
+
 function dashboardNeedsNewSol(error: { code: string; message: string } | null): boolean {
   if (error === null) return false;
-  if (error.code === 'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT') return false;
+  if (LOCALLY_REPROCESSABLE_WRITING_BLOCK_ERROR_CODES.has(error.code)) return false;
   return (
     DASHBOARD_NON_RETRYABLE_ERROR_CODES.has(error.code) ||
     /^(?:WRITING_BLOCK|PROTOCOL|SOL_BLOCKED|.*(?:CONFLICT|SCOPE))/.test(error.code) ||
@@ -1644,7 +1649,7 @@ function dashboardNeedsNewSol(error: { code: string; message: string } | null): 
 
 function isRetryableDashboardError(error: { code: string; message: string } | null): boolean {
   if (error === null || dashboardNeedsNewSol(error)) return false;
-  if (error.code === 'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT') return true;
+  if (LOCALLY_REPROCESSABLE_WRITING_BLOCK_ERROR_CODES.has(error.code)) return true;
   return /^(?:FAILED|TIMEOUT|NETWORK|SESSION|CLI|CODEX|LUNA|REPORT|TEST|GIT|PUSH|SYNC|CONTEXT|AUTH|PROCESS_|COMMAND_FAILED|DASHBOARD_COMMAND_FAILED|COMMIT_FAILED|GOVERNANCE_CHANGE_COMMIT_FAILED|GOVERNANCE_RECONCILIATION_COMMIT_FAILED|ARCHITECTURE_FREEZE_(?:FETCH_FAILED|CONTENT_UNREADABLE|COMMIT_FAILED)|EDGE_PROCESS_EXITED|GOVERNANCE_RECONCILIATION_(?:TIMEOUT|AUTH_REQUIRED|CONTEXT_LIMIT)|BLOCKED_EXTERNAL_SETUP)/i.test(
     error.code,
   );

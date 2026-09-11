@@ -669,6 +669,7 @@ describe('P0 main orchestration', () => {
     'GOVERNANCE_RECONCILIATION_COMMIT_FAILED',
     'NETWORK_ERROR',
     'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
+    'WRITING_BLOCK_BODY_INVALID_JSON',
   ])('marks %s as retryable in the dashboard', async (code) => {
     const options = baseOptions({
       edge: {
