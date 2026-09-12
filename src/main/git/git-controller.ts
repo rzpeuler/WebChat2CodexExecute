@@ -568,7 +568,9 @@ export class GitController {
     }
     const syncAllowedPaths = [...allowedPaths, reportPath];
     if (input.taskKind === 'TEST') {
-      const invalidTestScope = allowedPaths.filter((pattern) => !normalizePath(pattern).startsWith('tests/'));
+      const invalidTestScope = allowedPaths.filter(
+        (pattern) => normalizePath(pattern) !== reportPath && !normalizePath(pattern).startsWith('tests/'),
+      );
       if (invalidTestScope.length > 0) {
         throw new GitControllerError(
           'UNAUTHORIZED_CHANGE',

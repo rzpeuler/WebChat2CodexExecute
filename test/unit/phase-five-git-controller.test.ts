@@ -481,7 +481,7 @@ describe('GitController', () => {
         taskId: 'test-task',
         taskKind: 'TEST',
         reportPath: 'docs/task-reports/test-task.md',
-        allowedPaths: ['tests/**'],
+        allowedPaths: ['tests/**', 'docs/task-reports/test-task.md'],
       }),
     ).resolves.toMatchObject({ kind: 'code' });
 
