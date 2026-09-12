@@ -95,8 +95,18 @@ const writingBlockTemplates = {
     git_policy: 'ORCHESTRATOR commits and pushes; Luna must never commit, push, amend, rebase, or force-push',
     result_contract: {
       identifier: 'LUNA_RESULT',
+      identifier_options: ['LUNA_RESULT'],
       status_options: LUNA_RESULT_STATUSES,
       tests_status_options: LUNA_TEST_STATUSES,
+      tests_required: true,
+      tests_item_schema: {
+        type: 'object',
+        required: ['status'],
+        optional: ['command'],
+        additional_fields_allowed: false,
+        status_options: LUNA_TEST_STATUSES,
+      },
+      tests_example: [{ command: 'npm test', status: 'PASSED' }],
       tests_are_evidence_only: true,
       tests_status_does_not_gate_sync: true,
       failed_tests_must_not_set_status_failed: true,

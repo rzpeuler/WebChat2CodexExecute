@@ -104,7 +104,6 @@ export interface CodexCapabilities {
 export interface LunaTestResult {
   command?: string;
   status: 'PASSED' | 'FAILED' | 'NOT_RUN';
-  [key: string]: unknown;
 }
 
 export interface LunaProtocolResult {

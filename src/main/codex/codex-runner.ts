@@ -94,21 +94,34 @@ function statusValue(value: unknown): LunaProtocolResult['status'] | null {
   return value === 'COMPLETED' || value === 'BLOCKED_EXTERNAL_SETUP' || value === 'FAILED' ? value : null;
 }
 
-function parseTests(value: unknown): LunaTestResult[] | null {
-  if (!Array.isArray(value) || value.length === 0) return null;
+interface ParsedTests {
+  tests: LunaTestResult[] | null;
+  diagnostic: string | null;
+}
+
+function parseTests(value: unknown): ParsedTests {
+  if (!Array.isArray(value) || value.length === 0)
+    return { tests: null, diagnostic: 'tests must be a non-empty array of result objects' };
   const tests: LunaTestResult[] = [];
-  for (const item of value) {
-    if (!isRecord(item) || (item.status !== 'PASSED' && item.status !== 'FAILED' && item.status !== 'NOT_RUN')) {
-      return null;
-    }
-    if (item.command !== undefined && (typeof item.command !== 'string' || item.command.trim() === '')) return null;
+  for (const [index, item] of value.entries()) {
+    if (!isRecord(item))
+      return { tests: null, diagnostic: `tests[${index}] must be an object, not a string or other scalar` };
+    const unknownKeys = Object.keys(item).filter((key) => key !== 'command' && key !== 'status');
+    if (unknownKeys.length > 0)
+      return { tests: null, diagnostic: `tests[${index}] contains unsupported fields: ${unknownKeys.join(', ')}` };
+    if (item.status !== 'PASSED' && item.status !== 'FAILED' && item.status !== 'NOT_RUN')
+      return {
+        tests: null,
+        diagnostic: `tests[${index}].status must be one of PASSED, FAILED, NOT_RUN`,
+      };
+    if (item.command !== undefined && (typeof item.command !== 'string' || item.command.trim() === ''))
+      return { tests: null, diagnostic: `tests[${index}].command must be a non-empty string when present` };
     tests.push({
       ...(item.command === undefined ? {} : { command: item.command }),
       status: item.status,
-      ...Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'command' && key !== 'status')),
     });
   }
-  return tests;
+  return { tests, diagnostic: null };
 }
 
 function aggregateTestsStatus(tests: LunaTestResult[]): LunaTestStatus {
@@ -121,28 +134,50 @@ function testsStatusValue(value: unknown): LunaTestStatus | null {
   return value === 'PASSED' || value === 'FAILED' || value === 'NOT_RUN' ? value : null;
 }
 
-function protocolFromRecord(value: unknown): LunaProtocolResult | null {
-  if (!isRecord(value) || value.identifier !== 'LUNA_RESULT') return null;
+interface ProtocolParseOutcome {
+  result: LunaProtocolResult | null;
+  diagnostic: string | null;
+}
+
+function protocolFromRecord(value: unknown): ProtocolParseOutcome {
+  if (!isRecord(value) || value.identifier !== 'LUNA_RESULT') return { result: null, diagnostic: null };
   const status = statusValue(value.status);
   const reportPath = stringField(value, 'report_path');
   const summary = stringField(value, 'summary');
-  const tests = parseTests(value.tests);
+  const parsedTests = parseTests(value.tests);
   const testsStatus = value.tests_status === undefined ? null : testsStatusValue(value.tests_status);
-  if (status === null || reportPath === null || summary === null || tests === null) return null;
-  if (value.tests_status !== undefined && testsStatus === null) return null;
-  if (value.assumptions !== undefined && !Array.isArray(value.assumptions)) return null;
-  if (value.changes !== undefined && !Array.isArray(value.changes)) return null;
-  if (value.governance_gaps !== undefined && !Array.isArray(value.governance_gaps)) return null;
+  if (status === null)
+    return { result: null, diagnostic: 'status must be one of COMPLETED, BLOCKED_EXTERNAL_SETUP, FAILED' };
+  if (reportPath === null) return { result: null, diagnostic: 'report_path must be a non-empty string' };
+  if (summary === null) return { result: null, diagnostic: 'summary must be a non-empty string' };
+  if (parsedTests.tests === null) return { result: null, diagnostic: parsedTests.diagnostic };
+  if (value.tests_status !== undefined && testsStatus === null)
+    return { result: null, diagnostic: 'tests_status must be one of PASSED, FAILED, NOT_RUN' };
+  if (value.assumptions !== undefined && !Array.isArray(value.assumptions))
+    return { result: null, diagnostic: 'assumptions must be an array when present' };
+  if (value.changes !== undefined && !Array.isArray(value.changes))
+    return { result: null, diagnostic: 'changes must be an array when present' };
+  if (value.governance_gaps !== undefined && !Array.isArray(value.governance_gaps))
+    return { result: null, diagnostic: 'governance_gaps must be an array when present' };
+  const derivedTestsStatus = aggregateTestsStatus(parsedTests.tests);
+  if (testsStatus !== null && testsStatus !== derivedTestsStatus)
+    return {
+      result: null,
+      diagnostic: `tests_status=${testsStatus} does not match the tests[] aggregate ${derivedTestsStatus}`,
+    };
   return {
-    identifier: 'LUNA_RESULT',
-    status,
-    summary,
-    reportPath,
-    tests,
-    testsStatus: testsStatus ?? aggregateTestsStatus(tests),
-    ...(Array.isArray(value.assumptions) ? { assumptions: value.assumptions } : {}),
-    ...(Array.isArray(value.changes) ? { changes: value.changes } : {}),
-    ...(Array.isArray(value.governance_gaps) ? { governanceGaps: value.governance_gaps } : {}),
+    result: {
+      identifier: 'LUNA_RESULT',
+      status,
+      summary,
+      reportPath,
+      tests: parsedTests.tests,
+      testsStatus: testsStatus ?? derivedTestsStatus,
+      ...(Array.isArray(value.assumptions) ? { assumptions: value.assumptions } : {}),
+      ...(Array.isArray(value.changes) ? { changes: value.changes } : {}),
+      ...(Array.isArray(value.governance_gaps) ? { governanceGaps: value.governance_gaps } : {}),
+    },
+    diagnostic: null,
   };
 }
 
@@ -165,23 +200,35 @@ function findProtocol(
   stdout: string,
   lastMessage: string,
   events: Record<string, unknown>[],
-): LunaProtocolResult | null {
-  const eventCandidates = events.map(protocolFromRecord).filter((value): value is LunaProtocolResult => value !== null);
-  const hasTextMarker = /\bLUNA_RESULT\b/.test(stdout);
+): { result: LunaProtocolResult | null; diagnostic: string | null } {
+  const eventOutcomes = events.map(protocolFromRecord);
+  const eventCandidates = eventOutcomes
+    .map((outcome) => outcome.result)
+    .filter((value): value is LunaProtocolResult => value !== null);
+  const invalidEventDiagnostic = eventOutcomes.find((outcome) => outcome.diagnostic !== null)?.diagnostic ?? null;
+  const hasFreeFormTextMarker = stdout.split(/\r?\n/).some((line) => {
+    const trimmed = line.trim();
+    return trimmed !== '' && !trimmed.startsWith('{') && /\bLUNA_RESULT\b/.test(trimmed);
+  });
   const candidates = [...eventCandidates];
   let lastCandidate: LunaProtocolResult | null = null;
+  let lastDiagnostic: string | null = null;
   try {
     const parsed: unknown = JSON.parse(lastMessage);
-    const result = protocolFromRecord(parsed);
-    if (result !== null) {
-      lastCandidate = result;
-      candidates.push(result);
+    const outcome = protocolFromRecord(parsed);
+    lastDiagnostic = outcome.diagnostic;
+    if (outcome.result !== null) {
+      lastCandidate = outcome.result;
+      candidates.push(outcome.result);
     }
   } catch {
     // Free-form marker text is deliberately rejected.
   }
-  if (hasTextMarker && eventCandidates.length === 0 && lastCandidate !== null) return null;
-  return candidates.length === 1 ? candidates[0]! : null;
+  if (hasFreeFormTextMarker && eventCandidates.length === 0 && lastCandidate !== null)
+    return { result: null, diagnostic: 'LUNA_RESULT was emitted in text output instead of a single JSON result' };
+  if (candidates.length === 1) return { result: candidates[0]!, diagnostic: null };
+  if (candidates.length > 1) return { result: null, diagnostic: 'LUNA_RESULT is duplicated' };
+  return { result: null, diagnostic: lastDiagnostic ?? invalidEventDiagnostic ?? 'LUNA_RESULT is missing or invalid' };
 }
 
 async function defaultExecFile(
@@ -251,7 +298,7 @@ function promptForTask(task: LunaTaskBlock, snapshots: CodexSnapshots): string {
         blocking:
           'Emit BLOCKED_EXTERNAL_SETUP for external credentials, project-outside paths, protected or high-risk operations, or a real task out_of_scope conflict. Do not block merely because an IMPLEMENTATION task needs a reasonable adjacent non-protected project-internal file.',
         result:
-          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, tests_status, and a non-empty tests array. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED. If the approved implementation or test work is complete and the required report is written, use COMPLETED even when tests_status is FAILED or NOT_RUN; tests are evidence for Sol/CTO acceptance and do not gate code synchronization. For an IMPLEMENTATION task, use FAILED when implementation evidence is present in the required report but the report records a real implementation or acceptance blocker; the orchestrator will sync the validated report and code for Sol/CTO review. Use FAILED for TEST only when the test task itself could not produce a valid completed result. Never use FAILED solely because a test failed. tests_status and tests[].status must be exactly PASSED, FAILED, or NOT_RUN, and report_path must equal the task report_path.',
+          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, tests_status, and tests. identifier is fixed to LUNA_RESULT. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED. tests_status must be exactly one of PASSED, FAILED, or NOT_RUN. tests must be a non-empty JSON array of objects; every object must contain status with exactly one of PASSED, FAILED, or NOT_RUN, may contain only command as an optional non-empty string, and must not contain any other field. Never emit tests as strings, prose, Markdown, or an empty array. tests_status must match the aggregate of tests[].status: any FAILED means FAILED; otherwise any NOT_RUN means NOT_RUN; otherwise PASSED. If the approved implementation or test work is complete and the required report is written, use COMPLETED even when tests_status is FAILED or NOT_RUN; tests are evidence for Sol/CTO acceptance and do not gate code synchronization. For an IMPLEMENTATION task, use FAILED when implementation evidence is present in the required report but the report records a real implementation or acceptance blocker; the orchestrator will sync the validated report and code for Sol/CTO review. Use FAILED for TEST only when the test task itself could not produce a valid completed result. Never use FAILED solely because a test failed. report_path must equal the task report_path.',
         test_scope:
           'When task_kind is TEST, only modify tests/** and the exact task report_path. Do not modify production code, arbitrary documentation, or any other path. A failed test is evidence for Sol; do not convert it to BLOCKED or ask for approval merely because the assertion failed.',
         git: 'The orchestrator owns commit, push, amend, rebase, and force-push. Do not run any of these Git synchronization operations. Leave implementation and report changes in the worktree for the orchestrator to validate, commit, and push.',
@@ -810,7 +857,8 @@ export class CodexRunner {
       } catch (error) {
         this.logger('codex-last-message-missing', { path: '<temporary>', error: redact(String(error)) });
       }
-      const protocolResult = findProtocol(sessionResult.stdoutSummary, lastMessage, sessionResult.events);
+      const protocol = findProtocol(sessionResult.stdoutSummary, lastMessage, sessionResult.events);
+      const protocolResult = protocol.result;
       const base: CodexRunResult = {
         status: 'INVALID_RESULT',
         sessionId: input.sessionId,
@@ -836,7 +884,10 @@ export class CodexRunner {
           ...(sessionResult.error === undefined ? {} : { error: sessionResult.error }),
         };
       if (protocolResult === null)
-        return { ...base, diagnostics: [...base.diagnostics, 'LUNA_RESULT is missing, duplicated, or invalid'] };
+        return {
+          ...base,
+          diagnostics: [...base.diagnostics, protocol.diagnostic ?? 'LUNA_RESULT is missing, duplicated, or invalid'],
+        };
       if (protocolResult.status === 'BLOCKED_EXTERNAL_SETUP')
         return {
           ...base,

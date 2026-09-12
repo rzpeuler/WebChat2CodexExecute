@@ -202,6 +202,75 @@ describe('CodexRunner', () => {
     expect(result.stderrSummary).not.toContain('should-not-leak');
   });
 
+  it('accepts an object-valued LUNA_RESULT carried inside a JSONL agent message', async () => {
+    const { root, codex } = await targetRepository();
+    const resultBlock = JSON.stringify({
+      identifier: 'LUNA_RESULT',
+      status: 'COMPLETED',
+      summary: 'done',
+      report_path: 'reports/task-1.md',
+      tests_status: 'PASSED',
+      tests: [{ command: 'npm test', status: 'PASSED' }],
+    });
+    const runner = new CodexRunner({
+      ...runnerOptions(root, codex),
+      gitStateCheck: async (_repositoryPath, currentTask) => ({
+        valid: true,
+        changedPaths: [currentTask.fields.report_path],
+      }),
+      processRunner: async (_file, args) => {
+        await writeFile(join(root, 'reports', 'task-1.md'), '# Report\n', 'utf8');
+        await writeFile(args[args.indexOf('--output-last-message') + 1]!, resultBlock, 'utf8');
+        return processFor(
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: resultBlock } }),
+        );
+      },
+    });
+    await expect(runner.runTask(input(root, codex))).resolves.toMatchObject({ status: 'COMPLETED' });
+  });
+
+  it.each([
+    ['string item', { tests: ['npm test'] }, 'tests[0] must be an object'],
+    [
+      'unknown field',
+      { tests: [{ command: 'npm test', status: 'PASSED', note: 'extra' }] },
+      'unsupported fields: note',
+    ],
+    [
+      'invalid status',
+      { tests: [{ command: 'npm test', status: 'GREEN' }] },
+      'status must be one of PASSED, FAILED, NOT_RUN',
+    ],
+    [
+      'aggregate mismatch',
+      { tests_status: 'PASSED', tests: [{ command: 'npm test', status: 'FAILED' }] },
+      'tests_status=PASSED',
+    ],
+  ])('rejects invalid LUNA_RESULT tests structure: %s', async (_name, resultFields, diagnostic) => {
+    const { root, codex } = await targetRepository();
+    const runner = new CodexRunner({
+      ...runnerOptions(root, codex),
+      processRunner: async (_file, args) => {
+        await writeFile(join(root, 'reports', 'task-1.md'), '# Report\n', 'utf8');
+        await writeFile(
+          args[args.indexOf('--output-last-message') + 1]!,
+          JSON.stringify({
+            identifier: 'LUNA_RESULT',
+            status: 'COMPLETED',
+            summary: 'done',
+            report_path: 'reports/task-1.md',
+            ...resultFields,
+          }),
+          'utf8',
+        );
+        return processFor('');
+      },
+    });
+    const result = await runner.runTask(input(root, codex));
+    expect(result.status).toBe('INVALID_RESULT');
+    expect(result.diagnostics.join('\n')).toContain(diagnostic);
+  });
+
   it('completes a TEST task with failed test evidence when the report is valid', async () => {
     const { root, codex } = await targetRepository();
     await mkdir(join(root, 'tests'), { recursive: true });
