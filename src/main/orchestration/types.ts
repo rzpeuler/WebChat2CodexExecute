@@ -55,6 +55,8 @@ export interface OrchestratorSnapshots extends CodexSnapshots {
 export interface PendingCodeSyncState {
   taskId: string;
   taskKind: LunaTaskKind;
+  /** Protocol outcome retained so Sol can review an implementation failure after code sync. */
+  resultStatus?: 'COMPLETED' | 'FAILED';
   reportPath: string;
   allowedPaths: string[];
   protectedPaths: string[];

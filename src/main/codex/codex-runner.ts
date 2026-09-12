@@ -251,7 +251,7 @@ function promptForTask(task: LunaTaskBlock, snapshots: CodexSnapshots): string {
         blocking:
           'Emit BLOCKED_EXTERNAL_SETUP for external credentials, project-outside paths, protected or high-risk operations, or a real task out_of_scope conflict. Do not block merely because an IMPLEMENTATION task needs a reasonable adjacent non-protected project-internal file.',
         result:
-          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, tests_status, and a non-empty tests array. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED. If the approved implementation or test work is complete and the required report is written, use COMPLETED even when tests_status is FAILED or NOT_RUN; tests are evidence for Sol/CTO acceptance and do not gate code synchronization. Use FAILED only when the task itself was not completed, the report is missing, the process failed, or a valid result cannot be produced. Never use FAILED solely because a test failed. tests_status and tests[].status must be exactly PASSED, FAILED, or NOT_RUN, and report_path must equal the task report_path.',
+          'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, tests_status, and a non-empty tests array. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED. If the approved implementation or test work is complete and the required report is written, use COMPLETED even when tests_status is FAILED or NOT_RUN; tests are evidence for Sol/CTO acceptance and do not gate code synchronization. For an IMPLEMENTATION task, use FAILED when implementation evidence is present in the required report but the report records a real implementation or acceptance blocker; the orchestrator will sync the validated report and code for Sol/CTO review. Use FAILED for TEST only when the test task itself could not produce a valid completed result. Never use FAILED solely because a test failed. tests_status and tests[].status must be exactly PASSED, FAILED, or NOT_RUN, and report_path must equal the task report_path.',
         test_scope:
           'When task_kind is TEST, only modify tests/** and the exact task report_path. Do not modify production code, arbitrary documentation, or any other path. A failed test is evidence for Sol; do not convert it to BLOCKED or ask for approval merely because the assertion failed.',
         git: 'The orchestrator owns commit, push, amend, rebase, and force-push. Do not run any of these Git synchronization operations. Leave implementation and report changes in the worktree for the orchestrator to validate, commit, and push.',
@@ -837,11 +837,17 @@ export class CodexRunner {
         };
       if (protocolResult === null)
         return { ...base, diagnostics: [...base.diagnostics, 'LUNA_RESULT is missing, duplicated, or invalid'] };
-      if (protocolResult.status !== 'COMPLETED')
+      if (protocolResult.status === 'BLOCKED_EXTERNAL_SETUP')
         return {
           ...base,
           status: 'FAILED',
-          diagnostics: [...base.diagnostics, 'Luna reported a blocked or failed result'],
+          diagnostics: [...base.diagnostics, 'Luna reported an external setup block'],
+        };
+      if (protocolResult.status === 'FAILED' && input.task.fields.task_kind !== 'IMPLEMENTATION')
+        return {
+          ...base,
+          status: 'FAILED',
+          diagnostics: [...base.diagnostics, 'Luna reported a failed result for a non-implementation task'],
         };
       if (normalizePath(protocolResult.reportPath) !== normalizePath(input.task.fields.report_path))
         return { ...base, diagnostics: [...base.diagnostics, 'Luna report path does not match the task report path'] };
@@ -873,7 +879,7 @@ export class CodexRunner {
           status: 'BASELINE_CHANGED',
           diagnostics: [...base.diagnostics, 'Repository baseline changed during the run'],
         };
-      return { ...base, status: 'COMPLETED' };
+      return { ...base, status: protocolResult.status === 'FAILED' ? 'FAILED' : 'COMPLETED' };
     } catch (error) {
       return {
         ...this.taskFailureResult(input as unknown as CodexTaskInput, input.sessionId, error),

@@ -379,6 +379,51 @@ describe('P0 main orchestration', () => {
     });
   });
 
+  it('syncs an IMPLEMENTATION task with a valid FAILED result so Sol can review the report', async () => {
+    const task = parseWritingBlocks(taskText()).lunaTask!;
+    const syncCode = vi.fn(async () => ({
+      kind: 'code' as const,
+      commit: 'implementation-failed-commit',
+      pushed: true,
+      remoteCommit: 'implementation-failed-commit',
+      pushRetried: false,
+    }));
+    const options = baseOptions({
+      git: { ...baseOptions().git, syncCode },
+      codex: {
+        startTask: vi.fn(async (input) => ({
+          sessionId: 'luna-implementation-failed-1',
+          status: 'RUNNING' as const,
+          result: Promise.resolve({
+            ...completedRun(input.task),
+            status: 'FAILED' as const,
+            protocolResult: {
+              identifier: 'LUNA_RESULT' as const,
+              status: 'FAILED' as const,
+              summary: 'Implementation evidence is ready; real-model acceptance remains blocked.',
+              reportPath: task.fields.report_path,
+              testsStatus: 'PASSED' as const,
+              tests: [{ status: 'PASSED' as const, command: 'npm test' }],
+            },
+          }),
+        })),
+      },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'COMPLETED' });
+    expect(syncCode).toHaveBeenCalledOnce();
+    expect(options.sol?.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining('Luna 结果为 FAILED') }),
+    );
+    expect(orchestrator.getState()).toMatchObject({ phase: 'WAITING_FOR_SOL', luna: { status: 'FAILED' } });
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'run-luna')).toMatchObject({
+      state: 'COMPLETED',
+      summary: expect.stringContaining('失败验收证据'),
+    });
+  });
+
   it('persists and restores the minimal pending code sync after Luna returns during a pause', async () => {
     let releaseLuna!: (run: CodexRunResult) => void;
     let saved: import('../../src/main/orchestration/index.js').OrchestratorState | null = null;

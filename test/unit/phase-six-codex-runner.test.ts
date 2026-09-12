@@ -267,6 +267,42 @@ describe('CodexRunner', () => {
     expect(result.status).toBe('COMPLETED');
   });
 
+  it('keeps a valid IMPLEMENTATION FAILED result available for orchestrator code sync', async () => {
+    const { root, codex } = await targetRepository();
+    const implementationTask = task('reports/implementation-blocked.md', 'IMPLEMENTATION');
+    await mkdir(join(root, 'src'), { recursive: true });
+    const runner = new CodexRunner({
+      ...runnerOptions(root, codex),
+      gitStateCheck: async (_repositoryPath, currentTask) => ({
+        valid: true,
+        changedPaths: [currentTask.fields.report_path, 'src/feature.ts'],
+      }),
+      processRunner: async (_file, args) => {
+        const outputPath = args[args.indexOf('--output-last-message') + 1]!;
+        await writeFile(join(root, 'reports', 'implementation-blocked.md'), '# CTO review required\n', 'utf8');
+        await writeFile(join(root, 'src', 'feature.ts'), 'implementation evidence\n', 'utf8');
+        await writeFile(
+          outputPath,
+          JSON.stringify({
+            identifier: 'LUNA_RESULT',
+            status: 'FAILED',
+            summary: 'Implementation evidence is ready; a real-model blocker remains.',
+            report_path: 'reports/implementation-blocked.md',
+            tests_status: 'PASSED',
+            tests: [{ command: 'npm test', status: 'PASSED' }],
+          }),
+          'utf8',
+        );
+        return processFor(JSON.stringify({ type: 'progress', message: 'running' }));
+      },
+    });
+    const result = await runner.runTask({ ...input(root, codex), task: implementationTask });
+    expect(result.status).toBe('FAILED');
+    expect(result.protocolResult).toMatchObject({ status: 'FAILED' });
+    expect(result.error).toBeUndefined();
+    expect(result.diagnostics).toEqual([]);
+  });
+
   const classifications: Array<
     [string, { exitCode?: number; report?: boolean; invalid?: boolean }, 'FAILED' | 'REPORT_MISSING' | 'INVALID_RESULT']
   > = [

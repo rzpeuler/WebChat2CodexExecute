@@ -1406,11 +1406,22 @@ export class MainOrchestrator implements Orchestrator {
           '请完成外部账号、API Key、OTP 或平台配置后重试。',
         );
       }
-      throw new OrchestratorError(run.error?.code ?? run.status, run.error?.message ?? 'Luna 未成功完成任务。');
+      if (!isSyncableImplementationFailure(task, run))
+        throw new OrchestratorError(run.error?.code ?? run.status, run.error?.message ?? 'Luna 未成功完成任务。');
     }
     this.updateGraphNode('run-luna', {
-      summary: `Luna 已完成任务 ${task.fields.task_id}。`,
-      details: [`任务：${task.fields.task_id}`, `会话：${run.sessionId}`, `报告：${run.reportPath}`],
+      summary:
+        run.protocolResult?.status === 'FAILED'
+          ? `Luna 已完成实现并返回失败验收证据，准备同步 ${task.fields.task_id}。`
+          : `Luna 已完成任务 ${task.fields.task_id}。`,
+      details: [
+        `任务：${task.fields.task_id}`,
+        `会话：${run.sessionId}`,
+        `报告：${run.reportPath}`,
+        ...(run.protocolResult?.status === 'FAILED'
+          ? ['Luna 结果：FAILED；报告和代码将先同步，由 Sol/CTO 完成验收判断。']
+          : []),
+      ],
     });
     this.setPendingCodeSync(createPendingCodeSync(task, run, this.baseline, outputKey));
     this.touchState();
@@ -1445,6 +1456,7 @@ export class MainOrchestrator implements Orchestrator {
         `任务：${pending.taskId}`,
         `报告：${pending.reportPath}`,
         `任务类型：${pending.taskKind}`,
+        ...(pending.resultStatus === 'FAILED' ? ['Luna 结果：FAILED（报告和代码已同步，交由 Sol/CTO 验收）。'] : []),
         `测试：${pending.testsStatus === 'PASSED' ? '已通过' : pending.testsStatus === 'FAILED' ? '未通过（证据已同步）' : '未运行'}`,
         ...(sync.scopeDriftPaths === undefined || sync.scopeDriftPaths.length === 0
           ? []
@@ -1461,20 +1473,23 @@ export class MainOrchestrator implements Orchestrator {
       if (observation === undefined) observation = await this.edge.observe();
       const testFailureNotice = pending.testsStatus === 'FAILED';
       const testNotRunNotice = pending.testsStatus === 'NOT_RUN';
+      const implementationFailureNotice = pending.taskKind === 'IMPLEMENTATION' && pending.resultStatus === 'FAILED';
+      const evidenceNotice = implementationFailureNotice || testFailureNotice || testNotRunNotice;
       await this.sol.sendMessage({
         observation,
-        text:
-          testFailureNotice || testNotRunNotice
-            ? `LUNA_RESULT task_id=${pending.taskId}\n代码和任务报告已同步，但${testFailureNotice ? '测试未通过' : '测试未运行'}。\n任务类型：${pending.taskKind}\n测试状态：${pending.testsStatus}\n报告：${pending.reportPath}\n最新提交：${sync.commit}${scopeDriftNotice(sync.scopeDriftPaths)}\n请根据报告完成验收并规划后续任务。`
-            : `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。${scopeDriftNotice(sync.scopeDriftPaths)}`,
+        text: evidenceNotice
+          ? `LUNA_RESULT task_id=${pending.taskId}\n${implementationFailureNotice ? '代码和任务报告已同步。\nLuna 结果为 FAILED，表示报告中仍有实现或验收阻塞；请由 Sol/CTO 根据报告完成验收判断。' : testFailureNotice ? '代码和任务报告已同步，但测试未通过。' : '代码和任务报告已同步，但测试未运行。'}\n任务类型：${pending.taskKind}\n测试状态：${pending.testsStatus}\n报告：${pending.reportPath}\n最新提交：${sync.commit}${scopeDriftNotice(sync.scopeDriftPaths)}\n请根据报告完成验收并规划后续任务。`
+          : `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。${scopeDriftNotice(sync.scopeDriftPaths)}`,
       });
       this.updateGraphNode('notify-sol', {
-        summary:
-          testFailureNotice || testNotRunNotice
-            ? `已通知 Sol 代码已同步，但测试${testFailureNotice ? '未通过' : '未运行'}。`
-            : '已通知 Sol 可以开始验收。',
+        summary: evidenceNotice
+          ? `已通知 Sol 代码和证据已同步${implementationFailureNotice ? '，Luna 结果为 FAILED' : testFailureNotice ? '，但测试未通过' : '，但测试未运行'}。`
+          : '已通知 Sol 可以开始验收。',
         details: [
           `任务：${pending.taskId}`,
+          ...(implementationFailureNotice
+            ? ['Luna 返回 FAILED，但实现报告和代码已同步；由 Sol/CTO 决定是否接受或规划修复。']
+            : []),
           ...(testFailureNotice ? ['任务已完成，但测试未通过；测试结果交由 Sol/CTO 验收。'] : []),
           ...(testNotRunNotice ? ['任务已完成，但没有测试执行证据。'] : []),
           ...commitDetails(sync.commit, sync.remoteCommit),
@@ -1484,7 +1499,10 @@ export class MainOrchestrator implements Orchestrator {
       this.markNodesNotApplicable(['notify-sol']);
     }
     this.state.processedOutputKey = pending.outputKey;
-    this.state.luna = { status: 'COMPLETED', sessionId: pending.sessionId };
+    this.state.luna = {
+      status: pending.resultStatus === 'FAILED' ? 'FAILED' : 'COMPLETED',
+      sessionId: pending.sessionId,
+    };
     this.state.pendingCodeSync = null;
     this.pendingCodeSync = null;
     this.clearPendingReconciliationRetry();
@@ -2335,6 +2353,16 @@ function testsStatusForRun(run: CodexRunResult): LunaTestStatus {
   return 'PASSED';
 }
 
+function isSyncableImplementationFailure(task: LunaTaskBlock, run: CodexRunResult): boolean {
+  return (
+    task.fields.task_kind === 'IMPLEMENTATION' &&
+    run.status === 'FAILED' &&
+    run.protocolResult?.status === 'FAILED' &&
+    run.error === undefined &&
+    run.diagnostics.length === 0
+  );
+}
+
 function createPendingCodeSync(
   task: LunaTaskBlock,
   run: CodexRunResult,
@@ -2345,6 +2373,7 @@ function createPendingCodeSync(
   return {
     taskId: task.fields.task_id,
     taskKind: task.fields.task_kind,
+    resultStatus: run.protocolResult?.status === 'FAILED' ? 'FAILED' : 'COMPLETED',
     reportPath: task.fields.report_path,
     allowedPaths: [...task.fields.scope],
     protectedPaths: [...task.fields.out_of_scope],
@@ -2417,6 +2446,7 @@ function normalizePendingCodeSync(value: unknown): PendingCodeSyncState | null {
   if (taskId === null || reportPath === null || sessionId === null || outputKey === null || baseline === null)
     return null;
   const taskKind = value.taskKind === 'TEST' || value.taskKind === 'IMPLEMENTATION' ? value.taskKind : 'IMPLEMENTATION';
+  const resultStatus = value.resultStatus === 'FAILED' ? 'FAILED' : 'COMPLETED';
   const testsStatus: LunaTestStatus =
     value.testsStatus === 'PASSED' || value.testsStatus === 'FAILED' || value.testsStatus === 'NOT_RUN'
       ? value.testsStatus
@@ -2428,6 +2458,7 @@ function normalizePendingCodeSync(value: unknown): PendingCodeSyncState | null {
   return {
     taskId,
     taskKind,
+    resultStatus,
     reportPath,
     allowedPaths: normalizePendingStringArray(value.allowedPaths, 512),
     protectedPaths: normalizePendingStringArray(value.protectedPaths, 512),
