@@ -23,7 +23,7 @@ import type { GitBaseline } from './git/types.js';
 import { CodexRunner } from './codex/index.js';
 import { MainOrchestrator, OrchestratorError, type OrchestratorState } from './orchestration/index.js';
 import type { NotificationService } from './notify/index.js';
-import { SolPromptCompiler } from './sol/prompt-compiler.js';
+import { SolPromptCompiler, compileSolStageGoalReviewPrompt } from './sol/prompt-compiler.js';
 import { assertFixedGovernanceManifestPath } from './project/config.js';
 import { assertWritingBlockTemplatesValid } from './project/writing-block-templates.js';
 import { parseWritingBlocks } from '../shared/protocol/writing-block.js';
@@ -693,6 +693,34 @@ export async function createAutomationRuntime(
             });
             throw error;
           }
+        }),
+      stageGoalReview: (): Promise<void> =>
+        orchestrator.runDashboardOperation(async () => {
+          assertRuntimeOperationAllowed();
+          if (orchestrator.getState().active)
+            throw new OrchestratorError(
+              'STAGE_GOAL_REVIEW_LOOP_ACTIVE',
+              '自动循环运行中，请先暂停后再执行阶段性规划检查。',
+            );
+          await lifecycle.withRoundExclusion(async () => {
+            assertRuntimeOperationAllowed();
+            const observation = await edge.observe();
+            assertRuntimeOperationAllowed();
+            const baseline = await guardedGit.captureBaseline(config.localPath, {
+              ...(config.targetBranch === 'HEAD' ? {} : { expectedBranch: config.targetBranch }),
+              ...(config.remoteUrl === null ? {} : { expectedRemoteUrl: config.remoteUrl }),
+            });
+            const prompt = compileSolStageGoalReviewPrompt({ project: config, baselineCommit: baseline.head });
+            await sol.sendMessage({ text: prompt, observation });
+            guardedNotifier.notify({
+              project: config.projectId,
+              taskId: null,
+              phase: 'STAGE_GOAL_REVIEW',
+              suggestion: '阶段性目标规划与任务梳理提示词已发送，等待 Sol 面向用户汇报。',
+              error: { code: 'STAGE_GOAL_REVIEW_SENT', message: 'Sol 阶段性目标规划与任务梳理已请求。' },
+              level: 'RECOVERABLE',
+            });
+          });
         }),
       openEdge: async () => {
         assertRuntimeOperationAllowed();

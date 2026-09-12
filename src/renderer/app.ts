@@ -40,6 +40,12 @@ const dashboardRevisionsElement = document.querySelector<HTMLElement>('#dashboar
 const dashboardLunaElement = document.querySelector<HTMLElement>('#dashboard-luna');
 const dashboardCommitsElement = document.querySelector<HTMLElement>('#dashboard-commits');
 const dashboardBaselineElement = document.querySelector<HTMLElement>('#dashboard-baseline');
+const dashboardContinuousStartElement = document.querySelector<HTMLElement>('#dashboard-continuous-start');
+const dashboardContinuousDurationElement = document.querySelector<HTMLElement>('#dashboard-continuous-duration');
+const dashboardContinuousRoundsElement = document.querySelector<HTMLElement>('#dashboard-continuous-rounds');
+const dashboardTotalDurationElement = document.querySelector<HTMLElement>('#dashboard-total-duration');
+const dashboardTotalRoundsElement = document.querySelector<HTMLElement>('#dashboard-total-rounds');
+const dashboardTotalSessionsElement = document.querySelector<HTMLElement>('#dashboard-total-sessions');
 const dashboardStaleTaskElement = document.querySelector<HTMLElement>('#dashboard-stale-task');
 const dashboardGitOperationElement = document.querySelector<HTMLElement>('#dashboard-git-operation');
 const dashboardErrorElement = document.querySelector<HTMLElement>('#dashboard-error');
@@ -88,6 +94,7 @@ const dashboardCommandNames: DashboardCommandName[] = [
   'continue-interrupted',
   'rebind',
   'governance-consistency-check',
+  'stage-goal-review',
   'align-latest-baseline',
   'commit-and-push',
   'open-edge',
@@ -147,6 +154,7 @@ interface LoopGraphButtonParts {
   id: HTMLElement;
   label: HTMLElement;
   summary: HTMLElement;
+  duration: HTMLElement;
   stateLabel: HTMLElement;
   actions: HTMLElement;
   startButton: HTMLButtonElement;
@@ -346,6 +354,44 @@ function formatUpdatedAt(updatedAt: string): string {
   return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(timestamp);
 }
 
+function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0 ? `${hours}小时 ${minutes}分 ${seconds}秒` : `${minutes}分 ${seconds}秒`;
+}
+
+function currentExecutionElapsed(snapshot: DashboardSnapshot): number {
+  const current = snapshot.executionMetrics.current;
+  if (current === null || !current.active) return current?.elapsedMs ?? 0;
+  const startedAt = Date.parse(current.startedAt);
+  return Number.isNaN(startedAt) ? current.elapsedMs : Math.max(current.elapsedMs, Date.now() - startedAt);
+}
+
+function renderExecutionMetrics(snapshot: DashboardSnapshot): void {
+  const metrics = snapshot.executionMetrics;
+  const current = metrics.current;
+  const continuousElapsed = current === null ? 0 : currentExecutionElapsed(snapshot);
+  if (dashboardContinuousStartElement !== null)
+    dashboardContinuousStartElement.textContent =
+      current === null ? '未开始' : `开始：${formatUpdatedAt(current.startedAt)}`;
+  if (dashboardContinuousDurationElement !== null)
+    dashboardContinuousDurationElement.textContent =
+      current === null ? '时长：—' : `时长：${formatDuration(continuousElapsed)}`;
+  if (dashboardContinuousRoundsElement !== null)
+    dashboardContinuousRoundsElement.textContent =
+      current === null
+        ? '轮次：—'
+        : `轮次：${current.roundsCompleted} / ${current.roundsStarted}${current.active ? '（执行中）' : ''}`;
+  if (dashboardTotalDurationElement !== null)
+    dashboardTotalDurationElement.textContent = `时长：${formatDuration(metrics.totalElapsedMs)}`;
+  if (dashboardTotalRoundsElement !== null)
+    dashboardTotalRoundsElement.textContent = `轮次：${metrics.totalRoundsCompleted} / ${metrics.totalRoundsStarted}`;
+  if (dashboardTotalSessionsElement !== null)
+    dashboardTotalSessionsElement.textContent = `连续运行次数：${metrics.sessionCount}`;
+}
+
 function readActionState(snapshot: DashboardSnapshot, command: DashboardCommandName): DashboardActionState {
   const action = snapshot.actions?.[command];
   if (action === undefined) return { enabled: false, busy: false, reason: '状态动作不可用，请刷新状态面板。' };
@@ -477,6 +523,8 @@ function ensureLoopGraphButtons(): void {
     label.className = 'loop-node-label';
     const summary = document.createElement('span');
     summary.className = 'loop-node-summary';
+    const duration = document.createElement('span');
+    duration.className = 'loop-node-duration';
     const state = document.createElement('span');
     state.className = 'loop-node-state';
     const marker = document.createElement('span');
@@ -485,7 +533,7 @@ function ensureLoopGraphButtons(): void {
     const stateLabel = document.createElement('span');
     stateLabel.className = 'loop-node-state-label';
     state.append(marker, stateLabel);
-    button.append(id, label, summary, state);
+    button.append(id, label, summary, duration, state);
     button.addEventListener('click', () => selectLoopGraphNode(definition.id));
     const actions = document.createElement('div');
     actions.className = 'loop-node-actions';
@@ -512,6 +560,7 @@ function ensureLoopGraphButtons(): void {
       id,
       label,
       summary,
+      duration,
       stateLabel,
       actions,
       startButton,
@@ -545,6 +594,16 @@ function renderLoopGraph(snapshot: DashboardSnapshot): void {
     parts.id.textContent = node.id;
     parts.label.textContent = node.label;
     parts.summary.textContent = node.summary || '暂无摘要。';
+    if (node.id === 'run-luna' && node.startedAt !== null) {
+      const startedAt = Date.parse(node.startedAt);
+      const endedAt = node.completedAt === null ? Date.now() : Date.parse(node.completedAt);
+      parts.duration.textContent =
+        Number.isNaN(startedAt) || Number.isNaN(endedAt)
+          ? ''
+          : `执行时长：${formatDuration(Math.max(0, endedAt - startedAt))}`;
+    } else {
+      parts.duration.textContent = '';
+    }
     parts.stateLabel.textContent = loopGraphStateLabels[node.state];
     parts.startButton.hidden = node.id !== 'read-sol' || snapshot.status === 'RUNNING';
     parts.pauseButton.hidden = !(currentNodeId === node.id && node.state === 'ACTIVE');
@@ -647,6 +706,7 @@ function renderDashboard(snapshot: DashboardSnapshot): void {
         : `${baseline.localCommit ?? '—'} / ${baseline.branch ?? '—'} / ${baseline.worktreeClean ? '干净' : '有变更'}`;
     dashboardBaselineElement.title = baseline?.remoteUrl ?? '';
   }
+  renderExecutionMetrics(rendererSnapshot);
   if (dashboardStaleTaskElement !== null) {
     const stale = rendererSnapshot.staleTask;
     dashboardStaleTaskElement.textContent = stale.invalidated ? (stale.message ?? '旧任务书已失效') : '无';
@@ -725,7 +785,12 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
   }
   return {
     command: command as
-      'continue-interrupted' | 'governance-consistency-check' | 'open-edge' | 'open-project' | 'view-report',
+      | 'continue-interrupted'
+      | 'governance-consistency-check'
+      | 'stage-goal-review'
+      | 'open-edge'
+      | 'open-project'
+      | 'view-report',
   };
 }
 
@@ -998,4 +1063,10 @@ helpDialog?.addEventListener('keydown', (event) => {
 });
 
 void refreshDashboard();
+window.setInterval(() => {
+  if (currentSnapshot !== null) {
+    renderExecutionMetrics(currentSnapshot);
+    renderLoopGraph(currentSnapshot);
+  }
+}, 1000);
 window.setInterval(() => void refreshDashboard(), 1500);

@@ -485,6 +485,12 @@ input::placeholder {
   -webkit-line-clamp: 3;
 }
 
+.loop-node-duration {
+  min-height: 1.1em;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .loop-node-state {
   display: flex;
   align-items: center;

@@ -86,6 +86,13 @@ const writingBlockTemplates = {
     report_path: '<填写报告相对路径>',
     remote_sync_policy: LUNA_REMOTE_SYNC_POLICY,
     execution_semantics: DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS,
+    scope_policy: {
+      implementation:
+        'scope is the expected audit set; reasonable adjacent project-internal non-protected files may change when required and must be reported',
+      test: 'only tests/** and the exact report_path may change',
+      protected: ['docs/governance/**', 'docs/architecture/**', '.git/**', 'credentials', 'secrets', 'private keys'],
+    },
+    git_policy: 'ORCHESTRATOR commits and pushes; Luna must never commit, push, amend, rebase, or force-push',
     result_contract: {
       identifier: 'LUNA_RESULT',
       status_options: LUNA_RESULT_STATUSES,

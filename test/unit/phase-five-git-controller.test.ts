@@ -498,6 +498,44 @@ describe('GitController', () => {
     ).rejects.toMatchObject({ code: 'UNAUTHORIZED_CHANGE' });
   });
 
+  it('allows implementation scope drift for project-internal files and reports it', async () => {
+    const { root } = await repository();
+    const controller = new GitController();
+    const baseline = await controller.captureBaseline(root);
+    await mkdir(join(root, 'docs', 'task-reports'), { recursive: true });
+    await writeFile(join(root, 'src-adjacent.ts'), 'export const adjacent = true;\n', 'utf8');
+    await writeFile(join(root, 'docs', 'task-reports', 'drift-task.md'), '# Report\n', 'utf8');
+
+    const result = await controller.syncCode({
+      baseline,
+      taskId: 'drift-task',
+      taskKind: 'IMPLEMENTATION',
+      reportPath: 'docs/task-reports/drift-task.md',
+      allowedPaths: ['src/**', 'docs/task-reports/drift-task.md'],
+    });
+
+    expect(result.scopeDriftPaths).toEqual(['src-adjacent.ts']);
+  });
+
+  it('keeps implementation scope drift strict for sensitive files', async () => {
+    const { root } = await repository();
+    const controller = new GitController();
+    const baseline = await controller.captureBaseline(root);
+    await mkdir(join(root, 'docs', 'task-reports'), { recursive: true });
+    await writeFile(join(root, '.env.local'), 'TOKEN=secret\n', 'utf8');
+    await writeFile(join(root, 'docs', 'task-reports', 'secret-task.md'), '# Report\n', 'utf8');
+
+    await expect(
+      controller.syncCode({
+        baseline,
+        taskId: 'secret-task',
+        taskKind: 'IMPLEMENTATION',
+        reportPath: 'docs/task-reports/secret-task.md',
+        allowedPaths: ['src/**', 'docs/task-reports/secret-task.md'],
+      }),
+    ).rejects.toMatchObject({ code: 'PROTECTED_PATH' });
+  });
+
   it('treats legacy trailing-slash directory scopes as recursive without widening exact file scopes', async () => {
     const { root } = await repository();
     const controller = new GitController();

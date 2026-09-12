@@ -89,6 +89,28 @@ export interface AutoRepairState {
   updatedAt: string;
 }
 
+export type ExecutionSessionEndReason = 'BLOCKED' | 'FAILED' | 'PAUSED' | 'RESTARTED' | 'COMPLETED';
+
+export interface ExecutionSessionRecord {
+  startedAt: string;
+  endedAt: string | null;
+  activeSince: string | null;
+  elapsedMs: number;
+  roundsStarted: number;
+  roundsCompleted: number;
+  currentRoundId: string | null;
+  endReason: ExecutionSessionEndReason | null;
+}
+
+export interface ExecutionMetricsState {
+  activeSession: ExecutionSessionRecord | null;
+  lastSession: ExecutionSessionRecord | null;
+  history: ExecutionSessionRecord[];
+  totalElapsedMs: number;
+  totalRoundsStarted: number;
+  totalRoundsCompleted: number;
+}
+
 export interface ExecutionRecoveryRecord {
   outputKey: string;
   outputType: 'UNKNOWN' | 'LUNA_TASK' | 'GOVERNANCE_RECONCILIATION' | 'USER_MESSAGE';
@@ -124,6 +146,7 @@ export interface OrchestratorState {
   pendingCodeSync: PendingCodeSyncState | null;
   pendingReconciliationSync: PendingReconciliationSyncState | null;
   autoRepair: AutoRepairState | null;
+  executionMetrics: ExecutionMetricsState;
   executionRecovery: ExecutionRecoveryRecord | null;
   /** Optional for backwards compatibility with state files written before manual Git maintenance. */
   manualGitOperation?: GitManualOperationRecord;
@@ -212,6 +235,7 @@ export interface OrchestratorNotifier {
 export interface OrchestratorCallbacks {
   rebind?: () => Promise<void>;
   governanceConsistencyCheck?: () => Promise<void>;
+  stageGoalReview?: () => Promise<void>;
   baselineRefreshed?: (baseline: GitBaseline) => Promise<void>;
   openEdge?: () => Promise<void>;
   openProject?: () => Promise<void>;

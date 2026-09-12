@@ -49,6 +49,11 @@ export interface GovernanceReconciliationPromptInput {
   baselineCommit: string;
 }
 
+export interface StageGoalReviewPromptInput {
+  project: ProjectConfig;
+  baselineCommit: string;
+}
+
 export interface SolAutoRepairPromptInput {
   errorCode: string;
   errorMessage: string;
@@ -153,6 +158,19 @@ HASH RULE
 
 Use the governance-reconciliation template from docs/governance/templates/writing-blocks/ and the same JSON-only rules. Use exactly the square-bracket wrapper [WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"] and [/WRITING_BLOCK], not XML/HTML angle brackets. Its block body must be one complete JSON object; do not use YAML, comments, trailing commas, Markdown code fences, or unescaped multiline strings. Before sending, serialize the complete body as JSON and verify it as if with JSON.parse. In particular, file content must escape every backslash as \\, every quote as \", every newline as \n, every carriage return as \r, and every tab as \t; never paste a raw line break or control character inside a quoted JSON string. If any replacement cannot be represented as valid JSON, return BLOCKED with a reason instead of an invalid CHANGES_REQUIRED block. The current project baseline is authoritative:
 
+${WRITING_BLOCK_TEMPLATE_REFERENCE}`;
+
+const STAGE_GOAL_REVIEW_TEMPLATE = `You are Sol reviewing the current project stage for the user.
+
+Compare the initial project goal, the current task plan, completed implementation direction, current progress, and the repository baseline. Report only material findings under four non-redundant headings:
+1. 目标一致性：当前实现是否仍服务于初始目标。
+2. 进度与完成度：已完成、进行中、下一步重点。
+3. 方向偏移：是否存在严重偏离；没有则明确写“未发现严重偏离”。
+4. 风险与建议：仅列出需要用户知道或决策的风险和建议。
+
+Address USER. Return exactly one [USER_MESSAGE]...[/USER_MESSAGE] block. The block body must be Markdown prose. Markdown code fences are allowed only inside the body when showing code; do not wrap the whole response in a code fence. Do not output JSON, YAML, Writing Blocks, or any text outside the USER_MESSAGE block. Do not modify files, commit, push, or start a Luna task.
+
+PROJECT BASELINE
 ${WRITING_BLOCK_TEMPLATE_REFERENCE}`;
 
 const SENSITIVE_KEY_PATTERN =
@@ -340,6 +358,11 @@ export class SolPromptCompiler {
     const remoteUrl = redactRemoteUrl(input.project.remoteUrl);
     return `${GOVERNANCE_RECONCILIATION_TEMPLATE}\n\nPROJECT\nproject_id: ${sanitizeText(input.project.projectId)}\nremote_url: ${sanitizeText(remoteUrl ?? '[none]')}\ntarget_branch: ${sanitizeText(input.project.targetBranch)}\ncurrent_branch: ${sanitizeText(input.project.currentBranch)}\ncurrent_commit: ${sanitizeText(input.baselineCommit)}\ngovernance_root: docs/governance\n`;
   }
+
+  compileStageGoalReviewPrompt(input: StageGoalReviewPromptInput): string {
+    const remoteUrl = redactRemoteUrl(input.project.remoteUrl);
+    return `${STAGE_GOAL_REVIEW_TEMPLATE}\n\nPROJECT\nproject_id: ${sanitizeText(input.project.projectId)}\nremote_url: ${sanitizeText(remoteUrl ?? '[none]')}\ntarget_branch: ${sanitizeText(input.project.targetBranch)}\ncurrent_branch: ${sanitizeText(input.project.currentBranch)}\ncurrent_commit: ${sanitizeText(input.baselineCommit)}\ngovernance_root: docs/governance\n`;
+  }
 }
 
 export function compileSolInitializationPrompt(input: SolPromptInput): string {
@@ -352,6 +375,10 @@ export function compileSolRoundContext(input: SolPromptInput): string {
 
 export function compileSolGovernanceReconciliationPrompt(input: GovernanceReconciliationPromptInput): string {
   return new SolPromptCompiler().compileGovernanceReconciliationPrompt(input);
+}
+
+export function compileSolStageGoalReviewPrompt(input: StageGoalReviewPromptInput): string {
+  return new SolPromptCompiler().compileStageGoalReviewPrompt(input);
 }
 
 export function compileSolAutoRepairPrompt(input: SolAutoRepairPromptInput): string {

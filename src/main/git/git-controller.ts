@@ -28,6 +28,15 @@ import {
 
 const defaultExecFileCallback = promisify(execFileCallback);
 const DEFAULT_PROTECTED_PATHS = ['docs/superpowers', 'docs/superpowers/**'];
+const CODE_PROTECTED_PATHS = [
+  ...DEFAULT_PROTECTED_PATHS,
+  'docs/governance',
+  'docs/governance/**',
+  'docs/architecture',
+  'docs/architecture/**',
+  '.git',
+  '.git/**',
+];
 const DEFAULT_EXCLUDED_PATHS = ['.web-chat2codex/backups', '.web-chat2codex/backups/**'];
 const BACKUP_ROOT = '.web-chat2codex/backups';
 const MANUAL_SYNC_COMMIT_MESSAGE = 'chore(web-chat2codex): sync project changes';
@@ -167,6 +176,12 @@ function assertSafePathList(paths: string[], label: string): string[] {
     });
   }
   return [...new Set(normalized)];
+}
+
+function isSensitivePath(path: string): boolean {
+  return /(^|\/)(?:\.env(?:\..*)?|credentials?(?:\..*)?|secrets?(?:\..*)?|.*(?:private|secret|credential)[-_]?.*)$/i.test(
+    normalizePath(path),
+  );
 }
 
 function parseStatus(output: string, excludedPaths: readonly string[] = []): string[] {
@@ -559,7 +574,7 @@ export class GitController {
   async syncCode(input: CodeSyncInput): Promise<GitSyncResult> {
     const allowedPaths = assertSafePathList(input.allowedPaths, 'Code paths');
     const protectedPaths = assertSafePathList(
-      [...DEFAULT_PROTECTED_PATHS, ...(input.protectedPaths ?? [])],
+      [...CODE_PROTECTED_PATHS, ...(input.protectedPaths ?? [])],
       'Protected paths',
     );
     const reportPath = normalizePath(input.reportPath);
@@ -598,8 +613,14 @@ export class GitController {
     const message = `feat(luna): complete ${input.taskId}`;
     const existing = await this.findExistingCommit(input.baseline, current, message);
     let commit = existing;
+    let scopeDriftPaths: string[] = [];
     if (commit === null) {
-      this.assertWorktreePaths(current.worktree, syncAllowedPaths, protectedPaths);
+      scopeDriftPaths = this.assertWorktreePaths(
+        current.worktree,
+        syncAllowedPaths,
+        protectedPaths,
+        input.taskKind === 'IMPLEMENTATION',
+      );
       if (!current.worktree.some((path) => path === reportRelativePath)) {
         throw new GitControllerError('REPORT_MISSING', 'Luna report exists but was not produced in this run', {
           paths: [reportRelativePath],
@@ -613,7 +634,8 @@ export class GitController {
         paths: current.worktree,
       });
     }
-    return this.pushAndReturn('code', commit, input.baseline, current.repositoryRoot);
+    const result = await this.pushAndReturn('code', commit, input.baseline, current.repositoryRoot);
+    return scopeDriftPaths.length === 0 ? result : { ...result, scopeDriftPaths };
   }
 
   private async pushAndReturn(
@@ -915,17 +937,25 @@ export class GitController {
     }
   }
 
-  private assertWorktreePaths(paths: string[], allowed: string[], protectedPaths: string[]): void {
-    const protectedPath = paths.find((path) => protectedPaths.some((pattern) => matchesPath(path, pattern)));
+  private assertWorktreePaths(
+    paths: string[],
+    allowed: string[],
+    protectedPaths: string[],
+    allowScopeDrift = false,
+  ): string[] {
+    const protectedPath = paths.find(
+      (path) => isSensitivePath(path) || protectedPaths.some((pattern) => matchesPath(path, pattern)),
+    );
     if (protectedPath !== undefined) {
       throw new GitControllerError('PROTECTED_PATH', 'A protected path was modified', { paths: [protectedPath] });
     }
     const unauthorized = paths.filter((path) => !allowed.some((pattern) => matchesPath(path, pattern)));
-    if (unauthorized.length > 0) {
+    if (unauthorized.length > 0 && !allowScopeDrift) {
       throw new GitControllerError('UNAUTHORIZED_CHANGE', 'Worktree contains files outside the approved scope', {
         paths: unauthorized,
       });
     }
+    return unauthorized;
   }
 
   private async readSnapshot(

@@ -48,6 +48,9 @@ import {
   type PendingReconciliationSyncState,
   type SolMessageSource,
   type AutoRepairStatus,
+  type ExecutionMetricsState,
+  type ExecutionSessionEndReason,
+  type ExecutionSessionRecord,
 } from './types.js';
 
 const MAX_RETRIES = 3;
@@ -74,6 +77,7 @@ const DEFAULT_STATE: OrchestratorState = {
   pendingCodeSync: null,
   pendingReconciliationSync: null,
   autoRepair: null,
+  executionMetrics: createDefaultExecutionMetrics(),
   executionRecovery: null,
   activeSolSession: null,
 };
@@ -159,6 +163,7 @@ export class MainOrchestrator implements Orchestrator {
       this.state.executionRecovery = cloneExecutionRecovery(this.state.executionRecovery);
       this.migrateLegacyWrongEntrypointState();
       const interrupted = this.state.active || this.state.status === 'RUNNING';
+      if (interrupted) this.closeExecutionSession('RESTARTED');
       this.state.active = false;
       if (interrupted) {
         this.state.status = 'PAUSED';
@@ -203,6 +208,7 @@ export class MainOrchestrator implements Orchestrator {
       recentError: this.state.recentError,
       recovery: this.state.executionRecovery,
       autoRepair: this.state.autoRepair,
+      executionMetrics: this.dashboardExecutionMetrics(),
       loopGraph: this.state.loopGraph,
       actions: this.dashboardActions(),
     });
@@ -224,7 +230,7 @@ export class MainOrchestrator implements Orchestrator {
         this.pendingReconciliationSync !== null ||
         isRetryableDashboardError(this.state.recentError));
     const callbackAvailable = (
-      name: 'rebind' | 'governanceConsistencyCheck' | 'openEdge' | 'openProject' | 'viewReport',
+      name: 'rebind' | 'governanceConsistencyCheck' | 'stageGoalReview' | 'openEdge' | 'openProject' | 'viewReport',
     ) => this.callbacks[name] !== undefined;
     const disabled = (reason: string, busy = false) => ({ enabled: false, busy, reason });
     const enabled = () => ({ enabled: true, busy: false, reason: null });
@@ -258,6 +264,13 @@ export class MainOrchestrator implements Orchestrator {
         : callbackAvailable('governanceConsistencyCheck')
           ? enabled()
           : disabled('治理一致性检查回调不可用。'),
+      'stage-goal-review': operationBusy
+        ? disabled('已有操作正在处理中。', true)
+        : this.state.active
+          ? disabled('自动循环运行中，请先暂停后再执行阶段性规划检查。')
+          : callbackAvailable('stageGoalReview')
+            ? enabled()
+            : disabled('阶段性目标规划与任务梳理回调不可用。'),
       'align-latest-baseline': operationBusy
         ? disabled('已有操作正在处理中。', true)
         : this.state.active
@@ -301,6 +314,7 @@ export class MainOrchestrator implements Orchestrator {
     }
     if (this.pendingReconciliationSync !== null) {
       if (this.state.retryCount >= MAX_RETRIES) return this.pauseForRetryLimit();
+      this.beginExecutionSession();
       this.state.active = true;
       this.state.status = 'RUNNING';
       this.state.phase = 'SYNCING_GOVERNANCE';
@@ -313,6 +327,7 @@ export class MainOrchestrator implements Orchestrator {
     }
     this.clearPendingReconciliationRetry();
     if (this.pendingCodeSync !== null) {
+      this.beginExecutionSession();
       this.state.active = true;
       this.state.status = 'RUNNING';
       this.state.phase = 'SYNCING_CODE';
@@ -325,6 +340,7 @@ export class MainOrchestrator implements Orchestrator {
       void this.runRound();
       return result('WAITING', this.state, '已恢复代码同步，等待继续执行。');
     }
+    this.beginExecutionSession();
     this.state.active = true;
     this.state.status = 'RUNNING';
     this.state.retryCount = 0;
@@ -339,6 +355,7 @@ export class MainOrchestrator implements Orchestrator {
 
   async pause(): Promise<OrchestratorResult> {
     await this.initialize();
+    this.closeExecutionSession('PAUSED');
     this.state.active = false;
     this.state.status = 'PAUSED';
     this.state.phase = 'PAUSED';
@@ -370,6 +387,7 @@ export class MainOrchestrator implements Orchestrator {
       this.state.executionRecovery = { ...recovery, awaitingConfirmation: false, updatedAt: this.now().toISOString() };
       this.state.active = true;
       this.state.status = 'RUNNING';
+      this.beginExecutionSession();
       this.state.recentError = null;
       this.state.taskId = recovery.taskId;
       const nodeId = recovery.interruptedNodeId ?? nodeForPhase(recovery.interruptedPhase) ?? 'parse-task';
@@ -506,6 +524,8 @@ export class MainOrchestrator implements Orchestrator {
           return await this.invokeCallback('rebind', '重新绑定回调不可用。');
         case 'governance-consistency-check':
           return await this.invokeCallback('governanceConsistencyCheck', '治理一致性检查回调不可用。');
+        case 'stage-goal-review':
+          return await this.invokeCallback('stageGoalReview', '阶段性目标规划与任务梳理回调不可用。');
         case 'align-latest-baseline':
           return accepted('BASELINE_ALIGN_ACCEPTED', (await this.alignLatestBaseline()).message);
         case 'commit-and-push':
@@ -751,6 +771,7 @@ export class MainOrchestrator implements Orchestrator {
     this.state.retryCount += 1;
     this.state.active = true;
     this.state.status = 'RUNNING';
+    this.beginExecutionSession();
     if (this.pendingCodeSync !== null) {
       this.state.phase = 'SYNCING_CODE';
       this.state.taskId = this.pendingCodeSync.taskId;
@@ -793,6 +814,7 @@ export class MainOrchestrator implements Orchestrator {
       };
       this.clearPendingReconciliationRetry();
       this.state.retryCount = 0;
+      this.completeExecutionRound();
       await this.finishIndependentRound(true);
       return result('COMPLETED', this.state, '治理一致性修改已应用、提交并同步。');
     } catch (error) {
@@ -905,6 +927,7 @@ export class MainOrchestrator implements Orchestrator {
     }
     if (reconciliation.fields.status === 'PASS') {
       this.state.processedOutputKey = outputKey;
+      this.completeExecutionRound();
       await this.finishIndependentRound(wasActive);
       return reconciliationResult(
         'PASS',
@@ -949,6 +972,7 @@ export class MainOrchestrator implements Orchestrator {
     };
     this.clearPendingReconciliationRetry();
     this.state.retryCount = 0;
+    this.completeExecutionRound();
     await this.finishIndependentRound(wasActive);
     return reconciliationResult(
       'COMPLETED',
@@ -980,6 +1004,7 @@ export class MainOrchestrator implements Orchestrator {
   }
 
   private async finishIndependentRound(wasActive: boolean): Promise<void> {
+    this.completeExecutionRound();
     this.state.executionRecovery = null;
     await this.setPhase(wasActive ? 'WAITING_FOR_SOL' : 'IDLE', wasActive ? 'RUNNING' : 'IDLE', null);
   }
@@ -1173,6 +1198,7 @@ export class MainOrchestrator implements Orchestrator {
         this.state.processedOutputKey = outputKey;
         this.state.executionRecovery = null;
         this.markNodesNotApplicable(['run-luna', 'sync-code', 'notify-sol']);
+        this.completeExecutionRound();
         await this.setPhase('WAITING_FOR_SOL', 'RUNNING');
         return result(
           'NO_TASK',
@@ -1420,6 +1446,9 @@ export class MainOrchestrator implements Orchestrator {
         `报告：${pending.reportPath}`,
         `任务类型：${pending.taskKind}`,
         `测试：${pending.testsStatus === 'PASSED' ? '已通过' : pending.testsStatus === 'FAILED' ? '未通过（证据已同步）' : '未运行'}`,
+        ...(sync.scopeDriftPaths === undefined || sync.scopeDriftPaths.length === 0
+          ? []
+          : [`超出任务预期范围但已允许同步：${sync.scopeDriftPaths.join('、')}`]),
         ...commitDetails(sync.commit, sync.remoteCommit),
       ],
     });
@@ -1436,8 +1465,8 @@ export class MainOrchestrator implements Orchestrator {
         observation,
         text:
           testFailureNotice || testNotRunNotice
-            ? `LUNA_RESULT task_id=${pending.taskId}\n代码和任务报告已同步，但${testFailureNotice ? '测试未通过' : '测试未运行'}。\n任务类型：${pending.taskKind}\n测试状态：${pending.testsStatus}\n报告：${pending.reportPath}\n最新提交：${sync.commit}\n请根据报告完成验收并规划后续任务。`
-            : `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。`,
+            ? `LUNA_RESULT task_id=${pending.taskId}\n代码和任务报告已同步，但${testFailureNotice ? '测试未通过' : '测试未运行'}。\n任务类型：${pending.taskKind}\n测试状态：${pending.testsStatus}\n报告：${pending.reportPath}\n最新提交：${sync.commit}${scopeDriftNotice(sync.scopeDriftPaths)}\n请根据报告完成验收并规划后续任务。`
+            : `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。${scopeDriftNotice(sync.scopeDriftPaths)}`,
       });
       this.updateGraphNode('notify-sol', {
         summary:
@@ -1461,6 +1490,7 @@ export class MainOrchestrator implements Orchestrator {
     this.clearPendingReconciliationRetry();
     this.state.executionRecovery = null;
     this.state.retryCount = 0;
+    this.completeExecutionRound();
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
     return result('COMPLETED', this.state, `任务 ${pending.taskId} 已完成并同步。`);
   }
@@ -1534,7 +1564,7 @@ export class MainOrchestrator implements Orchestrator {
       summary: `检测到 ${code}，准备自动修复。`,
       details: [`错误：${code}`, message, `自动修复：第 ${attempt}/${MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND} 次`],
     });
-    this.activateGraphNode('auto-repair', taskId);
+    this.activateGraphNode('parse-task', taskId);
     this.touchState();
     await this.persist();
 
@@ -1656,6 +1686,7 @@ export class MainOrchestrator implements Orchestrator {
   ): Promise<OrchestratorResult> {
     const interruptedPhase = this.state.phase;
     const interruptedNodeId = this.state.loopGraph.currentNodeId;
+    this.closeExecutionSession('BLOCKED');
     this.state.active = false;
     this.state.status = needsUser ? 'NEEDS_USER_ACTION' : 'PAUSED';
     this.state.phase = 'PAUSED';
@@ -1688,6 +1719,7 @@ export class MainOrchestrator implements Orchestrator {
     const message = error instanceof Error ? error.message : String(error);
     const interruptedPhase = this.state.phase;
     const interruptedNodeId = this.state.loopGraph.currentNodeId;
+    this.closeExecutionSession('FAILED');
     this.state.active = false;
     this.state.status = 'FAILED';
     this.state.phase = 'FAILED';
@@ -1724,6 +1756,104 @@ export class MainOrchestrator implements Orchestrator {
     await this.stateStore?.save(cloneState(this.state));
   }
 
+  private dashboardExecutionMetrics() {
+    const active = this.state.executionMetrics.activeSession;
+    const source = active ?? this.state.executionMetrics.lastSession;
+    if (source === null) {
+      return {
+        current: null,
+        totalElapsedMs: this.state.executionMetrics.totalElapsedMs,
+        totalRoundsStarted: this.state.executionMetrics.totalRoundsStarted,
+        totalRoundsCompleted: this.state.executionMetrics.totalRoundsCompleted,
+        sessionCount: this.state.executionMetrics.history.length,
+      };
+    }
+    const elapsedMs = active === null ? source.elapsedMs : this.currentSessionElapsed(active);
+    return {
+      current: {
+        startedAt: source.startedAt,
+        endedAt: active === null ? source.endedAt : null,
+        elapsedMs,
+        roundsStarted: source.roundsStarted,
+        roundsCompleted: source.roundsCompleted,
+        endReason: active === null ? source.endReason : null,
+        active: active !== null,
+      },
+      totalElapsedMs: this.state.executionMetrics.totalElapsedMs + (active === null ? 0 : elapsedMs),
+      totalRoundsStarted: this.state.executionMetrics.totalRoundsStarted + (active === null ? 0 : active.roundsStarted),
+      totalRoundsCompleted:
+        this.state.executionMetrics.totalRoundsCompleted + (active === null ? 0 : active.roundsCompleted),
+      sessionCount: this.state.executionMetrics.history.length + (active === null ? 0 : 1),
+    };
+  }
+
+  private currentSessionElapsed(session: ExecutionSessionRecord): number {
+    if (session.activeSince === null) return session.elapsedMs;
+    const activeSince = Date.parse(session.activeSince);
+    return Number.isNaN(activeSince)
+      ? session.elapsedMs
+      : session.elapsedMs + Math.max(0, this.now().getTime() - activeSince);
+  }
+
+  private beginExecutionSession(): void {
+    if (this.state.executionMetrics.activeSession !== null) return;
+    const timestamp = this.now().toISOString();
+    this.state.executionMetrics.activeSession = {
+      startedAt: timestamp,
+      endedAt: null,
+      activeSince: timestamp,
+      elapsedMs: 0,
+      roundsStarted: 0,
+      roundsCompleted: 0,
+      currentRoundId: null,
+      endReason: null,
+    };
+  }
+
+  private closeExecutionSession(reason: ExecutionSessionEndReason): void {
+    const session = this.state.executionMetrics.activeSession;
+    if (session === null) return;
+    const endedAt = this.now();
+    const closed: ExecutionSessionRecord = {
+      ...session,
+      endedAt: endedAt.toISOString(),
+      activeSince: null,
+      elapsedMs: this.currentSessionElapsed(session),
+      currentRoundId: null,
+      endReason: reason,
+    };
+    this.state.executionMetrics = {
+      ...this.state.executionMetrics,
+      activeSession: null,
+      lastSession: closed,
+      history: [...this.state.executionMetrics.history, closed].slice(-100),
+      totalElapsedMs: this.state.executionMetrics.totalElapsedMs + closed.elapsedMs,
+      totalRoundsStarted: this.state.executionMetrics.totalRoundsStarted + closed.roundsStarted,
+      totalRoundsCompleted: this.state.executionMetrics.totalRoundsCompleted + closed.roundsCompleted,
+    };
+  }
+
+  private startExecutionRound(roundId: string | null): void {
+    const session = this.state.executionMetrics.activeSession;
+    if (session === null || roundId === null) return;
+    if (session.currentRoundId === roundId) return;
+    this.state.executionMetrics.activeSession = {
+      ...session,
+      roundsStarted: session.roundsStarted + 1,
+      currentRoundId: roundId,
+    };
+  }
+
+  private completeExecutionRound(): void {
+    const session = this.state.executionMetrics.activeSession;
+    if (session === null || session.currentRoundId === null) return;
+    this.state.executionMetrics.activeSession = {
+      ...session,
+      roundsCompleted: session.roundsCompleted + 1,
+      currentRoundId: null,
+    };
+  }
+
   private async beginRound(): Promise<void> {
     this.clearPendingReconciliationRetry();
     const pendingAutoRepair = this.state.autoRepair?.status === 'WAITING_FOR_SOL' ? this.state.autoRepair : null;
@@ -1731,6 +1861,7 @@ export class MainOrchestrator implements Orchestrator {
     this.state.retryCount = 0;
     const now = this.now().toISOString();
     this.state.loopGraph = createLoopGraph(`round-${this.state.revision + 1}-${this.now().getTime()}`, now);
+    this.startExecutionRound(this.state.loopGraph.roundId);
     await this.setPhase('READING_SOL', 'RUNNING', null);
   }
 
@@ -1836,6 +1967,7 @@ export class MainOrchestrator implements Orchestrator {
   }
 
   private async enterWaiting(message: string): Promise<void> {
+    this.completeExecutionRound();
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
     this.updateGraphNode('wait-sol', { summary: message, details: [] });
     this.touchState();
@@ -1953,7 +2085,7 @@ export class MainOrchestrator implements Orchestrator {
   }
 
   private async invokeCallback(
-    name: 'rebind' | 'governanceConsistencyCheck' | 'openEdge' | 'openProject',
+    name: 'rebind' | 'governanceConsistencyCheck' | 'stageGoalReview' | 'openEdge' | 'openProject',
     unavailable: string,
   ): Promise<DashboardCommandResult> {
     const callback = this.callbacks[name];
@@ -1994,6 +2126,7 @@ function cloneState(state: OrchestratorState): OrchestratorState {
     pendingCodeSync: clonePendingCodeSync(state.pendingCodeSync),
     pendingReconciliationSync: clonePendingReconciliationSync(state.pendingReconciliationSync),
     autoRepair: cloneAutoRepair(state.autoRepair),
+    executionMetrics: cloneExecutionMetrics(state.executionMetrics),
     executionRecovery: cloneExecutionRecovery(state.executionRecovery),
     ...(state.manualGitOperation === undefined
       ? {}
@@ -2006,6 +2139,73 @@ function cloneState(state: OrchestratorState): OrchestratorState {
         }),
     activeSolSession: state.activeSolSession === null ? null : { ...state.activeSolSession },
   };
+}
+
+function createDefaultExecutionMetrics(): ExecutionMetricsState {
+  return {
+    activeSession: null,
+    lastSession: null,
+    history: [],
+    totalElapsedMs: 0,
+    totalRoundsStarted: 0,
+    totalRoundsCompleted: 0,
+  };
+}
+
+function cloneExecutionMetrics(value: unknown): ExecutionMetricsState {
+  const normalized = normalizeExecutionMetrics(value);
+  return {
+    ...normalized,
+    activeSession: normalized.activeSession === null ? null : { ...normalized.activeSession },
+    lastSession: normalized.lastSession === null ? null : { ...normalized.lastSession },
+    history: normalized.history.map((session) => ({ ...session })),
+  };
+}
+
+function normalizeExecutionMetrics(value: unknown): ExecutionMetricsState {
+  if (!isRecord(value)) return createDefaultExecutionMetrics();
+  const activeSession = normalizeExecutionSession(value.activeSession, true);
+  const lastSession = normalizeExecutionSession(value.lastSession, false);
+  const history = Array.isArray(value.history)
+    ? value.history
+        .map((item) => normalizeExecutionSession(item, false))
+        .filter((item): item is ExecutionSessionRecord => item !== null)
+        .slice(-100)
+    : [];
+  return {
+    activeSession,
+    lastSession,
+    history,
+    totalElapsedMs: boundedInteger(value.totalElapsedMs, 0, Number.MAX_SAFE_INTEGER),
+    totalRoundsStarted: boundedInteger(value.totalRoundsStarted, 0, Number.MAX_SAFE_INTEGER),
+    totalRoundsCompleted: boundedInteger(value.totalRoundsCompleted, 0, Number.MAX_SAFE_INTEGER),
+  };
+}
+
+function normalizeExecutionSession(value: unknown, active: boolean): ExecutionSessionRecord | null {
+  if (!isRecord(value)) return null;
+  const startedAt = boundedPendingText(value.startedAt, 64);
+  if (startedAt === null) return null;
+  const endedAt = value.endedAt === null || value.endedAt === undefined ? null : boundedPendingText(value.endedAt, 64);
+  const activeSince =
+    value.activeSince === null || value.activeSince === undefined ? null : boundedPendingText(value.activeSince, 64);
+  const endReason = isExecutionSessionEndReason(value.endReason) ? value.endReason : null;
+  return {
+    startedAt,
+    endedAt: active ? null : endedAt,
+    activeSince: active ? (activeSince ?? startedAt) : null,
+    elapsedMs: boundedInteger(value.elapsedMs, 0, Number.MAX_SAFE_INTEGER),
+    roundsStarted: boundedInteger(value.roundsStarted, 0, Number.MAX_SAFE_INTEGER),
+    roundsCompleted: boundedInteger(value.roundsCompleted, 0, Number.MAX_SAFE_INTEGER),
+    currentRoundId: active ? boundedPendingText(value.currentRoundId, 256) : null,
+    endReason: active ? null : endReason,
+  };
+}
+
+function isExecutionSessionEndReason(value: unknown): value is ExecutionSessionEndReason {
+  return (
+    value === 'BLOCKED' || value === 'FAILED' || value === 'PAUSED' || value === 'RESTARTED' || value === 'COMPLETED'
+  );
 }
 
 function cloneAutoRepair(value: unknown): AutoRepairState | null {
@@ -2074,7 +2274,8 @@ function normalizeExecutionRecovery(value: unknown): ExecutionRecoveryRecord | n
   const startedAt = boundedPendingText(value.startedAt, 64);
   const updatedAt = boundedPendingText(value.updatedAt, 64);
   const interruptedPhase = value.interruptedPhase;
-  const interruptedNodeId = isLoopGraphNodeId(value.interruptedNodeId) ? value.interruptedNodeId : null;
+  const migratedInterruptedNodeId = value.interruptedNodeId === 'auto-repair' ? 'parse-task' : value.interruptedNodeId;
+  const interruptedNodeId = isLoopGraphNodeId(migratedInterruptedNodeId) ? migratedInterruptedNodeId : null;
   const completedNodeIds = Array.isArray(value.completedNodeIds)
     ? value.completedNodeIds.filter(isLoopGraphNodeId).slice(0, LOOP_GRAPH_NODE_DEFINITIONS.length)
     : [];
@@ -2118,6 +2319,7 @@ function normalizeState(state: OrchestratorState): OrchestratorState {
     pendingCodeSync: normalizePendingCodeSync(source.pendingCodeSync),
     pendingReconciliationSync: normalizePendingReconciliationSync(source.pendingReconciliationSync),
     autoRepair: normalizeAutoRepair(source.autoRepair),
+    executionMetrics: normalizeExecutionMetrics(source.executionMetrics),
     executionRecovery: normalizeExecutionRecovery(source.executionRecovery),
     activeSolSession:
       source.activeSolSession === null || source.activeSolSession === undefined ? null : { ...source.activeSolSession },
@@ -2324,8 +2526,6 @@ function phaseForNode(nodeId: LoopGraphNodeId): OrchestratorState['phase'] {
       return 'READING_SOL';
     case 'parse-task':
       return 'PARSING';
-    case 'auto-repair':
-      return 'PARSING';
     case 'apply-updates':
       return 'APPLYING_UPDATES';
     case 'sync-governance':
@@ -2387,10 +2587,6 @@ function phaseSummary(nodeId: LoopGraphNodeId, taskId: string | null, state: Orc
       return '正在读取 Sol 会话。';
     case 'parse-task':
       return '正在校验 Writing Block。';
-    case 'auto-repair':
-      return state.autoRepair === null
-        ? '正在准备自动修复。'
-        : `正在修复 ${state.autoRepair.errorCode}，等待 Sol 重新输出。`;
     case 'apply-updates':
       return '正在应用治理或架构更新。';
     case 'sync-governance':
@@ -2412,6 +2608,12 @@ function compactDetails(values: Array<string | null | undefined>): string[] {
 
 function commitDetails(local: string | null, remote: string | null): string[] {
   return compactDetails([local === null ? '' : `本地提交：${local}`, remote === null ? '' : `远端提交：${remote}`]);
+}
+
+function scopeDriftNotice(paths: string[] | undefined): string {
+  return paths === undefined || paths.length === 0
+    ? ''
+    : `\n额外同步的项目内非保护文件：${paths.join('、')}\n请在验收时确认这些额外修改是否合理。`;
 }
 
 function writingBlockCount(parsed: ReturnType<typeof parseWritingBlocks>): number {

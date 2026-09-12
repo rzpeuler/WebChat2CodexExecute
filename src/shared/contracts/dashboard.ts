@@ -8,6 +8,7 @@ export const DASHBOARD_COMMANDS = [
   'continue-interrupted',
   'rebind',
   'governance-consistency-check',
+  'stage-goal-review',
   'align-latest-baseline',
   'commit-and-push',
   'open-edge',
@@ -60,6 +61,7 @@ export type DashboardCommand =
   | ManualGitDashboardCommand
   | { command: 'continue-interrupted' }
   | { command: 'governance-consistency-check' }
+  | { command: 'stage-goal-review' }
   | { command: 'open-edge' }
   | { command: 'open-project' }
   | ViewReportDashboardCommand;
@@ -163,10 +165,27 @@ export interface DashboardAutoRepairSnapshot {
   updatedAt: string;
 }
 
+export interface DashboardExecutionSessionSnapshot {
+  startedAt: string;
+  endedAt: string | null;
+  elapsedMs: number;
+  roundsStarted: number;
+  roundsCompleted: number;
+  endReason: string | null;
+  active: boolean;
+}
+
+export interface DashboardExecutionMetricsSnapshot {
+  current: DashboardExecutionSessionSnapshot | null;
+  totalElapsedMs: number;
+  totalRoundsStarted: number;
+  totalRoundsCompleted: number;
+  sessionCount: number;
+}
+
 export const LOOP_GRAPH_NODE_DEFINITIONS = [
   { id: 'read-sol', label: '读取 Sol' },
   { id: 'parse-task', label: '解析任务书' },
-  { id: 'auto-repair', label: '自动修复' },
   { id: 'apply-updates', label: '应用治理/架构更新' },
   { id: 'sync-governance', label: '同步治理' },
   { id: 'run-luna', label: 'Luna 执行' },
@@ -236,6 +255,7 @@ export interface DashboardSnapshot {
   recentError: DashboardErrorSnapshot | null;
   recovery: DashboardRecoverySnapshot | null;
   autoRepair: DashboardAutoRepairSnapshot | null;
+  executionMetrics: DashboardExecutionMetricsSnapshot;
   loopGraph: LoopGraphSnapshot;
   actions: DashboardActions;
 }
@@ -258,6 +278,7 @@ export interface DashboardSnapshotSource {
   recentError?: unknown;
   recovery?: unknown;
   autoRepair?: unknown;
+  executionMetrics?: unknown;
   loopGraph?: LoopGraphSnapshotSource | null;
   actions?: Partial<Record<DashboardCommandName, Partial<DashboardActionState>>>;
 }
@@ -290,6 +311,7 @@ export function validateDashboardCommand(value: unknown): DashboardCommand {
     return { command };
   }
   if (command === 'governance-consistency-check') return { command };
+  if (command === 'stage-goal-review') return { command };
   if (Object.keys(value).length !== 1) {
     throw new DashboardCommandValidationError(`${command} does not accept parameters`);
   }
@@ -342,8 +364,35 @@ export function sanitizeDashboardSnapshot(source: DashboardSnapshotSource): Dash
     recentError,
     recovery: sanitizeDashboardRecovery(source.recovery),
     autoRepair: sanitizeDashboardAutoRepair(source.autoRepair),
+    executionMetrics: sanitizeDashboardExecutionMetrics(source.executionMetrics),
     loopGraph: sanitizeLoopGraph(source.loopGraph),
     actions: sanitizeDashboardActions(source.actions),
+  };
+}
+
+function sanitizeDashboardExecutionMetrics(value: unknown): DashboardExecutionMetricsSnapshot {
+  const record = isRecord(value) ? value : {};
+  return {
+    current: sanitizeDashboardExecutionSession(record.current),
+    totalElapsedMs: normalizeBoundedInteger(record.totalElapsedMs, 0, Number.MAX_SAFE_INTEGER),
+    totalRoundsStarted: normalizeBoundedInteger(record.totalRoundsStarted, 0, Number.MAX_SAFE_INTEGER),
+    totalRoundsCompleted: normalizeBoundedInteger(record.totalRoundsCompleted, 0, Number.MAX_SAFE_INTEGER),
+    sessionCount: normalizeBoundedInteger(record.sessionCount, 0, Number.MAX_SAFE_INTEGER),
+  };
+}
+
+function sanitizeDashboardExecutionSession(value: unknown): DashboardExecutionSessionSnapshot | null {
+  if (!isRecord(value)) return null;
+  const startedAt = sanitizeTimestamp(value.startedAt);
+  if (startedAt === null) return null;
+  return {
+    startedAt,
+    endedAt: sanitizeTimestamp(value.endedAt),
+    elapsedMs: normalizeBoundedInteger(value.elapsedMs, 0, Number.MAX_SAFE_INTEGER),
+    roundsStarted: normalizeBoundedInteger(value.roundsStarted, 0, Number.MAX_SAFE_INTEGER),
+    roundsCompleted: normalizeBoundedInteger(value.roundsCompleted, 0, Number.MAX_SAFE_INTEGER),
+    endReason: sanitizeSafeText(value.endReason, 64) || null,
+    active: value.active === true,
   };
 }
 

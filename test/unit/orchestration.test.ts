@@ -237,7 +237,6 @@ describe('P0 main orchestration', () => {
     expect(graph.nodes.map((node) => node.id)).toEqual([
       'read-sol',
       'parse-task',
-      'auto-repair',
       'apply-updates',
       'sync-governance',
       'run-luna',
@@ -248,7 +247,6 @@ describe('P0 main orchestration', () => {
     expect(graph.nodes.map((node) => node.state)).toEqual([
       'COMPLETED',
       'COMPLETED',
-      'PENDING',
       'COMPLETED',
       'COMPLETED',
       'COMPLETED',
@@ -256,7 +254,7 @@ describe('P0 main orchestration', () => {
       'COMPLETED',
       'ACTIVE',
     ]);
-    expect(graph.nodes[5]).toMatchObject({
+    expect(graph.nodes.find((node) => node.id === 'run-luna')).toMatchObject({
       summary: 'Luna 已完成任务 task-1。',
       details: expect.arrayContaining(['任务：task-1', '会话：luna-1', '报告：docs/task-reports/task-1.md']),
       startedAt: expect.any(String),
@@ -518,7 +516,6 @@ describe('P0 main orchestration', () => {
     expect(graph.nodes.map((node) => node.state)).toEqual([
       'COMPLETED',
       'COMPLETED',
-      'PENDING',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
@@ -1168,7 +1165,7 @@ describe('P0 main orchestration', () => {
     const saved = saves.at(-1);
     expect(saved).toBeDefined();
     const graph = saved!.loopGraph;
-    expect(graph.nodes).toHaveLength(9);
+    expect(graph.nodes).toHaveLength(8);
     expect(graph.nodes.filter((node) => node.state === 'ACTIVE')).toHaveLength(0);
     for (const node of graph.nodes) {
       expect(node.summary.length).toBeLessThanOrEqual(240);

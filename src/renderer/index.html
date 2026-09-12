@@ -117,44 +117,24 @@
               <dd id="dashboard-project">未选择项目</dd>
             </div>
             <div>
-              <dt>Sol 会话</dt>
-              <dd id="dashboard-sol">无</dd>
-            </div>
-            <div>
-              <dt>阶段 / 状态</dt>
-              <dd id="dashboard-stage">待启动 / 待机</dd>
-            </div>
-            <div>
-              <dt>当前节点</dt>
-              <dd id="dashboard-node">无</dd>
-            </div>
-            <div>
               <dt>任务</dt>
               <dd id="dashboard-task">无</dd>
-            </div>
-            <div>
-              <dt>治理 / 架构</dt>
-              <dd id="dashboard-revisions">— / —</dd>
-            </div>
-            <div>
-              <dt>Luna</dt>
-              <dd id="dashboard-luna">未开始</dd>
-            </div>
-            <div>
-              <dt>Commit</dt>
-              <dd id="dashboard-commits">本地 — / 远端 —</dd>
             </div>
             <div>
               <dt>当前基线</dt>
               <dd id="dashboard-baseline">未捕获</dd>
             </div>
             <div>
-              <dt>任务基线</dt>
-              <dd id="dashboard-stale-task">无</dd>
+              <dt>本次连续运行</dt>
+              <dd id="dashboard-continuous-start">未开始</dd>
+              <dd id="dashboard-continuous-duration">时长：—</dd>
+              <dd id="dashboard-continuous-rounds">轮次：—</dd>
             </div>
             <div>
-              <dt>Git 维护</dt>
-              <dd id="dashboard-git-operation">无</dd>
+              <dt>项目累计执行</dt>
+              <dd id="dashboard-total-duration">时长：—</dd>
+              <dd id="dashboard-total-rounds">轮次：—</dd>
+              <dd id="dashboard-total-sessions">连续运行次数：—</dd>
             </div>
             <div>
               <dt>最近异常</dt>
@@ -206,6 +186,7 @@
         <div class="panel compact-panel">
           <div class="actions" aria-label="维护与验收操作">
             <button type="button" data-dashboard-command="governance-consistency-check">治理一致性检查</button>
+            <button type="button" data-dashboard-command="stage-goal-review">阶段性目标规划与任务梳理</button>
             <button class="button-secondary" type="button" data-dashboard-command="open-project">打开项目</button>
             <button class="button-secondary" type="button" data-dashboard-command="view-report">查看报告</button>
           </div>

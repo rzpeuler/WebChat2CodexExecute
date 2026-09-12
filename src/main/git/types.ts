@@ -185,4 +185,5 @@ export interface GitSyncResult {
   pushed: boolean;
   remoteCommit: string | null;
   pushRetried: boolean;
+  scopeDriftPaths?: string[];
 }

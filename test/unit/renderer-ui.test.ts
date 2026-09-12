@@ -62,7 +62,8 @@ describe('renderer UI layout', () => {
   it('shows the current loop node and the latest dashboard action feedback', async () => {
     const html = await readRendererFile('index.html');
     const app = await readRendererFile('app.ts');
-    expect(html).toContain('id="dashboard-node"');
+    expect(html).toContain('id="dashboard-continuous-duration"');
+    expect(html).toContain('data-dashboard-command="stage-goal-review"');
     expect(html).toContain('id="dashboard-action-feedback"');
     expect(app).toContain('formatDashboardNode');
     expect(app).toContain('lastDashboardActionFeedback');
