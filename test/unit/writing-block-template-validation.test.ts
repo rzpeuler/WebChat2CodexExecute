@@ -81,10 +81,10 @@ describe('Writing Block template validation', () => {
 
     const prompt = await preview(repository);
     expect(prompt.initializationPrompt).toContain('docs/governance/templates/writing-blocks');
-    expect(prompt.initializationPrompt).toContain('Use JSON only');
-    expect(prompt.initializationPrompt).toContain('trailing commas');
+    expect(prompt.initializationPrompt).toContain('块正文必须是一个完整 JSON 对象');
+    expect(prompt.initializationPrompt).toContain('尾逗号');
     expect(prompt.initializationPrompt).toContain('luna-task.template.json');
-    expect(prompt.initializationPrompt).toContain('ordinary implementation details');
+    expect(prompt.initializationPrompt).toContain('普通实现细节');
     expect(prompt.initializationPrompt).not.toContain('<填写唯一任务 ID>');
     expect(prompt.dynamicContext).not.toContain('<填写唯一任务 ID>');
     expect(prompt.dynamicContext).not.toContain('Rule: use \\"quoted\\" text');
