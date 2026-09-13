@@ -191,16 +191,16 @@ export const NEW_CHAT_SCRIPT = `(() => {
 export function prepareMessageScript(text: string): string {
   return `(() => {
     const value = ${JSON.stringify(text)};
-    const isVisible = (element) => {
+    const isDomUsable = (element) => {
       const style = window.getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      return element.isConnected && style.display !== 'none' && style.visibility !== 'hidden' &&
+        style.visibility !== 'collapse' && element.getAttribute('aria-hidden') !== 'true';
     };
     const preferred = document.querySelector('#prompt-textarea[contenteditable="true"]');
-    const input = preferred instanceof HTMLElement && isVisible(preferred)
+    const input = preferred instanceof HTMLElement && isDomUsable(preferred)
       ? preferred
       : [...document.querySelectorAll('[contenteditable="true"], textarea')]
-          .find((element) => element instanceof HTMLElement && isVisible(element));
+          .find((element) => element instanceof HTMLElement && isDomUsable(element));
     if (!(input instanceof HTMLElement)) return { prepared: false, inputHash: null };
     input.focus();
     if (input.isContentEditable) {
@@ -231,23 +231,23 @@ export function prepareMessageScript(text: string): string {
 }
 
 export const CLICK_SUBMIT_SCRIPT = `(() => {
-  const isVisible = (element) => {
+  const isDomUsable = (element) => {
     const style = window.getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    return element.isConnected && style.display !== 'none' && style.visibility !== 'hidden' &&
+      style.visibility !== 'collapse' && element.getAttribute('aria-hidden') !== 'true';
   };
   const preferred = document.querySelector('#prompt-textarea[contenteditable="true"]');
-  const input = preferred instanceof HTMLElement && isVisible(preferred)
+  const input = preferred instanceof HTMLElement && isDomUsable(preferred)
     ? preferred
     : [...document.querySelectorAll('[contenteditable="true"], textarea')]
-        .find((element) => element instanceof HTMLElement && isVisible(element));
-  if (!(input instanceof HTMLElement) || !isVisible(input)) return { clicked: false };
+        .find((element) => element instanceof HTMLElement && isDomUsable(element));
+  if (!(input instanceof HTMLElement) || !isDomUsable(input)) return { clicked: false };
   const form = input.closest('form');
   if (!(form instanceof HTMLFormElement)) return { clicked: false };
   const submit = [...form.querySelectorAll('button')].find((button) => {
     const label = ((button.getAttribute('aria-label') ?? '') + ' ' + (button.getAttribute('data-testid') ?? '')).toLowerCase();
     return (
-      isVisible(button) &&
+      isDomUsable(button) &&
       !button.disabled &&
       !/voice|听写|语音|mic|microphone/.test(label) &&
       (/send|发送|submit/.test(label) || button.type === 'submit' || /composer-submit/.test(label))
@@ -260,17 +260,17 @@ export const CLICK_SUBMIT_SCRIPT = `(() => {
 })()`;
 
 export const COMPOSER_STATE_SCRIPT = `(() => {
-  const isVisible = (element) => {
+  const isDomUsable = (element) => {
     const style = window.getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    return element.isConnected && style.display !== 'none' && style.visibility !== 'hidden' &&
+      style.visibility !== 'collapse' && element.getAttribute('aria-hidden') !== 'true';
   };
   const preferred = document.querySelector('#prompt-textarea[contenteditable="true"]');
-  const input = preferred instanceof HTMLElement && isVisible(preferred)
+  const input = preferred instanceof HTMLElement && isDomUsable(preferred)
     ? preferred
     : [...document.querySelectorAll('[contenteditable="true"], textarea')]
-        .find((element) => element instanceof HTMLElement && isVisible(element));
-  if (!(input instanceof HTMLElement) || !isVisible(input)) return { empty: true };
+        .find((element) => element instanceof HTMLElement && isDomUsable(element));
+  if (!(input instanceof HTMLElement) || !isDomUsable(input)) return { empty: true };
   const text = input instanceof HTMLTextAreaElement ? input.value : input.textContent ?? '';
   return { empty: text.trim() === '' };
 })()`;

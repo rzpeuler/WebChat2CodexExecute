@@ -19,6 +19,7 @@ import { SolBindingError, SolSessionBindingStore } from '../../src/main/edge/ses
 import { CdpTransportError, HttpCdpTransport } from '../../src/main/edge/cdp.js';
 import {
   CLICK_SUBMIT_SCRIPT,
+  COMPOSER_STATE_SCRIPT,
   CdpConversationController,
   prepareMessageScript,
 } from '../../src/main/edge/cdp-conversation.js';
@@ -458,10 +459,15 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     ).rejects.toMatchObject({ code: 'SOL_INPUT_SUBMIT_UNCONFIRMED' });
   });
 
-  it('targets the visible composer and never falls back to submitting an empty form', () => {
+  it('targets a DOM-usable composer without falling back to submitting an empty form', () => {
     expect(prepareMessageScript('hello')).toContain('#prompt-textarea[contenteditable="true"]');
+    expect(prepareMessageScript('hello')).toContain('const isDomUsable');
+    expect(prepareMessageScript('hello')).not.toContain('getBoundingClientRect');
     expect(CLICK_SUBMIT_SCRIPT).toContain('const preferred');
+    expect(CLICK_SUBMIT_SCRIPT).toContain('const isDomUsable');
+    expect(CLICK_SUBMIT_SCRIPT).not.toContain('getBoundingClientRect');
     expect(CLICK_SUBMIT_SCRIPT).not.toContain('requestSubmit');
+    expect(COMPOSER_STATE_SCRIPT).not.toContain('getBoundingClientRect');
   });
 
   it('locates configured Edge and starts with an isolated profile and shell:false', async () => {
