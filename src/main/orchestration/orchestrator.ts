@@ -23,6 +23,7 @@ import {
   type GovernanceReconciliationBlock,
   type LunaTaskBlock,
   type LunaTestStatus,
+  type SessionRotationBlock,
 } from '../../shared/protocol/writing-block.js';
 import { resolve } from 'node:path';
 import { compileSolAutoRepairPrompt } from '../sol/prompt-compiler.js';
@@ -53,10 +54,12 @@ import {
   type ExecutionMetricsState,
   type ExecutionSessionEndReason,
   type ExecutionSessionRecord,
+  type RepositoryAccessRecoveryStatus,
 } from './types.js';
 
 const MAX_RETRIES = 3;
 const MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND = 2;
+const REPOSITORY_ACCESS_RECOVERY_DELAY_MS = 5 * 60 * 1000;
 const LEGACY_RECOVERY_OUTPUT_KEY = '__legacy_recovery_pending__';
 
 const DEFAULT_STATE: OrchestratorState = {
@@ -79,6 +82,7 @@ const DEFAULT_STATE: OrchestratorState = {
   pendingCodeSync: null,
   pendingReconciliationSync: null,
   autoRepair: null,
+  repositoryAccessRecovery: null,
   executionMetrics: createDefaultExecutionMetrics(),
   roundHistory: [],
   executionRecovery: null,
@@ -163,6 +167,7 @@ export class MainOrchestrator implements Orchestrator {
       if (stored !== null && stored !== undefined && stored.version === 1) this.state = normalizeState(stored);
       this.pendingCodeSync = clonePendingCodeSync(this.state.pendingCodeSync);
       this.pendingReconciliationSync = clonePendingReconciliationSync(this.state.pendingReconciliationSync);
+      this.state.repositoryAccessRecovery = normalizeRepositoryAccessRecovery(this.state.repositoryAccessRecovery);
       this.state.executionRecovery = cloneExecutionRecovery(this.state.executionRecovery);
       this.migrateLegacyWrongEntrypointState();
       const interrupted = this.state.active || this.state.status === 'RUNNING';
@@ -1186,6 +1191,14 @@ export class MainOrchestrator implements Orchestrator {
       return result('WAITING', this.state, '治理一致性同步上下文已恢复，请重试当前同步。');
     if (this.pendingCodeSync !== null && this.state.phase === 'SYNCING_CODE') return this.syncPendingCode();
 
+    if (
+      this.state.repositoryAccessRecovery?.status === 'WAITING_BEFORE_RETRY' &&
+      this.state.repositoryAccessRecovery.nextRetryAt !== null &&
+      this.now().getTime() >= Date.parse(this.state.repositoryAccessRecovery.nextRetryAt)
+    ) {
+      return this.rotateForRepositoryAccess(null);
+    }
+
     const waitingForNextOutput = this.state.phase === 'WAITING_FOR_SOL' && this.state.loopGraph.roundId !== null;
     if (!waitingForNextOutput && this.state.loopGraph.roundId === null) await this.beginRound();
     let observation: EdgeSolObservation;
@@ -1332,6 +1345,13 @@ export class MainOrchestrator implements Orchestrator {
       return this.pauseFor(error, 'Writing Block 协议无效，已拒绝启动 Luna。');
     }
     this.state.autoRepair = null;
+    if (parsed.sessionRotation !== null) {
+      return this.handleSessionRotation(parsed.sessionRotation, observation, outputKey);
+    }
+    // A normal protocol output from a replacement conversation means the
+    // repository-access recovery succeeded; do not carry the old recovery
+    // state into the next round.
+    if (this.state.repositoryAccessRecovery !== null) this.state.repositoryAccessRecovery = null;
     if (parsed.blocked.length > 0) {
       return this.pauseForCode('SOL_BLOCKED', parsed.blocked.map((block) => block.fields.reason).join('\n'), true);
     }
@@ -1904,6 +1924,136 @@ export class MainOrchestrator implements Orchestrator {
     }
   }
 
+  private async handleSessionRotation(
+    block: SessionRotationBlock,
+    observation: EdgeSolObservation,
+    outputKey: string,
+  ): Promise<OrchestratorResult> {
+    void block;
+    void observation;
+    const current = this.state.repositoryAccessRecovery;
+    if (current === null) {
+      return this.rotateForRepositoryAccess(outputKey);
+    }
+    if (current.status === 'WAITING_BEFORE_RETRY') {
+      const retryAt = current.nextRetryAt === null ? null : Date.parse(current.nextRetryAt);
+      if (retryAt !== null && Number.isFinite(retryAt) && this.now().getTime() < retryAt) {
+        this.state.processedOutputKey = outputKey;
+        await this.setPhase('WAITING_FOR_SOL', 'RUNNING', this.state.taskId);
+        this.updateGraphNode('wait-sol', {
+          summary: 'GitHub 仓库访问仍失败，等待下一次会话恢复。',
+          details: [
+            `恢复尝试：${current.attempt}/${current.maxAttempts}`,
+            `下次新建会话：${current.nextRetryAt}`,
+            `剩余等待：${formatRemaining(retryAt - this.now().getTime())}`,
+          ],
+        });
+        await this.persist();
+        return result('WAITING', this.state, 'GitHub 仓库访问仍失败，已等待 5 分钟后再次新建 Sol 会话。');
+      }
+      return this.rotateForRepositoryAccess(outputKey);
+    }
+    if (current.attempt >= current.maxAttempts) {
+      this.state.repositoryAccessRecovery = {
+        ...current,
+        outputKey,
+        status: 'EXHAUSTED',
+        updatedAt: this.now().toISOString(),
+      };
+      await this.persist();
+      return this.pauseForCode(
+        'GITHUB_REPOSITORY_UNAVAILABLE',
+        '连续两次更换同一 Project 下的 Sol 会话后，Sol 仍无法访问或验证 GitHub 仓库。',
+        true,
+        '请检查 ChatGPT/GitHub 连接器、仓库授权和远端仓库可见性后，再重试当前阶段。',
+      );
+    }
+    // The first replacement conversation returned the same machine signal.
+    const nextRetryAt = new Date(this.now().getTime() + REPOSITORY_ACCESS_RECOVERY_DELAY_MS).toISOString();
+    this.state.repositoryAccessRecovery = {
+      ...current,
+      outputKey,
+      nextRetryAt,
+      status: 'WAITING_BEFORE_RETRY',
+      updatedAt: this.now().toISOString(),
+    };
+    this.state.processedOutputKey = outputKey;
+    await this.setPhase('WAITING_FOR_SOL', 'RUNNING', this.state.taskId);
+    this.updateGraphNode('wait-sol', {
+      summary: '第一次同项目会话恢复未解决 GitHub 访问问题。',
+      details: [`恢复尝试：${current.attempt}/${current.maxAttempts}`, `5 分钟后自动创建第二个同项目会话。`, `时间：${nextRetryAt}`],
+    });
+    await this.persist();
+    return result('WAITING', this.state, 'GitHub 仓库访问仍失败，5 分钟后自动再次新建同项目 Sol 会话。');
+  }
+
+  private async rotateForRepositoryAccess(outputKey: string | null): Promise<OrchestratorResult> {
+    if (this.contextRecovery?.recoverRepositoryAccess === undefined) {
+      return this.pauseForCode('GITHUB_REPOSITORY_RECOVERY_UNAVAILABLE', '无法创建 GitHub 访问恢复会话。', true);
+    }
+    const current = this.state.repositoryAccessRecovery;
+    const attempt = current === null ? 1 : Math.min(2, current.attempt + 1);
+    const key = outputKey ?? current?.outputKey ?? '__repository_access_recovery__';
+    this.state.repositoryAccessRecovery = {
+      outputKey: key,
+      reason: 'GITHUB_REPOSITORY_UNAVAILABLE',
+      action: 'CREATE_SAME_PROJECT_CONVERSATION',
+      attempt,
+      maxAttempts: 2,
+      latestConversationId: current?.latestConversationId ?? null,
+      nextRetryAt: null,
+      status: 'ROTATING',
+      updatedAt: this.now().toISOString(),
+    };
+    this.updateGraphNode('parse-task', {
+      summary: '检测到 Sol 无法访问 GitHub，准备同项目会话恢复。',
+      details: [`恢复尝试：${attempt}/2`, '不发送 USER_MESSAGE，不中断自动循环。'],
+    });
+    await this.persist();
+    try {
+      const recovered = await this.contextRecovery.recoverRepositoryAccess({
+        taskId: this.state.taskId,
+        currentCommit: this.baseline?.head ?? this.state.commits.local,
+      });
+      if (recovered.status !== 'ROTATED') {
+        this.state.repositoryAccessRecovery = {
+          ...this.state.repositoryAccessRecovery!,
+          status: 'EXHAUSTED',
+          updatedAt: this.now().toISOString(),
+        };
+        await this.persist();
+        return this.pauseForCode(
+          recovered.error?.code ?? 'GITHUB_REPOSITORY_RECOVERY_FAILED',
+          recovered.error?.message ?? '新建同项目 Sol 会话失败。',
+          true,
+          '请检查专用 Edge 会话和 ChatGPT Project 后重试。',
+        );
+      }
+      this.state.repositoryAccessRecovery = {
+        ...this.state.repositoryAccessRecovery!,
+        latestConversationId: recovered.conversationId ?? null,
+        status: 'WAITING_FOR_SOL',
+        updatedAt: this.now().toISOString(),
+      };
+      this.state.processedOutputKey = key;
+      this.state.recentError = null;
+      await this.setPhase('WAITING_FOR_SOL', 'RUNNING', this.state.taskId);
+      this.updateGraphNode('wait-sol', {
+        summary: '已新建同一 Project 的 Sol 会话，等待继续验收。',
+        details: [`恢复尝试：${attempt}/2`, `会话：${recovered.conversationId ?? '已创建'}`, 'Loop 保持运行。'],
+      });
+      await this.persist();
+      return result('RECOVERED', this.state, '已在同一 Project 新建 Sol 会话，正在等待继续验收。');
+    } catch (error) {
+      return this.pauseForCode(
+        'GITHUB_REPOSITORY_RECOVERY_FAILED',
+        error instanceof Error ? error.message : String(error),
+        true,
+        '请检查专用 Edge 会话和 ChatGPT Project 后重试。',
+      );
+    }
+  }
+
   private async setPhase(
     phase: OrchestratorState['phase'],
     status: OrchestratorState['status'],
@@ -2443,6 +2593,7 @@ function cloneState(state: OrchestratorState): OrchestratorState {
     pendingCodeSync: clonePendingCodeSync(state.pendingCodeSync),
     pendingReconciliationSync: clonePendingReconciliationSync(state.pendingReconciliationSync),
     autoRepair: cloneAutoRepair(state.autoRepair),
+    repositoryAccessRecovery: cloneRepositoryAccessRecovery(state.repositoryAccessRecovery),
     executionMetrics: cloneExecutionMetrics(state.executionMetrics),
     executionRecovery: cloneExecutionRecovery(state.executionRecovery),
     ...(state.manualGitOperation === undefined
@@ -2528,6 +2679,42 @@ function isExecutionSessionEndReason(value: unknown): value is ExecutionSessionE
 function cloneAutoRepair(value: unknown): AutoRepairState | null {
   const repair = normalizeAutoRepair(value);
   return repair === null ? null : { ...repair };
+}
+
+function cloneRepositoryAccessRecovery(value: unknown): OrchestratorState['repositoryAccessRecovery'] {
+  const recovery = normalizeRepositoryAccessRecovery(value);
+  return recovery === null ? null : { ...recovery };
+}
+
+function normalizeRepositoryAccessRecovery(value: unknown): OrchestratorState['repositoryAccessRecovery'] {
+  if (!isRecord(value)) return null;
+  const outputKey = boundedPendingText(value.outputKey, 128);
+  const latestConversationId =
+    value.latestConversationId === null || value.latestConversationId === undefined
+      ? null
+      : boundedPendingText(value.latestConversationId, 256);
+  const nextRetryAt =
+    value.nextRetryAt === null || value.nextRetryAt === undefined ? null : boundedPendingText(value.nextRetryAt, 64);
+  const updatedAt = boundedPendingText(value.updatedAt, 64);
+  const attempt = boundedInteger(value.attempt, 0, 2);
+  const status = value.status;
+  if (
+    outputKey === null ||
+    updatedAt === null ||
+    !['ROTATING', 'WAITING_FOR_SOL', 'WAITING_BEFORE_RETRY', 'EXHAUSTED'].includes(String(status))
+  )
+    return null;
+  return {
+    outputKey,
+    reason: 'GITHUB_REPOSITORY_UNAVAILABLE',
+    action: 'CREATE_SAME_PROJECT_CONVERSATION',
+    attempt,
+    maxAttempts: 2,
+    latestConversationId,
+    nextRetryAt,
+    status: status as RepositoryAccessRecoveryStatus,
+    updatedAt,
+  };
 }
 
 function normalizeAutoRepair(value: unknown): AutoRepairState | null {
@@ -3092,6 +3279,12 @@ function isRetryableGovernanceReconciliationError(error: unknown): boolean {
 
 function safeSyncId(value: string): string {
   return value.replace(/[^a-zA-Z0-9._:/-]+/g, '_').slice(0, 80) || 'update';
+}
+
+function formatRemaining(milliseconds: number): string {
+  const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} 分 ${seconds % 60} 秒`;
 }
 
 function result(status: OrchestratorResult['status'], state: OrchestratorState, message: string): OrchestratorResult {

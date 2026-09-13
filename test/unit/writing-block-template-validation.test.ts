@@ -77,7 +77,7 @@ describe('Writing Block template validation', () => {
       directory: 'docs/governance/templates/writing-blocks',
       version: WRITING_BLOCK_TEMPLATE_VERSION,
     });
-    expect(scan.writingBlockTemplates.files).toHaveLength(5);
+    expect(scan.writingBlockTemplates.files).toHaveLength(6);
 
     const prompt = await preview(repository);
     expect(prompt.initializationPrompt).toContain('docs/governance/templates/writing-blocks');

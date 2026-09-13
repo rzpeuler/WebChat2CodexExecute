@@ -92,6 +92,24 @@ export interface AutoRepairState {
   updatedAt: string;
 }
 
+export type RepositoryAccessRecoveryStatus =
+  | 'ROTATING'
+  | 'WAITING_FOR_SOL'
+  | 'WAITING_BEFORE_RETRY'
+  | 'EXHAUSTED';
+
+export interface RepositoryAccessRecoveryState {
+  outputKey: string;
+  reason: 'GITHUB_REPOSITORY_UNAVAILABLE';
+  action: 'CREATE_SAME_PROJECT_CONVERSATION';
+  attempt: number;
+  maxAttempts: 2;
+  latestConversationId: string | null;
+  nextRetryAt: string | null;
+  status: RepositoryAccessRecoveryStatus;
+  updatedAt: string;
+}
+
 export type ExecutionSessionEndReason = 'BLOCKED' | 'FAILED' | 'PAUSED' | 'RESTARTED' | 'COMPLETED';
 
 export interface ExecutionSessionRecord {
@@ -149,6 +167,7 @@ export interface OrchestratorState {
   pendingCodeSync: PendingCodeSyncState | null;
   pendingReconciliationSync: PendingReconciliationSyncState | null;
   autoRepair: AutoRepairState | null;
+  repositoryAccessRecovery: RepositoryAccessRecoveryState | null;
   executionMetrics: ExecutionMetricsState;
   roundHistory: DashboardRoundRecord[];
   executionRecovery: ExecutionRecoveryRecord | null;
@@ -187,6 +206,10 @@ export interface ContextRecoverySource {
     observation: EdgeSolObservation;
     rawInput?: string;
   }): Promise<{ status: string; error?: { code: string; message: string } }>;
+  recoverRepositoryAccess?(input: {
+    taskId: string | null;
+    currentCommit: string | null;
+  }): Promise<{ status: string; conversationId?: string; error?: { code: string; message: string } }>;
 }
 
 export interface GitOrchestratorPort {

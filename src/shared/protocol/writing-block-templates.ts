@@ -12,6 +12,7 @@ import {
   type GovernanceChangeFields,
   type GovernanceReconciliationFields,
   type LunaTaskFields,
+  type SessionRotationFields,
   type WritingBlockType,
 } from './writing-block.js';
 
@@ -53,6 +54,7 @@ const writingBlockTemplateFilenames: { [T in WritingBlockType]: string } = {
   LUNA_TASK: 'luna-task.template.json',
   GOVERNANCE_CHANGE: 'governance-change.template.json',
   ARCHITECTURE_FREEZE: 'architecture-freeze.template.json',
+  SESSION_ROTATION: 'session-rotation.template.json',
   BLOCKED: 'blocked.template.json',
   GOVERNANCE_RECONCILIATION: 'governance-reconciliation.template.json',
 };
@@ -150,6 +152,19 @@ const writingBlockTemplates = {
     code: '<填写阻塞错误码>',
     reason: '<填写需要用户或外部操作的原因>',
   },
+  SESSION_ROTATION: {
+    template_kind: 'SESSION_ROTATION',
+    schema_version: WRITING_BLOCK_TEMPLATE_VERSION,
+    instructions: [
+      '仅当当前会话无法读取或访问 GitHub 仓库，导致无法继续验收时使用。',
+      '只允许输出本模板对应的一个 SESSION_ROTATION block，不得附加 USER_MESSAGE、BLOCKED、LUNA_TASK 或说明文字。',
+      '恢复动作由 ORCHESTRATOR 执行：在同一 ChatGPT Project 下创建新会话并继续验收。',
+    ],
+    reason_options: ['GITHUB_REPOSITORY_UNAVAILABLE'],
+    action_options: ['CREATE_SAME_PROJECT_CONVERSATION'],
+    reason: 'GITHUB_REPOSITORY_UNAVAILABLE',
+    action: 'CREATE_SAME_PROJECT_CONVERSATION',
+  },
   GOVERNANCE_RECONCILIATION: {
     template_kind: 'GOVERNANCE_RECONCILIATION',
     schema_version: WRITING_BLOCK_TEMPLATE_VERSION,
@@ -199,6 +214,7 @@ export type WritingBlockFieldsByType = {
   ARCHITECTURE_FREEZE: ArchitectureFreezeFields;
   BLOCKED: BlockedFields;
   GOVERNANCE_RECONCILIATION: GovernanceReconciliationFields;
+  SESSION_ROTATION: SessionRotationFields;
 };
 
 function assertWritingBlockType(type: unknown): asserts type is WritingBlockType {

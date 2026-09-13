@@ -9,6 +9,7 @@ import {
   HttpCdpTransport,
   CdpConversationController,
   ContextRecoveryManager,
+  RepositoryAccessRecoveryManager,
   SolSessionBindingStore,
   type EdgeSolObservation,
   type EdgeProcess,
@@ -612,7 +613,17 @@ export async function createAutomationRuntime(
     },
     edge,
     sol,
-    contextRecovery: new ContextRecoveryManager({ bindingStore, conversations: conversationPort }),
+    contextRecovery: {
+      recover: (input) => new ContextRecoveryManager({ bindingStore, conversations: conversationPort }).recover(input),
+      recoverRepositoryAccess: async (input) => {
+        const prompt = promptCompiler.compileSolRepositoryRecoveryPrompt({
+          project: config,
+          currentCommit: input.currentCommit,
+          taskId: input.taskId,
+        });
+        return new RepositoryAccessRecoveryManager({ bindingStore, conversations: conversationPort }).recover({ prompt });
+      },
+    },
     git: guardedGit,
     governance: guardedGovernance,
     reconciliation: {

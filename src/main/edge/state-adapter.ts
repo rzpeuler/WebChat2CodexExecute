@@ -129,9 +129,14 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
         .map((node) => ({ node, value: extractWritingBlockTail(text(node)) }))
         .filter(({ value }) => typeof value === 'string' && hasOpenMarker(value) && hasCloseMarker(value))
         .map((candidate) => ({ ...candidate, blockCount: writingBlockCount(candidate.value) }));
-  const finalAssistant = assistantCandidates
-    .sort((left, right) => right.blockCount - left.blockCount || right.value.length - left.value.length)
-    .at(0)?.value || assistantRootTail || assistantRootText;
+  // The assistant turn's root is the authoritative DOM boundary. If its tail
+  // contains a complete block sequence, prefer it over descendant nodes:
+  // descendant nodes can represent an intermediate thought/markdown fragment
+  // and choosing the longest fragment reintroduces block-outside-content errors.
+  const finalAssistant = assistantRootTail ||
+    assistantCandidates
+      .sort((left, right) => right.blockCount - left.blockCount || right.value.length - left.value.length)
+      .at(0)?.value || assistantRootText;
   const errors = all(${JSON.stringify(rules.errorSelectors)}).map(text).filter(Boolean).join('\\n');
   const status = all(['[aria-live="polite"]', '[role="status"]', 'button[aria-label]']).map(text).filter(Boolean).join('\\n');
   const project = document.querySelector('[data-project-id], meta[name="chatgpt-project-id"]');

@@ -122,6 +122,7 @@ line two"
       'GOVERNANCE_CHANGE',
       'ARCHITECTURE_FREEZE',
       'BLOCKED',
+      'SESSION_ROTATION',
       'GOVERNANCE_RECONCILIATION',
     ]);
     for (const type of Object.keys(WRITING_BLOCK_TEMPLATES) as Array<keyof typeof WRITING_BLOCK_TEMPLATES>) {
@@ -333,6 +334,38 @@ line two"
       expect((error as Error).message).toContain('类型 GOVERNANCE_CHANGE');
       expect((error as Error).message).toContain('字段 content');
     }
+  });
+
+  it('accepts only the enumerated repository-access session rotation signal', () => {
+    const parsed = parseWritingBlocks(
+      block('SESSION_ROTATION', {
+        schema_version: 1,
+        reason: 'GITHUB_REPOSITORY_UNAVAILABLE',
+        action: 'CREATE_SAME_PROJECT_CONVERSATION',
+      }),
+    );
+    expect(parsed.sessionRotation?.fields).toMatchObject({
+      reason: 'GITHUB_REPOSITORY_UNAVAILABLE',
+      action: 'CREATE_SAME_PROJECT_CONVERSATION',
+    });
+    expect(() =>
+      parseWritingBlocks(
+        block('SESSION_ROTATION', {
+          schema_version: 1,
+          reason: 'OTHER',
+          action: 'CREATE_SAME_PROJECT_CONVERSATION',
+        }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: 'WRITING_BLOCK_INVALID_FIELD' }));
+    expect(() =>
+      parseWritingBlocks(
+        `${block('SESSION_ROTATION', {
+          schema_version: 1,
+          reason: 'GITHUB_REPOSITORY_UNAVAILABLE',
+          action: 'CREATE_SAME_PROJECT_CONVERSATION',
+        })}\n${block('BLOCKED', { code: 'X', reason: 'Y' })}`,
+      ),
+    ).toThrowError(expect.objectContaining({ code: 'WRITING_BLOCK_SESSION_ROTATION_MIXED' }));
   });
 
   it.each([

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { ActiveSessionRotationManager, ContextRecoveryManager } from '../../src/main/edge/session-rotation.js';
+import {
+  ActiveSessionRotationManager,
+  ContextRecoveryManager,
+  RepositoryAccessRecoveryManager,
+} from '../../src/main/edge/session-rotation.js';
 import { hashRawInput, SolSessionBindingStore } from '../../src/main/edge/session-binding.js';
 import type {
   EdgeSolObservation,
@@ -65,6 +69,31 @@ async function bound(): Promise<{ binding: SolSessionBindingStore; persistence: 
 }
 
 describe('active and context-limited Sol session recovery', () => {
+  it('creates a same-Project conversation for repository access recovery and records the new active session', async () => {
+    const { binding, persistence } = await bound();
+    const sent: string[] = [];
+    const manager = new RepositoryAccessRecoveryManager({
+      bindingStore: binding,
+      conversations: {
+        createConversation: async ({ reason }) => {
+          expect(reason).toBe('GITHUB_REPOSITORY_RECOVERY');
+          return conversation('github-recovery');
+        },
+        sendMessage: async ({ text }) => {
+          sent.push(text);
+        },
+      },
+    });
+
+    await expect(manager.recover({ prompt: '重新读取仓库并继续验收。' })).resolves.toMatchObject({
+      status: 'ROTATED',
+      conversationId: 'github-recovery',
+    });
+    expect(sent).toEqual(['重新读取仓库并继续验收。']);
+    expect(persistence.value?.activeConversationId).toBe('github-recovery');
+    expect(persistence.value?.conversationChain.at(-1)?.reason).toBe('GITHUB_REPOSITORY_RECOVERY');
+  });
+
   it('recovers once, replays the exact input, and makes repeated events idempotent', async () => {
     const { binding, persistence } = await bound();
     const sent: string[] = [];

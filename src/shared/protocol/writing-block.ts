@@ -9,6 +9,7 @@ export const WRITING_BLOCK_TYPES = [
   'GOVERNANCE_CHANGE',
   'GOVERNANCE_RECONCILIATION',
   'ARCHITECTURE_FREEZE',
+  'SESSION_ROTATION',
   'BLOCKED',
 ] as const;
 export type WritingBlockType = (typeof WRITING_BLOCK_TYPES)[number];
@@ -64,6 +65,12 @@ export const LUNA_REMOTE_SYNC_POLICY = {
 export const GOVERNANCE_RECONCILIATION_ACTIONS = ['replace'] as const;
 export type GovernanceReconciliationAction = (typeof GOVERNANCE_RECONCILIATION_ACTIONS)[number];
 
+/** Recoverable Sol handoffs handled by the orchestrator without user intervention. */
+export const SESSION_ROTATION_REASONS = ['GITHUB_REPOSITORY_UNAVAILABLE'] as const;
+export type SessionRotationReason = (typeof SESSION_ROTATION_REASONS)[number];
+export const SESSION_ROTATION_ACTIONS = ['CREATE_SAME_PROJECT_CONVERSATION'] as const;
+export type SessionRotationAction = (typeof SESSION_ROTATION_ACTIONS)[number];
+
 export const LUNA_TASK_REQUIRED_FIELDS = [
   'task_id',
   'title',
@@ -111,6 +118,7 @@ export const ARCHITECTURE_FREEZE_REQUIRED_FIELDS = [
 ] as const;
 
 export const BLOCKED_REQUIRED_FIELDS = ['code', 'reason'] as const;
+export const SESSION_ROTATION_REQUIRED_FIELDS = ['schema_version', 'reason', 'action'] as const;
 
 export const DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS =
   'Luna may decide implementation details inside the approved scope without asking Sol or the user; emit BLOCKED only for external account/API key/OTP/platform configuration, conflicts, unauthorized scope, or high-risk operations.' as const;
@@ -184,6 +192,13 @@ export interface BlockedFields {
   [key: string]: unknown;
 }
 
+export interface SessionRotationFields {
+  schema_version: typeof WRITING_BLOCK_SCHEMA_VERSION;
+  reason: SessionRotationReason;
+  action: SessionRotationAction;
+  [key: string]: unknown;
+}
+
 export interface WritingBlockBase<T extends WritingBlockType, F extends Record<string, unknown>> {
   type: T;
   fields: F;
@@ -198,9 +213,15 @@ export type GovernanceReconciliationBlock = WritingBlockBase<
   GovernanceReconciliationFields
 >;
 export type ArchitectureFreezeBlock = WritingBlockBase<'ARCHITECTURE_FREEZE', ArchitectureFreezeFields>;
+export type SessionRotationBlock = WritingBlockBase<'SESSION_ROTATION', SessionRotationFields>;
 export type BlockedBlock = WritingBlockBase<'BLOCKED', BlockedFields>;
 export type WritingBlock =
-  LunaTaskBlock | GovernanceChangeBlock | GovernanceReconciliationBlock | ArchitectureFreezeBlock | BlockedBlock;
+  | LunaTaskBlock
+  | GovernanceChangeBlock
+  | GovernanceReconciliationBlock
+  | ArchitectureFreezeBlock
+  | SessionRotationBlock
+  | BlockedBlock;
 
 export interface ParsedWritingBlocks {
   blocks: WritingBlock[];
@@ -208,6 +229,7 @@ export interface ParsedWritingBlocks {
   governanceChanges: GovernanceChangeBlock[];
   governanceReconciliation: GovernanceReconciliationBlock | null;
   architectureFreezes: ArchitectureFreezeBlock[];
+  sessionRotation: SessionRotationBlock | null;
   blocked: BlockedBlock[];
 }
 
@@ -226,7 +248,9 @@ export type WritingBlockProtocolErrorCode =
   | 'WRITING_BLOCK_INVALID_FIELD'
   | 'WRITING_BLOCK_RESERVED_MARKER'
   | 'WRITING_BLOCK_DUPLICATE_LUNA_TASK'
-  | 'WRITING_BLOCK_DUPLICATE_GOVERNANCE_RECONCILIATION';
+  | 'WRITING_BLOCK_DUPLICATE_GOVERNANCE_RECONCILIATION'
+  | 'WRITING_BLOCK_DUPLICATE_SESSION_ROTATION'
+  | 'WRITING_BLOCK_SESSION_ROTATION_MIXED';
 
 export class WritingBlockProtocolError extends Error {
   readonly code: WritingBlockProtocolErrorCode;
@@ -328,6 +352,16 @@ export const WRITING_BLOCK_JSON_SCHEMAS = {
       reason: { type: 'string' },
       affected_scope: { type: 'array', items: { type: 'string' } },
       luna_follow_up: { type: 'string' },
+    },
+  },
+  SESSION_ROTATION: {
+    type: 'object',
+    additionalProperties: true,
+    required: [...SESSION_ROTATION_REQUIRED_FIELDS],
+    properties: {
+      schema_version: { type: 'integer', const: WRITING_BLOCK_SCHEMA_VERSION },
+      reason: { type: 'string', enum: [...SESSION_ROTATION_REASONS] },
+      action: { type: 'string', enum: [...SESSION_ROTATION_ACTIONS] },
     },
   },
   BLOCKED: {
@@ -881,6 +915,30 @@ function buildBlock(
       normalized = normalizedFreeze;
       break;
     }
+    case 'SESSION_ROTATION': {
+      const normalizedRotation: Record<string, unknown> = { ...fields };
+      assertFieldPresent(fields, 'schema_version', blockIndex);
+      const reason = assertStringField(fields, 'reason', blockIndex);
+      const action = assertStringField(fields, 'action', blockIndex);
+      if (!(SESSION_ROTATION_REASONS as readonly string[]).includes(reason)) {
+        throw new WritingBlockProtocolError(
+          'WRITING_BLOCK_INVALID_FIELD',
+          `reason must be one of ${SESSION_ROTATION_REASONS.join(', ')}`,
+          { blockIndex, field: 'reason' },
+        );
+      }
+      if (!(SESSION_ROTATION_ACTIONS as readonly string[]).includes(action)) {
+        throw new WritingBlockProtocolError(
+          'WRITING_BLOCK_INVALID_FIELD',
+          `action must be one of ${SESSION_ROTATION_ACTIONS.join(', ')}`,
+          { blockIndex, field: 'action' },
+        );
+      }
+      normalizedRotation.reason = reason;
+      normalizedRotation.action = action;
+      normalized = normalizedRotation;
+      break;
+    }
     case 'BLOCKED': {
       const normalizedBlocked: Record<string, unknown> = { ...fields };
       normalizedBlocked.code = assertStringField(fields, 'code', blockIndex);
@@ -899,6 +957,8 @@ function buildBlock(
           ? GOVERNANCE_RECONCILIATION_REQUIRED_FIELDS
           : type === 'ARCHITECTURE_FREEZE'
             ? ARCHITECTURE_FREEZE_REQUIRED_FIELDS
+            : type === 'SESSION_ROTATION'
+              ? SESSION_ROTATION_REQUIRED_FIELDS
             : BLOCKED_REQUIRED_FIELDS;
   for (const field of requiredFields) knownFields.add(field);
   if (type === 'LUNA_TASK') {
@@ -909,6 +969,10 @@ function buildBlock(
     knownFields.add('baseline_commit');
     knownFields.add('files');
     knownFields.add('reason');
+  }
+  if (type === 'SESSION_ROTATION') {
+    knownFields.add('reason');
+    knownFields.add('action');
   }
   const extensions = Object.fromEntries(Object.entries(normalized).filter(([key]) => !knownFields.has(key)));
   normalized.schema_version = fields.schema_version ?? WRITING_BLOCK_SCHEMA_VERSION;
@@ -1006,6 +1070,21 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
         { blockIndex, blockType: block.type },
       );
     }
+    if (block.type === 'SESSION_ROTATION') {
+      if (blocks.length > 0) {
+        throw new WritingBlockProtocolError(
+          'WRITING_BLOCK_SESSION_ROTATION_MIXED',
+          'SESSION_ROTATION 必须作为本次输出中唯一的 Writing Block，不能与任务、治理或用户流程混合。',
+          { blockIndex, blockType: block.type },
+        );
+      }
+    } else if (blocks.some((item) => item.type === 'SESSION_ROTATION')) {
+      throw new WritingBlockProtocolError(
+        'WRITING_BLOCK_SESSION_ROTATION_MIXED',
+        'SESSION_ROTATION 必须作为本次输出中唯一的 Writing Block，不能与其他 Writing Block 混合。',
+        { blockIndex, blockType: block.type },
+      );
+    }
     blocks.push(block);
     cursor = bodyEnd + CLOSE_MARKER.length;
   }
@@ -1019,6 +1098,8 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
     architectureFreezes: blocks.filter(
       (block): block is ArchitectureFreezeBlock => block.type === 'ARCHITECTURE_FREEZE',
     ),
+    sessionRotation:
+      blocks.find((block): block is SessionRotationBlock => block.type === 'SESSION_ROTATION') ?? null,
     blocked: blocks.filter((block): block is BlockedBlock => block.type === 'BLOCKED'),
   };
 }

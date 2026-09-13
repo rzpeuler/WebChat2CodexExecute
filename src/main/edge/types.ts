@@ -142,7 +142,7 @@ export interface SolConversationIdentity {
 export interface SolConversationRecord extends SolConversationIdentity {
   createdAt: string;
   retiredAt: string | null;
-  reason: 'INITIAL_BIND' | 'CONTEXT_RECOVERY' | 'ACTIVE_ROTATION';
+  reason: 'INITIAL_BIND' | 'CONTEXT_RECOVERY' | 'ACTIVE_ROTATION' | 'GITHUB_REPOSITORY_RECOVERY';
 }
 
 export interface SolSessionBinding {
@@ -175,7 +175,7 @@ export interface SolConversationController {
   createConversation(input: {
     projectFingerprint: string;
     accountFingerprint: string | null;
-    reason: 'CONTEXT_RECOVERY' | 'ACTIVE_ROTATION';
+    reason: 'CONTEXT_RECOVERY' | 'ACTIVE_ROTATION' | 'GITHUB_REPOSITORY_RECOVERY';
   }): Promise<SolConversationIdentity>;
   sendMessage(input: { conversation: SolConversationIdentity; text: string }): Promise<void>;
 }

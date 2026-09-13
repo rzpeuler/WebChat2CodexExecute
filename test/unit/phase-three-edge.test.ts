@@ -648,7 +648,7 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     expect(script).toContain("const OPEN_MARKER = '[WRITING_BLOCK';");
     expect(script).toContain("const ANGLE_OPEN_MARKER = '<WRITING_BLOCK';");
     expect(script).toContain('const assistantCandidates = assistantNode === null');
-    expect(script).toContain('const finalAssistant = assistantCandidates');
+    expect(script).toContain('const finalAssistant = assistantRootTail ||');
     expect(script).toContain('extractWritingBlockTail');
     expect(script).toContain('right.value.length - left.value.length');
     expect(script).toContain('const loginWall = authPath || explicitLoginNodes.length > 0');

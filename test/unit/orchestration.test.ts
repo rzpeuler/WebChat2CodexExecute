@@ -747,6 +747,48 @@ describe('P0 main orchestration', () => {
     });
   });
 
+  it('rotates same-Project Sol sessions for repository access and only blocks after the second repeated signal', async () => {
+    let nowMs = Date.parse('2026-09-10T00:00:00.000Z');
+    const rotationText = `[WRITING_BLOCK type="SESSION_ROTATION"]
+{"schema_version":1,"reason":"GITHUB_REPOSITORY_UNAVAILABLE","action":"CREATE_SAME_PROJECT_CONVERSATION"}
+[/WRITING_BLOCK]`;
+    const first = observation(rotationText);
+    const second = { ...first, url: 'https://chatgpt.com/project/p1/c/c2', targetId: 'tab-2' };
+    const third = { ...first, url: 'https://chatgpt.com/project/p1/c/c3', targetId: 'tab-3' };
+    const recoverRepositoryAccess = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 'ROTATED', conversationId: 'c2' })
+      .mockResolvedValueOnce({ status: 'ROTATED', conversationId: 'c3' });
+    const options = baseOptions({
+      now: () => new Date(nowMs),
+      edge: { observe: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(third) },
+      contextRecovery: { recover: vi.fn(async () => ({ status: 'RECOVERED' })), recoverRepositoryAccess },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'RECOVERED' });
+    expect(recoverRepositoryAccess).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState()).toMatchObject({
+      active: true,
+      phase: 'WAITING_FOR_SOL',
+      repositoryAccessRecovery: { attempt: 1, status: 'WAITING_FOR_SOL' },
+    });
+
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'WAITING' });
+    expect(recoverRepositoryAccess).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().repositoryAccessRecovery?.status).toBe('WAITING_BEFORE_RETRY');
+
+    nowMs += 5 * 60 * 1000;
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'RECOVERED' });
+    expect(recoverRepositoryAccess).toHaveBeenCalledTimes(2);
+    expect(orchestrator.getState().repositoryAccessRecovery).toMatchObject({ attempt: 2, status: 'WAITING_FOR_SOL' });
+
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'PAUSED' });
+    expect(orchestrator.getState()).toMatchObject({ active: false, status: 'NEEDS_USER_ACTION' });
+    expect(orchestrator.getState().recentError).toMatchObject({ code: 'GITHUB_REPOSITORY_UNAVAILABLE' });
+  });
+
   it('locks the whole dashboard governance operation and allows only navigation during it', async () => {
     let releaseOperation!: () => void;
     const operation = new Promise<void>((resolve) => {

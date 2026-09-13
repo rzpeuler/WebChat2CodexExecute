@@ -165,6 +165,73 @@ export class ContextRecoveryManager {
   }
 }
 
+export type RepositoryAccessRecoveryStatus = 'ROTATED' | 'PAUSED';
+
+export interface RepositoryAccessRecoveryResult {
+  status: RepositoryAccessRecoveryStatus;
+  conversationId?: string;
+  error?: { code: string; message: string };
+}
+
+/** Creates a same-Project Sol conversation for a repository-access handoff. */
+export class RepositoryAccessRecoveryManager {
+  private readonly bindingStore: SolSessionBindingStore;
+  private readonly conversations: SolConversationController;
+
+  constructor(options: ContextRecoveryOptions) {
+    this.bindingStore = options.bindingStore;
+    this.conversations = options.conversations;
+  }
+
+  async recover(input: { prompt: string }): Promise<RepositoryAccessRecoveryResult> {
+    const state = await this.bindingStore.load();
+    if (state === null) {
+      return {
+        status: 'PAUSED',
+        error: { code: 'BINDING_MISSING', message: 'No bound Sol conversation is available for repository recovery.' },
+      };
+    }
+    try {
+      if (!hasKnownIdentity(state.projectFingerprint) || !hasKnownIdentity(state.accountFingerprint)) {
+        throw new SolSessionRecoveryError(
+          'RECOVERY_IDENTITY_MISMATCH',
+          'A known bound Project and account are required for repository recovery.',
+        );
+      }
+      const conversation = await this.conversations.createConversation({
+        projectFingerprint: state.projectFingerprint,
+        accountFingerprint: state.accountFingerprint,
+        reason: 'GITHUB_REPOSITORY_RECOVERY',
+      });
+      this.assertIdentity(state.projectFingerprint, state.accountFingerprint, conversation);
+      await this.conversations.sendMessage({ conversation, text: input.prompt });
+      await this.bindingStore.recordRawInput(input.prompt);
+      await this.bindingStore.setActiveConversation(conversation, 'GITHUB_REPOSITORY_RECOVERY');
+      return { status: 'ROTATED', conversationId: conversation.conversationId };
+    } catch (error) {
+      return { status: 'PAUSED', error: normalizeError(error) };
+    }
+  }
+
+  private assertIdentity(
+    projectFingerprint: string,
+    accountFingerprint: string | null,
+    conversation: SolConversationIdentity,
+  ): void {
+    if (
+      !isAllowedChatGptUrl(conversation.url) ||
+      conversation.projectFingerprint !== projectFingerprint ||
+      !hasKnownIdentity(conversation.accountFingerprint) ||
+      conversation.accountFingerprint !== accountFingerprint
+    ) {
+      throw new SolSessionRecoveryError(
+        'RECOVERY_IDENTITY_MISMATCH',
+        'The repository recovery conversation is not in the bound Project and account.',
+      );
+    }
+  }
+}
+
 export type ActiveRotationStatus = 'ROTATED' | 'SKIPPED' | 'PAUSED';
 
 export interface ActiveRotationResult {

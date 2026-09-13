@@ -37,7 +37,7 @@ export class CdpConversationController implements SolConversationController {
   async createConversation(input: {
     projectFingerprint: string;
     accountFingerprint: string | null;
-    reason: 'CONTEXT_RECOVERY' | 'ACTIVE_ROTATION';
+    reason: 'CONTEXT_RECOVERY' | 'ACTIVE_ROTATION' | 'GITHUB_REPOSITORY_RECOVERY';
   }): Promise<SolConversationIdentity> {
     if (!hasKnownIdentity(input.projectFingerprint) || !hasKnownIdentity(input.accountFingerprint)) {
       throw new Error('A known Project and account identity are required to create a conversation.');

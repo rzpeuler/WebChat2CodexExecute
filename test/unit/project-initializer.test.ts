@@ -232,7 +232,7 @@ describe('project initializer', () => {
       template_version: 2,
       governance_entry_point: 'docs/governance',
     });
-    expect(manifest?.documents).toHaveLength(10);
+    expect(manifest?.documents).toHaveLength(11);
     expect(manifest?.documents.every((document) => document.status === 'active')).toBe(true);
     expect(manifest?.documents.every((document) => document.path.startsWith('docs/governance/'))).toBe(true);
     expect(manifest?.documents.slice(5)).toEqual(

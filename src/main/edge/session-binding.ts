@@ -155,7 +155,7 @@ export class SolSessionBindingStore {
 
   async setActiveConversation(
     conversation: SolConversationIdentity,
-    reason: 'CONTEXT_RECOVERY' | 'ACTIVE_ROTATION',
+    reason: 'CONTEXT_RECOVERY' | 'ACTIVE_ROTATION' | 'GITHUB_REPOSITORY_RECOVERY',
   ): Promise<SolSessionState> {
     const current = await this.requireState();
     this.assertProjectAndAccount(conversation);
