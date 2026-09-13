@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CodexRunner,
+  codexExecutableCandidates,
   promptForTask,
   type CodexExecFile,
   type CodexProcess,
@@ -112,6 +113,26 @@ function processFor(output: string, options: { exitCode?: number; never?: boolea
 }
 
 describe('CodexRunner', () => {
+  it('lists the standalone Windows Codex installation fallback locations', () => {
+    expect(
+      codexExecutableCandidates(
+        {
+          LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local',
+          USERPROFILE: 'C:\\Users\\tester',
+          APPDATA: 'C:\\Users\\tester\\AppData\\Roaming',
+        },
+        ['9.9.9', '1.0.0'],
+        'win32',
+      ),
+    ).toEqual([
+      'C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\9.9.9\\codex.exe',
+      'C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\1.0.0\\codex.exe',
+      'C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe',
+      'C:\\Users\\tester\\.local\\bin\\codex.exe',
+      'C:\\Users\\tester\\AppData\\Roaming\\npm\\codex.exe',
+    ]);
+  });
+
   it('adds an execution authorization contract before running Luna', () => {
     const prompt = JSON.parse(
       promptForTask(task(), {

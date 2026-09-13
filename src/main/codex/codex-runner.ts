@@ -1,4 +1,4 @@
-import { appendFile, access, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { appendFile, access, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -43,6 +43,28 @@ const DEFAULT_STREAM_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const PROTECTED_PATHS = ['docs/superpowers', 'docs/superpowers/'];
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
+export function codexExecutableCandidates(
+  env: NodeJS.ProcessEnv = process.env,
+  versionDirectories: readonly string[] = [],
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform !== 'win32') return [];
+  const candidates: string[] = [];
+  const localAppData = env.LOCALAPPDATA?.trim();
+  if (localAppData) {
+    const binDirectory = join(localAppData, 'OpenAI', 'Codex', 'bin');
+    for (const versionDirectory of versionDirectories) {
+      candidates.push(join(binDirectory, versionDirectory, 'codex.exe'));
+    }
+    candidates.push(join(binDirectory, 'codex.exe'));
+  }
+  const userProfile = env.USERPROFILE?.trim();
+  if (userProfile) candidates.push(join(userProfile, '.local', 'bin', 'codex.exe'));
+  const appData = env.APPDATA?.trim();
+  if (appData) candidates.push(join(appData, 'npm', 'codex.exe'));
+  return [...new Set(candidates)];
+}
 
 function redact(value: string): string {
   return value
@@ -1052,17 +1074,61 @@ export class CodexRunner {
       }
     }
     const locator = process.platform === 'win32' ? 'where.exe' : 'which';
+    const checkedPaths: string[] = [];
+    let lookupError: unknown;
     try {
       const result = await this.execFile(locator, ['codex'], { shell: false, windowsHide: true });
-      const executable = result.stdout
+      const pathResults = result.stdout
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .find((line) => line !== '');
-      if (executable === undefined) throw new Error('no executable path');
-      return executable;
+        .filter((line) => line !== '')
+        .map((line) => line.replace(/^"(.*)"$/, '$1'));
+      checkedPaths.push(...pathResults);
+      for (const executable of pathResults) {
+        try {
+          if ((await stat(executable)).isFile()) return executable;
+        } catch {
+          // Continue to the known installation locations below.
+        }
+      }
+      lookupError = new Error(pathResults.length === 0 ? 'no executable path' : 'PATH entries are not files');
     } catch (error) {
-      throw new CodexRunnerError('CLI_NOT_FOUND', 'Codex executable could not be located', {}, { cause: error });
+      lookupError = error;
     }
+
+    if (process.platform === 'win32') {
+      const binDirectory = process.env.LOCALAPPDATA
+        ? join(process.env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin')
+        : null;
+      let versionDirectories: string[] = [];
+      if (binDirectory !== null) {
+        try {
+          versionDirectories = (await readdir(binDirectory, { withFileTypes: true }))
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => entry.name)
+            .sort()
+            .reverse();
+        } catch {
+          // The fallback list below still covers the other common locations.
+        }
+      }
+      const knownCandidates = codexExecutableCandidates(process.env, versionDirectories);
+      checkedPaths.push(...knownCandidates);
+      for (const executable of knownCandidates) {
+        try {
+          if ((await stat(executable)).isFile()) return executable;
+        } catch {
+          // Try the next known location.
+        }
+      }
+    }
+
+    throw new CodexRunnerError(
+      'CLI_NOT_FOUND',
+      'Codex executable could not be located. PATH and known Windows installation locations were checked.',
+      { checkedPaths: [...new Set(checkedPaths)].slice(0, 20) },
+      { cause: lookupError },
+    );
   }
 
   private async assertTargetRepository(repositoryPath: string): Promise<string> {
