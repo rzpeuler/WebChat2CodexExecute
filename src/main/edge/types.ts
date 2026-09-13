@@ -97,6 +97,7 @@ export interface CdpTransport {
 export interface EdgeAdapterRules {
   version: string;
   assistantSelectors: readonly string[];
+  finalAnswerSelectors: readonly string[];
   thinkingSelectors: readonly string[];
   errorSelectors: readonly string[];
   loginSelectors: readonly string[];
@@ -113,6 +114,7 @@ export interface EdgePageSnapshot {
   accountFingerprint: string | null;
   latestAssistantText: string;
   latestAssistantHash: string | null;
+  finalAnswerBoundaryFound?: boolean;
   statusText: string;
   errorText: string;
   loginWall: boolean;

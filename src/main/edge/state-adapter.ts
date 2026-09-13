@@ -12,6 +12,7 @@ export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
     '[data-message-author-role="assistant"]',
     'article[data-testid*="conversation-turn"] [data-message-author-role="assistant"]',
   ],
+  finalAnswerSelectors: ['[data-message-content]', '[data-testid*="markdown"]', '.markdown', '.prose'],
   thinkingSelectors: ['[aria-busy="true"]', '[data-testid*="stop"], button[aria-label*="Stop"]'],
   errorSelectors: ['[role="alert"]', '[data-testid*="error"]'],
   loginSelectors: ['input[type="email"]', 'button[data-testid*="login"]', '[data-testid*="logged-out"]'],
@@ -43,11 +44,36 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
   const assistantNodes = visibleAll(${JSON.stringify(rules.assistantSelectors)});
   const assistantNode = assistantNodes.at(-1) || null;
   const assistantRootText = text(assistantNode);
-  // Return the complete assistant turn. Node-side extraction scans this whole
-  // text and delegates every candidate to the real Writing Block validator;
-  // selecting a descendant or the longest fragment here can splice together
-  // an incomplete thought and a valid final block.
-  const finalAssistant = assistantRootText;
+  const normalizeMarkers = (value) => value
+    .replaceAll('<WRITING_BLOCK', '[WRITING_BLOCK')
+    .replaceAll('</WRITING_BLOCK>', '[/WRITING_BLOCK]');
+  const isFinalPayload = (value) => {
+    const normalized = normalizeMarkers(value);
+    const firstOpen = normalized.indexOf('[WRITING_BLOCK');
+    const lastClose = normalized.lastIndexOf('[/WRITING_BLOCK]');
+    const openCount = (normalized.match(/\\[WRITING_BLOCK\\b/g) || []).length;
+    const closeCount = (normalized.match(/\\[\\/WRITING_BLOCK\\]/g) || []).length;
+    const writingBlockPayload = firstOpen === 0 && lastClose >= firstOpen &&
+      normalized.slice(lastClose + '[/WRITING_BLOCK]'.length).trim() === '' &&
+      openCount > 0 && openCount === closeCount;
+    const userPayload = normalized.startsWith('[USER_MESSAGE]') && normalized.endsWith('[/USER_MESSAGE]');
+    return writingBlockPayload || userPayload;
+  };
+  const finalAnswerCandidates = assistantNode === null
+    ? []
+    : [assistantNode, ...visibleAll(${JSON.stringify(rules.finalAnswerSelectors)}, assistantNode),
+       ...Array.from(assistantNode.querySelectorAll('*')).filter(isVisible)]
+      .map((node, index) => {
+        let depth = 0;
+        for (let parent = node.parentElement; parent !== null && parent !== assistantNode; parent = parent.parentElement)
+          depth += 1;
+        return { node, index, depth, value: text(node) };
+      })
+      .filter(({ value }) => isFinalPayload(value));
+  const finalAnswer = finalAnswerCandidates
+    .sort((left, right) => right.depth - left.depth || right.index - left.index)
+    .at(0);
+  const finalAssistant = finalAnswer?.value || assistantRootText;
   const errors = all(${JSON.stringify(rules.errorSelectors)}).map(text).filter(Boolean).join('\\n');
   const status = all(['[aria-live="polite"]', '[role="status"]', 'button[aria-label]']).map(text).filter(Boolean).join('\\n');
   const project = document.querySelector('[data-project-id], meta[name="chatgpt-project-id"]');
@@ -76,6 +102,7 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
     projectFingerprint: projectValue || projectFromUrl || null,
     accountFingerprint: accountValue || (accountFromStorage ? 'user-' + accountFromStorage : null),
     latestAssistantText: finalAssistant,
+    finalAnswerBoundaryFound: finalAnswer !== undefined,
     statusText: status,
     errorText: errors,
     loginWall,
@@ -166,7 +193,7 @@ export class EdgeStateAdapter {
     const rawText = normalizeWritingBlockMarkers(
       typeof raw.latestAssistantText === 'string' ? raw.latestAssistantText : '',
     );
-    const text = extractWritingBlockTail(rawText) ?? rawText;
+    const text = raw.finalAnswerBoundaryFound === false ? rawText : (extractWritingBlockTail(rawText) ?? rawText);
     const errorText = typeof raw.errorText === 'string' ? raw.errorText : '';
     const statusText = typeof raw.statusText === 'string' ? raw.statusText : '';
     const combined = `${errorText}\n${statusText}`;
@@ -183,6 +210,9 @@ export class EdgeStateAdapter {
       accountFingerprint,
       latestAssistantText: text,
       latestAssistantHash: hashMessage(text),
+      ...(typeof raw.finalAnswerBoundaryFound === 'boolean'
+        ? { finalAnswerBoundaryFound: raw.finalAnswerBoundaryFound }
+        : {}),
       statusText,
       errorText,
       loginWall: booleanOrFalse(raw.loginWall),

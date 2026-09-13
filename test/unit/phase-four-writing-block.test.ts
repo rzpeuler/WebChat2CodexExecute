@@ -579,6 +579,16 @@ line two"
     expect(() => parseWritingBlocks(source)).toThrowError(expect.objectContaining({ code }));
   });
 
+  it('reports the JSON position and escaped nearby source context for diagnostics', () => {
+    const source = '[WRITING_BLOCK type="LUNA_TASK"]\n{"title":"bad" "objective":"x"}\n[/WRITING_BLOCK]';
+    expect(() => parseWritingBlocks(source)).toThrowError(
+      expect.objectContaining({
+        code: 'WRITING_BLOCK_BODY_INVALID_JSON',
+        message: expect.stringMatching(/解析位置：\d+.*位置附近文本：".*title/),
+      }),
+    );
+  });
+
   it('rejects a second Luna task but allows multiple governance/freeze blocks', () => {
     expect(() =>
       parseWritingBlocks(`${block('LUNA_TASK', task)}\n${block('LUNA_TASK', { ...task, task_id: 'task-2' })}`),

@@ -678,10 +678,10 @@ describe('dedicated Edge profile and CDP state adapter', () => {
   it('extracts a visible complete Writing Block candidate inside the assistant message', () => {
     const script = domSnapshotScript();
     expect(script).toContain('const assistantRootText = text(assistantNode);');
-    expect(script).toContain('const finalAssistant = assistantRootText;');
-    expect(script).toContain('Node-side extraction scans this whole');
-    expect(script).not.toContain('assistantCandidates');
-    expect(script).not.toContain('right.value.length - left.value.length');
+    expect(script).toContain('const finalAnswerCandidates = assistantNode === null');
+    expect(script).toContain('const finalAssistant = finalAnswer?.value || assistantRootText;');
+    expect(script).toContain('finalAnswerBoundaryFound: finalAnswer !== undefined');
+    expect(script).toContain('const isFinalPayload = (value) =>');
     expect(script).toContain('const loginWall = authPath || explicitLoginNodes.length > 0');
   });
 

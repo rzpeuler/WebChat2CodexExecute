@@ -484,10 +484,20 @@ function assertNoReservedClosingMarker(fields: Record<string, unknown>, blockInd
   }
 }
 
-function jsonParsePosition(error: unknown): string {
+function jsonParseDiagnostic(error: unknown, body: string, bodyOffset: number): string {
   if (!(error instanceof Error)) return '';
-  const position = /(?:position|column)\s+(\d+)/i.exec(error.message)?.[1];
-  return position === undefined ? '' : `解析位置：${position}。`;
+  const positionText = /position\s+(\d+)/i.exec(error.message)?.[1];
+  if (positionText === undefined) return '';
+  const position = Number.parseInt(positionText, 10);
+  if (!Number.isSafeInteger(position) || position < 0) return `解析位置：${positionText}。`;
+  const trimmedStart = body.length - body.trimStart().length;
+  const contextStart = Math.max(0, position - 100);
+  const contextEnd = Math.min(body.trimStart().length, position + 100);
+  const context = body.trimStart().slice(contextStart, contextEnd);
+  return (
+    `解析位置：${positionText}（正文偏移；规范化块内偏移：${bodyOffset + trimmedStart + position}）。` +
+    `位置附近文本：${JSON.stringify(context)}。`
+  );
 }
 
 function isJsonObjectCandidate(value: string): boolean {
@@ -739,7 +749,12 @@ function escapeRawJsonStringControls(input: string): string {
   return changed ? output : input;
 }
 
-function parseBody(body: string, blockIndex: number, blockType: WritingBlockType): Record<string, unknown> {
+function parseBody(
+  body: string,
+  blockIndex: number,
+  blockType: WritingBlockType,
+  bodyOffset: number,
+): Record<string, unknown> {
   const trimmed = body.trim();
   if (trimmed.length === 0) {
     throw new WritingBlockProtocolError('WRITING_BLOCK_BODY_NOT_OBJECT', '正文为空', {
@@ -773,7 +788,7 @@ function parseBody(body: string, blockIndex: number, blockType: WritingBlockType
       }
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_BODY_INVALID_JSON',
-        `JSON 正文无效。请检查引号、反斜杠、注释、尾逗号和对象括号。${jsonParsePosition(error)}`,
+        `JSON 正文无效。请检查引号、反斜杠、注释、尾逗号和对象括号。${jsonParseDiagnostic(error, body, bodyOffset)}`,
         { blockIndex, blockType, cause: error },
       );
     }
@@ -1106,7 +1121,7 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
     let fields: Record<string, unknown>;
     let block: WritingBlock;
     try {
-      fields = parseBody(body, blockIndex, header.type);
+      fields = parseBody(body, blockIndex, header.type, header.end);
       block = buildBlock(header.type, fields, body, blockIndex);
     } catch (error) {
       if (error instanceof WritingBlockProtocolError) {
