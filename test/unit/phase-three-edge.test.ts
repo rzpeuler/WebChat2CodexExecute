@@ -8,6 +8,7 @@ import {
   domSnapshotScript,
   EdgeStateAdapter,
   hasIncompleteWritingBlock,
+  hasMixedWritingBlockContent,
   hashMessage,
   projectFingerprintFromChatGptUrl,
   selectChatGptProjectTargets,
@@ -514,6 +515,16 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     expect(hasIncompleteWritingBlock('[WRITING_BLOCK]x[/WRITING_BLOCK]')).toBe(false);
   });
 
+  it('keeps mixed reasoning text ambiguous instead of handing it to the strict parser', async () => {
+    const transport = new FakeTransport();
+    transport.value.latestAssistantText = '思考过程\n[WRITING_BLOCK type="LUNA_TASK"]\n{}\n[/WRITING_BLOCK]';
+    const adapter = new EdgeStateAdapter(transport, { stableSampleCount: 2 });
+    await adapter.sample('target-1');
+    await expect(adapter.sample('target-1')).resolves.toMatchObject({ status: 'AMBIGUOUS' });
+    expect(hasMixedWritingBlockContent(transport.value.latestAssistantText as string)).toBe(true);
+    expect(hasMixedWritingBlockContent('[WRITING_BLOCK type="LUNA_TASK"]\n{}\n[/WRITING_BLOCK]')).toBe(false);
+  });
+
   it('persists an ownership token and rejects an external process on a reused port', async () => {
     const profileDirectory = await mkdtemp(join(tmpdir(), 'web-chat2codex-edge-'));
     const ownershipFilePath = join(profileDirectory, 'ownership.json');
@@ -626,7 +637,8 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     expect(script).toContain("const OPEN_MARKER = '[WRITING_BLOCK';");
     expect(script).toContain("const ANGLE_OPEN_MARKER = '<WRITING_BLOCK';");
     expect(script).toContain('const assistantCandidates = assistantNode === null');
-    expect(script).toContain('const finalAssistant = assistantCandidates.at(-1)?.value || text(assistantNode);');
+    expect(script).toContain('const finalAssistant = assistantCandidates');
+    expect(script).toContain('isPureWritingBlockText');
     expect(script).toContain('const loginWall = authPath || explicitLoginNodes.length > 0');
   });
 

@@ -17,9 +17,9 @@ export type GitErrorCode =
   | 'PUSH_FAILED'
   | 'COMMAND_FAILED';
 
-export type GitManualOperationName = 'align-latest-baseline' | 'commit-and-push';
+export type GitManualOperationName = 'align-latest-baseline' | 'commit-and-push' | 'discard-worktree-changes';
 export type GitManualOperationStatus =
-  'IDLE' | 'CHECKING_WORKTREE' | 'COMMITTING' | 'PUSHING' | 'ALIGNING_BASELINE' | 'COMPLETED' | 'FAILED';
+  'IDLE' | 'CHECKING_WORKTREE' | 'COMMITTING' | 'PUSHING' | 'ALIGNING_BASELINE' | 'DISCARDING' | 'COMPLETED' | 'FAILED';
 
 export interface GitManualCommitAndPushResult {
   phase: GitManualOperationStatus;

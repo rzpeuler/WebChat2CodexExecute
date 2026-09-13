@@ -401,6 +401,21 @@ describe('GitController', () => {
     expect(commitCount).toBe(1);
   });
 
+  it('stashes tracked and untracked worktree changes before confirming a clean state', async () => {
+    const { root } = await repository();
+    const controller = new GitController();
+    await writeFile(join(root, 'README.md'), '# changed\n', 'utf8');
+    await writeFile(join(root, 'untracked.txt'), 'recoverable\n', 'utf8');
+
+    const result = await controller.discardWorktreeChanges(root);
+
+    expect(result).toMatchObject({ phase: 'COMPLETED', clean: true, pushed: false });
+    expect(await command(root, ['status', '--porcelain'])).toBe('');
+    expect(await command(root, ['stash', 'list'])).toContain('web-chat2codex discard');
+    expect(await readFile(join(root, 'README.md'), 'utf8')).not.toContain('# changed');
+    await expect(readFile(join(root, 'untracked.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('refuses a remote advance before manual push and never force pushes', async () => {
     const { root, remote } = await repository();
     const external = join(dirname(root), 'manual-external');

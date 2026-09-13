@@ -11,6 +11,8 @@ export const DASHBOARD_COMMANDS = [
   'stage-goal-review',
   'align-latest-baseline',
   'commit-and-push',
+  'discard-worktree-changes',
+  'finish-round-wait-sol',
   'open-edge',
   'open-project',
   'view-report',
@@ -18,8 +20,9 @@ export const DASHBOARD_COMMANDS = [
 
 export type DashboardCommandName = (typeof DASHBOARD_COMMANDS)[number];
 export type DangerousDashboardCommandName = 'start' | 'pause' | 'retry-current-stage' | 'rebind';
-export type ManualGitDashboardCommandName = 'align-latest-baseline' | 'commit-and-push';
-export type DashboardConfirmationCommandName = DangerousDashboardCommandName | ManualGitDashboardCommandName;
+export type ManualGitDashboardCommandName = 'align-latest-baseline' | 'commit-and-push' | 'discard-worktree-changes';
+export type DashboardConfirmationCommandName =
+  DangerousDashboardCommandName | ManualGitDashboardCommandName | 'finish-round-wait-sol';
 
 export const DASHBOARD_CONFIRMATION_COMMANDS = [
   'start',
@@ -28,6 +31,8 @@ export const DASHBOARD_CONFIRMATION_COMMANDS = [
   'rebind',
   'align-latest-baseline',
   'commit-and-push',
+  'discard-worktree-changes',
+  'finish-round-wait-sol',
 ] as const satisfies readonly DashboardConfirmationCommandName[];
 
 export interface DashboardActionState {
@@ -62,13 +67,16 @@ export type DashboardCommand =
   | { command: 'continue-interrupted' }
   | { command: 'governance-consistency-check' }
   | { command: 'stage-goal-review' }
+  | { command: 'finish-round-wait-sol'; confirm: true }
   | { command: 'open-edge' }
   | { command: 'open-project' }
   | ViewReportDashboardCommand;
 
 /** Manual Git commands are declared here for the shared boundary and wired in a later task. */
 export type ManualGitDashboardCommand =
-  { command: 'align-latest-baseline'; confirm: true } | { command: 'commit-and-push'; confirm: true };
+  | { command: 'align-latest-baseline'; confirm: true }
+  | { command: 'commit-and-push'; confirm: true }
+  | { command: 'discard-worktree-changes'; confirm: true };
 
 export interface DashboardCommandResult {
   accepted: boolean;
@@ -124,8 +132,16 @@ export interface DashboardStaleTaskSnapshot {
 }
 
 export interface DashboardManualGitOperationSnapshot {
-  operation: 'align-latest-baseline' | 'commit-and-push';
-  status: 'IDLE' | 'CHECKING_WORKTREE' | 'COMMITTING' | 'PUSHING' | 'ALIGNING_BASELINE' | 'COMPLETED' | 'FAILED';
+  operation: 'align-latest-baseline' | 'commit-and-push' | 'discard-worktree-changes';
+  status:
+    | 'IDLE'
+    | 'CHECKING_WORKTREE'
+    | 'COMMITTING'
+    | 'PUSHING'
+    | 'ALIGNING_BASELINE'
+    | 'DISCARDING'
+    | 'COMPLETED'
+    | 'FAILED';
   startedAt: string;
   updatedAt: string;
   result: {
@@ -181,6 +197,26 @@ export interface DashboardExecutionMetricsSnapshot {
   totalRoundsStarted: number;
   totalRoundsCompleted: number;
   sessionCount: number;
+}
+
+export const DASHBOARD_ROUND_HISTORY_LIMIT = 100;
+
+export interface DashboardRoundRecord {
+  roundId: string;
+  sequence: number;
+  status: string;
+  taskId: string | null;
+  taskKind: string | null;
+  taskTitle: string | null;
+  lunaStatus: string | null;
+  reportSummary: string | null;
+  reportPath: string | null;
+  testsStatus: string | null;
+  blockTypes: string[];
+  details: string[];
+  startedAt: string;
+  completedAt: string | null;
+  elapsedMs: number;
 }
 
 export const LOOP_GRAPH_NODE_DEFINITIONS = [
@@ -242,6 +278,7 @@ export interface DashboardSnapshot {
   stage: string;
   status: TopLevelStatus;
   taskId: string | null;
+  taskTitle: string | null;
   governanceRevision: string | number | null;
   architectureRevisions: Array<string | number>;
   luna: DashboardLunaSnapshot;
@@ -256,6 +293,7 @@ export interface DashboardSnapshot {
   recovery: DashboardRecoverySnapshot | null;
   autoRepair: DashboardAutoRepairSnapshot | null;
   executionMetrics: DashboardExecutionMetricsSnapshot;
+  roundHistory: DashboardRoundRecord[];
   loopGraph: LoopGraphSnapshot;
   actions: DashboardActions;
 }
@@ -268,6 +306,7 @@ export interface DashboardSnapshotSource {
   stage?: string;
   status?: TopLevelStatus;
   taskId?: string | null;
+  taskTitle?: string | null;
   governanceRevision?: string | number | null;
   architectureRevisions?: Array<string | number>;
   luna?: Partial<DashboardLunaSnapshot>;
@@ -279,6 +318,7 @@ export interface DashboardSnapshotSource {
   recovery?: unknown;
   autoRepair?: unknown;
   executionMetrics?: unknown;
+  roundHistory?: unknown;
   loopGraph?: LoopGraphSnapshotSource | null;
   actions?: Partial<Record<DashboardCommandName, Partial<DashboardActionState>>>;
 }
@@ -346,6 +386,7 @@ export function sanitizeDashboardSnapshot(source: DashboardSnapshotSource): Dash
     stage: sanitizeSafeText(source.stage, 96) || 'INITIALIZATION',
     status: source.status !== undefined && isTopLevelStatus(source.status) ? source.status : 'IDLE',
     taskId: sanitizeSafeText(source.taskId, 128) || null,
+    taskTitle: sanitizeSafeText(source.taskTitle, 512) || null,
     governanceRevision: sanitizeRevision(source.governanceRevision),
     architectureRevisions: (source.architectureRevisions ?? [])
       .map((revision) => sanitizeRevision(revision))
@@ -365,8 +406,53 @@ export function sanitizeDashboardSnapshot(source: DashboardSnapshotSource): Dash
     recovery: sanitizeDashboardRecovery(source.recovery),
     autoRepair: sanitizeDashboardAutoRepair(source.autoRepair),
     executionMetrics: sanitizeDashboardExecutionMetrics(source.executionMetrics),
+    roundHistory: sanitizeDashboardRoundHistory(source.roundHistory),
     loopGraph: sanitizeLoopGraph(source.loopGraph),
     actions: sanitizeDashboardActions(source.actions),
+  };
+}
+
+function sanitizeDashboardRoundHistory(value: unknown): DashboardRoundRecord[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(-DASHBOARD_ROUND_HISTORY_LIMIT)
+    .map((item) => sanitizeDashboardRoundRecord(item))
+    .filter((item): item is DashboardRoundRecord => item !== null);
+}
+
+function sanitizeDashboardRoundRecord(value: unknown): DashboardRoundRecord | null {
+  if (!isRecord(value)) return null;
+  const roundId = sanitizeOptionalIdentifier(value.roundId);
+  const startedAt = sanitizeTimestamp(value.startedAt);
+  if (roundId === null || startedAt === null) return null;
+  return {
+    roundId,
+    sequence: normalizeBoundedInteger(value.sequence, 0, Number.MAX_SAFE_INTEGER),
+    status: sanitizeSafeText(value.status, 64) || 'UNKNOWN',
+    taskId: sanitizeSafeText(value.taskId, 128) || null,
+    taskKind: sanitizeSafeText(value.taskKind, 64) || null,
+    taskTitle: sanitizeSafeText(value.taskTitle, 512) || null,
+    lunaStatus: sanitizeSafeText(value.lunaStatus, 64) || null,
+    reportSummary: sanitizeSafeText(value.reportSummary, 2048) || null,
+    reportPath: sanitizeSafeText(value.reportPath, 1024) || null,
+    testsStatus: sanitizeSafeText(value.testsStatus, 64) || null,
+    blockTypes: Array.isArray(value.blockTypes)
+      ? value.blockTypes
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => sanitizeSafeText(item, 64))
+          .filter((item) => item.length > 0)
+          .slice(0, 32)
+      : [],
+    details: Array.isArray(value.details)
+      ? value.details
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => sanitizeSafeText(item, 512))
+          .filter((item) => item.length > 0)
+          .slice(0, 32)
+      : [],
+    startedAt,
+    completedAt: sanitizeTimestamp(value.completedAt),
+    elapsedMs: normalizeBoundedInteger(value.elapsedMs, 0, Number.MAX_SAFE_INTEGER),
   };
 }
 
@@ -456,13 +542,19 @@ function sanitizeManualGitOperation(value: unknown): DashboardManualGitOperation
   if (!isRecord(value)) return null;
   const operation = value.operation;
   const status = value.status;
-  if (operation !== 'align-latest-baseline' && operation !== 'commit-and-push') return null;
+  if (
+    operation !== 'align-latest-baseline' &&
+    operation !== 'commit-and-push' &&
+    operation !== 'discard-worktree-changes'
+  )
+    return null;
   if (
     status !== 'IDLE' &&
     status !== 'CHECKING_WORKTREE' &&
     status !== 'COMMITTING' &&
     status !== 'PUSHING' &&
     status !== 'ALIGNING_BASELINE' &&
+    status !== 'DISCARDING' &&
     status !== 'COMPLETED' &&
     status !== 'FAILED'
   )

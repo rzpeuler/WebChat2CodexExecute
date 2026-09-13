@@ -4,6 +4,7 @@ import type {
   DashboardActionState,
   DashboardCommand,
   DashboardCommandName,
+  DashboardRoundRecord,
   DashboardSnapshot,
   LoopGraphNodeId,
   LoopGraphNodeSnapshot,
@@ -51,6 +52,10 @@ const dashboardGitOperationElement = document.querySelector<HTMLElement>('#dashb
 const dashboardErrorElement = document.querySelector<HTMLElement>('#dashboard-error');
 const dashboardSuggestionElement = document.querySelector<HTMLElement>('#dashboard-suggestion');
 const dashboardActionFeedbackElement = document.querySelector<HTMLElement>('#dashboard-action-feedback');
+const roundHistoryBodyElement = document.querySelector<HTMLTableSectionElement>('#round-history-body');
+const roundHistoryPreviousButton = document.querySelector<HTMLButtonElement>('#round-history-previous');
+const roundHistoryNextButton = document.querySelector<HTMLButtonElement>('#round-history-next');
+const roundHistoryPageElement = document.querySelector<HTMLElement>('#round-history-page');
 const loopGraphElement = document.querySelector<HTMLElement>('#loop-graph');
 const loopGraphRoundElement = document.querySelector<HTMLElement>('#loop-graph-round');
 const loopGraphDetailsElement = document.querySelector<HTMLElement>('#loop-graph-details');
@@ -78,6 +83,8 @@ let lastCurrentLoopGraphNodeId: LoopGraphNodeSnapshot['id'] | null = null;
 let lastDashboardActionFeedback = '无';
 const loopGraphNodeButtons = new Map<LoopGraphNodeId, LoopGraphButtonParts>();
 const pendingDashboardCommands = new Set<DashboardCommandName>();
+let roundHistoryPage = 0;
+const ROUND_HISTORY_PAGE_SIZE = 5;
 
 const dangerousDashboardCommands = new Set<DashboardCommandName>([
   'start',
@@ -86,6 +93,8 @@ const dangerousDashboardCommands = new Set<DashboardCommandName>([
   'rebind',
   'align-latest-baseline',
   'commit-and-push',
+  'discard-worktree-changes',
+  'finish-round-wait-sol',
 ]);
 const dashboardCommandNames: DashboardCommandName[] = [
   'start',
@@ -97,6 +106,8 @@ const dashboardCommandNames: DashboardCommandName[] = [
   'stage-goal-review',
   'align-latest-baseline',
   'commit-and-push',
+  'discard-worktree-changes',
+  'finish-round-wait-sol',
   'open-edge',
   'open-project',
   'view-report',
@@ -432,13 +443,19 @@ function getDashboardSuggestion(snapshot: DashboardSnapshot): string {
 function getManualGitOperationLabel(snapshot: DashboardSnapshot): string {
   const operation = snapshot.manualGitOperation;
   if (operation === null) return '无';
-  const operationLabel = operation.operation === 'commit-and-push' ? '提交并同步' : '对齐基线';
+  const operationLabel =
+    operation.operation === 'commit-and-push'
+      ? '提交并同步'
+      : operation.operation === 'discard-worktree-changes'
+        ? '放弃未提交修改'
+        : '对齐基线';
   const statusLabels: Record<string, string> = {
     IDLE: '待机',
     CHECKING_WORKTREE: '检查工作区',
     COMMITTING: '提交中',
     PUSHING: '推送中',
     ALIGNING_BASELINE: '刷新基线',
+    DISCARDING: '清理中',
     COMPLETED: '已完成',
     FAILED: '失败',
   };
@@ -625,6 +642,78 @@ function renderLoopGraph(snapshot: DashboardSnapshot): void {
   renderLoopGraphDetails(selectedLoopGraphNodeId === null ? null : loopGraphNode(snapshot, selectedLoopGraphNodeId));
 }
 
+function roundHistoryDetail(record: DashboardRoundRecord): string {
+  return [
+    `轮次：${record.sequence}`,
+    `状态：${record.status}`,
+    `任务类型：${record.taskKind ?? (record.blockTypes.join(' + ') || '—')}`,
+    `任务标题：${record.taskTitle ?? '—'}`,
+    `任务编号：${record.taskId ?? '—'}`,
+    `Luna 结果：${record.lunaStatus ?? '—'}`,
+    `报告摘要：${record.reportSummary ?? '—'}`,
+    `测试总状态：${record.testsStatus ?? '—'}`,
+    `报告路径：${record.reportPath ?? '—'}`,
+    `执行耗时：${formatDuration(record.elapsedMs)}`,
+    `任务完成时间：${record.completedAt === null ? '—' : formatUpdatedAt(record.completedAt)}`,
+    ...(record.details.length === 0 ? [] : ['', '处理详情：', ...record.details]),
+  ].join('\n');
+}
+
+function appendRoundHistoryCell(row: HTMLTableRowElement, value: string, fullValue = value): void {
+  const cell = document.createElement('td');
+  cell.textContent = value;
+  cell.title = fullValue;
+  row.append(cell);
+}
+
+function renderRoundHistory(snapshot: DashboardSnapshot): void {
+  if (roundHistoryBodyElement === null) return;
+  const records = [...snapshot.roundHistory].reverse();
+  const totalPages = Math.max(1, Math.ceil(records.length / ROUND_HISTORY_PAGE_SIZE));
+  roundHistoryPage = Math.min(roundHistoryPage, totalPages - 1);
+  const pageRecords = records.slice(
+    roundHistoryPage * ROUND_HISTORY_PAGE_SIZE,
+    (roundHistoryPage + 1) * ROUND_HISTORY_PAGE_SIZE,
+  );
+  roundHistoryBodyElement.replaceChildren();
+  for (const record of pageRecords) {
+    const row = document.createElement('tr');
+    row.className = 'round-history-row';
+    row.tabIndex = 0;
+    const taskType = record.taskKind ?? (record.blockTypes.length > 0 ? record.blockTypes.join(' + ') : '—');
+    const title = record.taskTitle ?? '—';
+    const summary = record.reportSummary ?? '—';
+    appendRoundHistoryCell(row, String(record.sequence));
+    appendRoundHistoryCell(row, taskType, taskType);
+    appendRoundHistoryCell(row, title, title);
+    appendRoundHistoryCell(row, record.lunaStatus ?? '—');
+    appendRoundHistoryCell(row, summary, summary);
+    appendRoundHistoryCell(row, record.testsStatus ?? '—');
+    appendRoundHistoryCell(row, formatDuration(record.elapsedMs));
+    appendRoundHistoryCell(row, record.completedAt === null ? '—' : formatUpdatedAt(record.completedAt));
+    const openDetails = (): void =>
+      openContentDialog(`第 ${record.sequence} 轮循环详情`, roundHistoryDetail(record), row);
+    row.addEventListener('click', openDetails);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openDetails();
+      }
+    });
+    roundHistoryBodyElement.append(row);
+  }
+  for (let index = pageRecords.length; index < ROUND_HISTORY_PAGE_SIZE; index += 1) {
+    const row = document.createElement('tr');
+    row.className = 'round-history-placeholder';
+    for (let cellIndex = 0; cellIndex < 8; cellIndex += 1) row.append(document.createElement('td'));
+    roundHistoryBodyElement.append(row);
+  }
+  if (roundHistoryPageElement !== null)
+    roundHistoryPageElement.textContent = `第 ${roundHistoryPage + 1} / ${totalPages} 页`;
+  if (roundHistoryPreviousButton !== null) roundHistoryPreviousButton.disabled = roundHistoryPage >= totalPages - 1;
+  if (roundHistoryNextButton !== null) roundHistoryNextButton.disabled = roundHistoryPage <= 0;
+}
+
 function applyDashboardActionStates(snapshot: DashboardSnapshot): void {
   document.querySelectorAll<HTMLButtonElement>('[data-dashboard-command]').forEach((button) => {
     const command = button.dataset.dashboardCommand as DashboardCommandName | undefined;
@@ -685,7 +774,8 @@ function renderDashboard(snapshot: DashboardSnapshot): void {
     dashboardStageElement.title = `${rendererSnapshot.stage} / ${rendererSnapshot.status}`;
   }
   if (dashboardNodeElement !== null) dashboardNodeElement.textContent = formatDashboardNode(rendererSnapshot);
-  if (dashboardTaskElement !== null) dashboardTaskElement.textContent = rendererSnapshot.taskId ?? '无';
+  if (dashboardTaskElement !== null)
+    dashboardTaskElement.textContent = rendererSnapshot.taskTitle ?? rendererSnapshot.taskId ?? '无';
   if (dashboardRevisionsElement !== null) {
     dashboardRevisionsElement.textContent = `${rendererSnapshot.governanceRevision ?? '—'} / ${rendererSnapshot.architectureRevisions.join(', ') || '—'}`;
   }
@@ -735,6 +825,7 @@ function renderDashboard(snapshot: DashboardSnapshot): void {
       : `最近动作：${lastDashboardActionFeedback}`;
   }
   renderLoopGraph(rendererSnapshot);
+  renderRoundHistory(rendererSnapshot);
   applyDashboardActionStates(rendererSnapshot);
 }
 
@@ -775,11 +866,20 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
       rebind: '重新绑定 Sol 会话',
       'align-latest-baseline': '对齐最新 Git 基线',
       'commit-and-push': '提交并同步 Git',
+      'discard-worktree-changes': '放弃未提交修改（将先放入 Git stash）',
+      'finish-round-wait-sol': '结束当前轮并等待 Sol 新任务',
     };
     if (!window.confirm(`确认执行“${labels[command]}”？`)) return null;
     return {
       command: command as
-        'start' | 'pause' | 'retry-current-stage' | 'rebind' | 'align-latest-baseline' | 'commit-and-push',
+        | 'start'
+        | 'pause'
+        | 'retry-current-stage'
+        | 'rebind'
+        | 'align-latest-baseline'
+        | 'commit-and-push'
+        | 'discard-worktree-changes'
+        | 'finish-round-wait-sol',
       confirm: true,
     };
   }
@@ -847,6 +947,16 @@ void loadSavedProjectConfig().catch((error) => {
 
 document.querySelectorAll<HTMLButtonElement>('[data-dashboard-command]').forEach((button) => {
   button.addEventListener('click', () => void executeDashboardCommandFromButton(button));
+});
+
+roundHistoryPreviousButton?.addEventListener('click', () => {
+  roundHistoryPage += 1;
+  if (currentSnapshot !== null) renderRoundHistory(currentSnapshot);
+});
+
+roundHistoryNextButton?.addEventListener('click', () => {
+  roundHistoryPage = Math.max(0, roundHistoryPage - 1);
+  if (currentSnapshot !== null) renderRoundHistory(currentSnapshot);
 });
 
 scanButton?.addEventListener('click', () => {

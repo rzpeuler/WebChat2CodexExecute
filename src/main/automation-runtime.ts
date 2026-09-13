@@ -558,6 +558,10 @@ export async function createAutomationRuntime(
       assertRuntimeOperationAllowed();
       return git.commitAndPushProject(...args);
     },
+    discardWorktreeChanges: (...args: Parameters<GitController['discardWorktreeChanges']>) => {
+      assertRuntimeOperationAllowed();
+      return git.discardWorktreeChanges(...args);
+    },
     syncGovernance: (...args: Parameters<GitController['syncGovernance']>) => {
       assertRuntimeOperationAllowed();
       return git.syncGovernance(...args);

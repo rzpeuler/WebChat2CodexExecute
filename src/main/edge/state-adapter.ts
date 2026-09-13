@@ -4,7 +4,7 @@ import { normalizeWritingBlockMarkers } from '../../shared/protocol/writing-bloc
 import { hasKnownIdentity, isAllowedChatGptUrl } from './url-security.js';
 
 export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
-  version: 'chatgpt-dom-2026-09-10',
+  version: 'chatgpt-dom-2026-09-13',
   assistantSelectors: [
     '[data-message-author-role="assistant"]',
     'article[data-testid*="conversation-turn"] [data-message-author-role="assistant"]',
@@ -29,6 +29,22 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
   const ANGLE_CLOSE_MARKER = '</WRITING_BLOCK>';
   const hasOpenMarker = (value) => value.includes(OPEN_MARKER) || value.includes(ANGLE_OPEN_MARKER);
   const hasCloseMarker = (value) => value.includes(CLOSE_MARKER) || value.includes(ANGLE_CLOSE_MARKER);
+  const normalizedMarkers = (value) => value
+    .replaceAll(ANGLE_OPEN_MARKER, OPEN_MARKER)
+    .replaceAll(ANGLE_CLOSE_MARKER, CLOSE_MARKER);
+  const isPureWritingBlockText = (value) => {
+    const normalized = normalizedMarkers(value);
+    const firstOpen = normalized.indexOf(OPEN_MARKER);
+    const lastClose = normalized.lastIndexOf(CLOSE_MARKER);
+    if (firstOpen < 0 || lastClose < 0 || firstOpen > lastClose) return false;
+    const openCount = normalized.match(/\\[WRITING_BLOCK\\b/g)?.length || 0;
+    const closeCount = normalized.match(/\\[\\/WRITING_BLOCK\\]/g)?.length || 0;
+    return openCount > 0 && openCount === closeCount &&
+      normalized.slice(0, firstOpen).trim() === '' &&
+      normalized.slice(lastClose + CLOSE_MARKER.length).trim() === '';
+  };
+  const writingBlockCount = (value) =>
+    (normalizedMarkers(value).match(/\\[WRITING_BLOCK\\b/g) || []).length;
   const isVisible = (node) => {
     if (!(node instanceof HTMLElement)) return false;
     const style = window.getComputedStyle(node);
@@ -47,12 +63,11 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
         .filter(isVisible)
         .map((node) => ({ node, value: text(node) }))
         .filter(({ value }) => hasOpenMarker(value) && hasCloseMarker(value))
-        .filter(({ node }) => !Array.from(node.children).some((child) => {
-          if (!isVisible(child)) return false;
-          const childText = text(child);
-          return hasOpenMarker(childText) && hasCloseMarker(childText);
-        }));
-  const finalAssistant = assistantCandidates.at(-1)?.value || text(assistantNode);
+        .filter(({ value }) => isPureWritingBlockText(value))
+        .map((candidate) => ({ ...candidate, blockCount: writingBlockCount(candidate.value) }));
+  const finalAssistant = assistantCandidates
+    .sort((left, right) => right.blockCount - left.blockCount || left.value.length - right.value.length)
+    .at(0)?.value || text(assistantNode);
   const errors = all(${JSON.stringify(rules.errorSelectors)}).map(text).filter(Boolean).join('\\n');
   const status = all(['[aria-live="polite"]', '[role="status"]', 'button[aria-label]']).map(text).filter(Boolean).join('\\n');
   const project = document.querySelector('[data-project-id], meta[name="chatgpt-project-id"]');
@@ -115,6 +130,23 @@ export function hasIncompleteWritingBlock(text: string): boolean {
   const startCount = (text.match(/\[WRITING_BLOCK\b/g) ?? []).length;
   const endCount = (text.match(/\[\/WRITING_BLOCK\]/g) ?? []).length;
   return startCount > endCount;
+}
+
+export function hasMixedWritingBlockContent(text: string): boolean {
+  const normalized = normalizeWritingBlockMarkers(text);
+  const hasOpen = normalized.includes('[WRITING_BLOCK');
+  const hasClose = normalized.includes('[/WRITING_BLOCK]');
+  if (!hasOpen || !hasClose) return false;
+  const firstOpen = normalized.indexOf('[WRITING_BLOCK');
+  const lastClose = normalized.lastIndexOf('[/WRITING_BLOCK]');
+  const openCount = (normalized.match(/\[WRITING_BLOCK\b/g) ?? []).length;
+  const closeCount = (normalized.match(/\[\/WRITING_BLOCK\]/g) ?? []).length;
+  return (
+    openCount === 0 ||
+    openCount !== closeCount ||
+    normalized.slice(0, firstOpen).trim() !== '' ||
+    normalized.slice(lastClose + '[/WRITING_BLOCK]'.length).trim() !== ''
+  );
 }
 
 export function projectFingerprintFromChatGptUrl(value: string): string | null {
@@ -204,7 +236,9 @@ export class EdgeStateAdapter {
     if (page.projectFingerprint === null || page.url === '') return 'AMBIGUOUS';
     if (page.isThinking) return 'THINKING';
     if (stableCount >= this.stableSampleCount && page.latestAssistantHash !== null) {
-      return page.writingBlockIncomplete ? 'AMBIGUOUS' : 'COMPLETED_CANDIDATE';
+      return page.writingBlockIncomplete || hasMixedWritingBlockContent(page.latestAssistantText)
+        ? 'AMBIGUOUS'
+        : 'COMPLETED_CANDIDATE';
     }
     return page.latestAssistantHash === null ? 'AMBIGUOUS' : 'THINKING';
   }

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  DASHBOARD_ROUND_HISTORY_LIMIT,
   LOOP_GRAPH_NODE_DEFINITIONS,
   sanitizeDashboardSnapshot,
   validateDashboardCommand,
@@ -7,6 +8,7 @@ import {
   type DashboardCommandResult,
   type DashboardActions,
   type DashboardBaselineSnapshot,
+  type DashboardRoundRecord,
   type DashboardSnapshot,
   type DashboardStaleTaskSnapshot,
   type LoopGraphNodeId,
@@ -78,6 +80,7 @@ const DEFAULT_STATE: OrchestratorState = {
   pendingReconciliationSync: null,
   autoRepair: null,
   executionMetrics: createDefaultExecutionMetrics(),
+  roundHistory: [],
   executionRecovery: null,
   activeSolSession: null,
 };
@@ -198,6 +201,7 @@ export class MainOrchestrator implements Orchestrator {
       stage: this.state.phase,
       status: this.state.status,
       taskId: this.state.taskId,
+      taskTitle: this.currentRoundRecord()?.taskTitle ?? null,
       governanceRevision: this.state.governanceRevision,
       architectureRevisions: this.state.architectureRevisions,
       luna: this.state.luna,
@@ -209,6 +213,7 @@ export class MainOrchestrator implements Orchestrator {
       recovery: this.state.executionRecovery,
       autoRepair: this.state.autoRepair,
       executionMetrics: this.dashboardExecutionMetrics(),
+      roundHistory: this.state.roundHistory,
       loopGraph: this.state.loopGraph,
       actions: this.dashboardActions(),
     });
@@ -281,6 +286,22 @@ export class MainOrchestrator implements Orchestrator {
         : this.state.active
           ? disabled('自动循环运行中，请先暂停后再提交同步。')
           : enabled(),
+      'discard-worktree-changes': operationBusy
+        ? disabled('已有操作正在处理中。', true)
+        : this.state.active
+          ? disabled('自动循环运行中，请先暂停后再清理工作区。')
+          : enabled(),
+      'finish-round-wait-sol': operationBusy
+        ? disabled('已有操作正在处理中。', true)
+        : this.state.active
+          ? disabled('自动循环运行中，请先暂停后再结束当前轮。')
+          : this.pendingCodeSync !== null ||
+              this.pendingReconciliationInput !== null ||
+              this.pendingReconciliationSync !== null
+            ? disabled('当前轮仍有待处理上下文，不能跳过。')
+            : this.state.loopGraph.roundId === null
+              ? disabled('当前没有可结束的循环轮次。')
+              : enabled(),
       'open-edge': this.dashboardNavigationPromises.has('open-edge')
         ? disabled('打开 Edge 操作正在处理中。', true)
         : callbackAvailable('openEdge')
@@ -426,6 +447,49 @@ export class MainOrchestrator implements Orchestrator {
     return completed ?? result('PAUSED', this.state, 'Git 提交同步未返回结果。');
   }
 
+  async discardWorktreeChanges(): Promise<OrchestratorResult> {
+    await this.initialize();
+    let completed: OrchestratorResult | undefined;
+    await this.runDashboardOperation(async () => {
+      completed = await this.withOrchestrationLock(() => this.performDiscardWorktreeChanges());
+    });
+    return completed ?? result('PAUSED', this.state, '工作区清理未返回结果。');
+  }
+
+  async finishRoundAndWaitForSol(): Promise<OrchestratorResult> {
+    await this.initialize();
+    let completed: OrchestratorResult | undefined;
+    await this.runDashboardOperation(async () => {
+      completed = await this.withOrchestrationLock(() => this.performFinishRoundAndWaitForSol());
+    });
+    return completed ?? result('PAUSED', this.state, '结束当前轮未返回结果。');
+  }
+
+  private async performFinishRoundAndWaitForSol(): Promise<OrchestratorResult> {
+    if (this.state.active) return result('WAITING', this.state, '自动循环正在运行中，请先暂停后再结束当前轮。');
+    if (
+      this.pendingCodeSync !== null ||
+      this.pendingReconciliationInput !== null ||
+      this.pendingReconciliationSync !== null
+    ) {
+      throw new OrchestratorError('ROUND_FINISH_UNSAFE', '当前轮仍有待同步代码、治理更新或恢复上下文，不能直接结束。');
+    }
+    const outputKey = this.state.executionRecovery?.outputKey ?? this.state.processedOutputKey;
+    if (outputKey !== null) this.state.processedOutputKey = outputKey;
+    this.state.active = true;
+    this.state.status = 'RUNNING';
+    this.state.phase = 'WAITING_FOR_SOL';
+    this.state.recentError = null;
+    this.state.executionRecovery = null;
+    this.state.autoRepair = null;
+    this.resumeWaitingGraph();
+    this.updateCurrentRoundRecord({ status: 'SKIPPED' }, true);
+    this.completeExecutionRound();
+    this.touchState();
+    await this.persist();
+    return result('COMPLETED', this.state, '当前轮已结束，正在等待 Sol 产生新的任务书。');
+  }
+
   async runRound(): Promise<OrchestratorResult> {
     await this.initialize();
     if (this.roundPromise !== null) return this.roundPromise;
@@ -530,6 +594,10 @@ export class MainOrchestrator implements Orchestrator {
           return accepted('BASELINE_ALIGN_ACCEPTED', (await this.alignLatestBaseline()).message);
         case 'commit-and-push':
           return accepted('GIT_SYNC_ACCEPTED', (await this.commitAndPushProject()).message);
+        case 'discard-worktree-changes':
+          return accepted('WORKTREE_DISCARD_ACCEPTED', (await this.discardWorktreeChanges()).message);
+        case 'finish-round-wait-sol':
+          return accepted('ROUND_FINISH_ACCEPTED', (await this.finishRoundAndWaitForSol()).message);
         case 'open-edge':
           return await this.invokeCallback('openEdge', '打开 Edge 回调不可用。');
         case 'open-project':
@@ -649,6 +717,38 @@ export class MainOrchestrator implements Orchestrator {
     }
   }
 
+  private async performDiscardWorktreeChanges(): Promise<OrchestratorResult> {
+    const wasIdle = this.state.status === 'IDLE' && this.state.phase === 'IDLE';
+    this.startManualGitOperation('discard-worktree-changes', 'CHECKING_WORKTREE');
+    await this.persist();
+    try {
+      if (this.git.readRepositoryStatus === undefined || this.git.discardWorktreeChanges === undefined)
+        throw new OrchestratorError('GIT_MAINTENANCE_UNAVAILABLE', '当前运行时不支持工作区清理。');
+      const before = await this.git.readRepositoryStatus(this.project.localPath);
+      if (before.clean) throw new OrchestratorError('NO_CHANGES', '工作区当前没有未提交修改。');
+      this.updateManualGitOperation('DISCARDING');
+      await this.persist();
+      const discarded = await this.git.discardWorktreeChanges(this.project.localPath);
+      const next = await this.captureConfiguredBaseline();
+      await this.adoptBaseline(next);
+      this.state.commits = {
+        local: discarded.localCommit ?? next.head,
+        remote: discarded.remoteCommit ?? next.remoteTip,
+      };
+      this.state.executionRecovery = null;
+      this.state.recentError = null;
+      this.state.active = false;
+      this.state.status = wasIdle ? 'IDLE' : 'PAUSED';
+      this.state.phase = wasIdle ? 'IDLE' : 'PAUSED';
+      this.updateManualGitOperation('COMPLETED', discarded);
+      this.touchState();
+      await this.persist();
+      return result('COMPLETED', this.state, '未提交修改已移入 Git stash，工作区已清理。');
+    } catch (error) {
+      return this.finishManualGitFailure(error, '工作区清理失败，请检查 Git 状态后重试。');
+    }
+  }
+
   private startManualGitOperation(
     operation: GitManualOperationRecord['operation'],
     status: GitManualOperationRecord['status'],
@@ -685,7 +785,7 @@ export class MainOrchestrator implements Orchestrator {
     if (current !== undefined) {
       current.status = 'FAILED';
       current.updatedAt = this.now().toISOString();
-      if (current.operation === 'commit-and-push' && (localCommit !== null || remoteCommit !== null)) {
+      if (current.operation !== 'align-latest-baseline' && (localCommit !== null || remoteCommit !== null)) {
         current.result = {
           phase: 'FAILED',
           localCommit,
@@ -1128,6 +1228,18 @@ export class MainOrchestrator implements Orchestrator {
     try {
       await this.setPhase('PARSING', 'RUNNING');
       parsed = parseWritingBlocks(observation.latestAssistantText);
+      this.updateCurrentRoundRecord({
+        status: 'PARSED',
+        taskId: parsed.lunaTask?.fields.task_id ?? null,
+        taskKind: parsed.lunaTask?.fields.task_kind ?? null,
+        taskTitle: parsed.lunaTask?.fields.title ?? null,
+        blockTypes: parsed.blocks.map((block) => block.type),
+        details: compactDetails([
+          `Writing Block：${parsed.blocks.length}`,
+          `架构更新：${parsed.architectureFreezes.length}`,
+          `治理变更：${parsed.governanceChanges.length}`,
+        ]),
+      });
       this.updateGraphNode('parse-task', {
         summary: `已验证 ${writingBlockCount(parsed)} 个 Writing Block。`,
         details: [
@@ -1198,6 +1310,23 @@ export class MainOrchestrator implements Orchestrator {
         this.state.processedOutputKey = outputKey;
         this.state.executionRecovery = null;
         this.markNodesNotApplicable(['run-luna', 'sync-code', 'notify-sol']);
+        this.updateCurrentRoundRecord(
+          {
+            status: updated ? 'COMPLETED' : 'NO_TASK',
+            taskKind: parsed.blocks.length === 0 ? null : parsed.blocks.map((block) => block.type).join(' + '),
+            taskTitle:
+              parsed.architectureFreezes.length > 0
+                ? `架构冻结 × ${parsed.architectureFreezes.length}`
+                : parsed.governanceChanges.length > 0
+                  ? `治理变更 × ${parsed.governanceChanges.length}`
+                  : null,
+            details: compactDetails([
+              `架构更新：${parsed.architectureFreezes.length}`,
+              `治理变更：${parsed.governanceChanges.length}`,
+            ]),
+          },
+          true,
+        );
         this.completeExecutionRound();
         await this.setPhase('WAITING_FOR_SOL', 'RUNNING');
         return result(
@@ -1385,12 +1514,32 @@ export class MainOrchestrator implements Orchestrator {
       repositorySnapshot: this.baseline,
     });
     this.state.luna = { status: handle.status, sessionId: handle.sessionId };
+    this.updateCurrentRoundRecord({
+      status: 'RUNNING_LUNA',
+      taskId: task.fields.task_id,
+      taskKind: task.fields.task_kind,
+      taskTitle: task.fields.title,
+      lunaStatus: 'RUNNING',
+      reportPath: task.fields.report_path,
+    });
     this.updateGraphNode('run-luna', {
       summary: `Luna 正在执行任务 ${task.fields.task_id}。`,
       details: [`任务：${task.fields.task_id}`, `会话：${handle.sessionId}`, `报告：${task.fields.report_path}`],
     });
     await this.persist();
     const run = await handle.result;
+    this.updateCurrentRoundRecord({
+      status: run.status === 'COMPLETED' ? 'LUNA_COMPLETED' : 'LUNA_FAILED',
+      lunaStatus: run.protocolResult?.status ?? run.status,
+      reportSummary: run.protocolResult?.summary ?? null,
+      reportPath: run.reportPath || task.fields.report_path,
+      testsStatus: testsStatusForRun(run),
+      details: compactDetails([
+        `任务：${task.fields.task_id}`,
+        `Luna：${run.protocolResult?.status ?? run.status}`,
+        `测试：${testsStatusForRun(run)}`,
+      ]),
+    });
     if (this.state.active === false) {
       this.setPendingCodeSync(createPendingCodeSync(task, run, this.baseline, outputKey));
       this.touchState();
@@ -1508,6 +1657,22 @@ export class MainOrchestrator implements Orchestrator {
     this.clearPendingReconciliationRetry();
     this.state.executionRecovery = null;
     this.state.retryCount = 0;
+    this.updateCurrentRoundRecord(
+      {
+        status: 'COMPLETED',
+        lunaStatus: pending.resultStatus ?? 'COMPLETED',
+        taskId: pending.taskId,
+        taskKind: pending.taskKind,
+        reportPath: pending.reportPath,
+        testsStatus: pending.testsStatus,
+        details: compactDetails([
+          `提交：${sync.commit}`,
+          `远端：${sync.remoteCommit ?? '未确认'}`,
+          `测试：${pending.testsStatus}`,
+        ]),
+      },
+      true,
+    );
     this.completeExecutionRound();
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
     return result('COMPLETED', this.state, `任务 ${pending.taskId} 已完成并同步。`);
@@ -1872,13 +2037,66 @@ export class MainOrchestrator implements Orchestrator {
     };
   }
 
+  private updateCurrentRoundRecord(update: Partial<DashboardRoundRecord>, complete = false): void {
+    const roundId = this.state.loopGraph.roundId;
+    if (roundId === null) return;
+    const index = this.state.roundHistory.findIndex((record) => record.roundId === roundId);
+    if (index < 0) return;
+    const current = this.state.roundHistory[index]!;
+    const now = this.now().toISOString();
+    const completedAt = complete ? now : (update.completedAt ?? current.completedAt);
+    const durationStart = Date.parse(current.startedAt);
+    const durationEnd = Date.parse(completedAt ?? now);
+    const elapsedMs =
+      update.elapsedMs ??
+      (Number.isNaN(durationStart) || Number.isNaN(durationEnd)
+        ? current.elapsedMs
+        : Math.max(current.elapsedMs, durationEnd - durationStart));
+    this.state.roundHistory[index] = {
+      ...current,
+      ...update,
+      blockTypes: update.blockTypes === undefined ? [...current.blockTypes] : [...update.blockTypes],
+      details: update.details === undefined ? [...current.details] : [...update.details],
+      completedAt,
+      elapsedMs,
+    };
+  }
+
+  private currentRoundRecord(): DashboardRoundRecord | null {
+    const roundId = this.state.loopGraph.roundId;
+    if (roundId === null) return null;
+    return this.state.roundHistory.find((record) => record.roundId === roundId) ?? null;
+  }
+
   private async beginRound(): Promise<void> {
     this.clearPendingReconciliationRetry();
     const pendingAutoRepair = this.state.autoRepair?.status === 'WAITING_FOR_SOL' ? this.state.autoRepair : null;
     this.state.autoRepair = pendingAutoRepair;
     this.state.retryCount = 0;
     const now = this.now().toISOString();
-    this.state.loopGraph = createLoopGraph(`round-${this.state.revision + 1}-${this.now().getTime()}`, now);
+    const roundId = `round-${this.state.revision + 1}-${this.now().getTime()}`;
+    this.state.loopGraph = createLoopGraph(roundId, now);
+    const previousSequence = this.state.roundHistory.at(-1)?.sequence ?? 0;
+    this.state.roundHistory = [
+      ...this.state.roundHistory,
+      {
+        roundId,
+        sequence: previousSequence + 1,
+        status: 'RUNNING',
+        taskId: null,
+        taskKind: null,
+        taskTitle: null,
+        lunaStatus: null,
+        reportSummary: null,
+        reportPath: null,
+        testsStatus: null,
+        blockTypes: [],
+        details: [],
+        startedAt: now,
+        completedAt: null,
+        elapsedMs: 0,
+      },
+    ].slice(-DASHBOARD_ROUND_HISTORY_LIMIT);
     this.startExecutionRound(this.state.loopGraph.roundId);
     await this.setPhase('READING_SOL', 'RUNNING', null);
   }
@@ -2133,13 +2351,22 @@ export function createOrchestrator(options: OrchestratorOptions): MainOrchestrat
 }
 
 function cloneState(state: OrchestratorState): OrchestratorState {
-  const sanitized = sanitizeDashboardSnapshot({ loopGraph: state.loopGraph, recentError: state.recentError });
+  const sanitized = sanitizeDashboardSnapshot({
+    loopGraph: state.loopGraph,
+    recentError: state.recentError,
+    roundHistory: state.roundHistory,
+  });
   return {
     ...state,
     architectureRevisions: [...state.architectureRevisions],
     luna: { ...state.luna },
     commits: { ...state.commits },
     recentError: sanitized.recentError === null ? null : { ...sanitized.recentError },
+    roundHistory: sanitized.roundHistory.map((record) => ({
+      ...record,
+      blockTypes: [...record.blockTypes],
+      details: [...record.details],
+    })),
     loopGraph: sanitized.loopGraph,
     pendingCodeSync: clonePendingCodeSync(state.pendingCodeSync),
     pendingReconciliationSync: clonePendingReconciliationSync(state.pendingReconciliationSync),
@@ -2338,6 +2565,7 @@ function normalizeState(state: OrchestratorState): OrchestratorState {
     pendingReconciliationSync: normalizePendingReconciliationSync(source.pendingReconciliationSync),
     autoRepair: normalizeAutoRepair(source.autoRepair),
     executionMetrics: normalizeExecutionMetrics(source.executionMetrics),
+    roundHistory: sanitizeDashboardSnapshot({ roundHistory: source.roundHistory }).roundHistory,
     executionRecovery: normalizeExecutionRecovery(source.executionRecovery),
     activeSolSession:
       source.activeSolSession === null || source.activeSolSession === undefined ? null : { ...source.activeSolSession },

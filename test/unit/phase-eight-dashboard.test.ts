@@ -92,6 +92,8 @@ describe('phase eight dashboard contract', () => {
       'stage-goal-review',
       'align-latest-baseline',
       'commit-and-push',
+      'discard-worktree-changes',
+      'finish-round-wait-sol',
       'open-edge',
       'open-project',
       'view-report',
@@ -310,12 +312,22 @@ describe('phase eight dashboard contract', () => {
       command: 'commit-and-push',
       confirm: true,
     });
+    expect(validateDashboardCommand({ command: 'discard-worktree-changes', confirm: true })).toEqual({
+      command: 'discard-worktree-changes',
+      confirm: true,
+    });
+    expect(validateDashboardCommand({ command: 'finish-round-wait-sol', confirm: true })).toEqual({
+      command: 'finish-round-wait-sol',
+      confirm: true,
+    });
 
     const commands: DashboardCommand[] = [
       { command: 'align-latest-baseline', confirm: true },
       { command: 'commit-and-push', confirm: true },
+      { command: 'discard-worktree-changes', confirm: true },
+      { command: 'finish-round-wait-sol', confirm: true },
     ];
-    expect(commands).toHaveLength(2);
+    expect(commands).toHaveLength(4);
   });
 
   it('sanitizes baseline and stale-task dashboard fields', () => {

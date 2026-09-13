@@ -426,6 +426,38 @@ export class GitController {
     }
   }
 
+  /**
+   * Removes uncommitted worktree changes from the working tree without
+   * destroying them: Git keeps a recoverable stash containing tracked and
+   * untracked files. This is intentionally a manual-only maintenance action.
+   */
+  async discardWorktreeChanges(repositoryPath: string): Promise<GitManualCommitAndPushResult> {
+    const initial = await this.readRepositoryStatus(repositoryPath);
+    const changedPaths = [...initial.worktree];
+    if (initial.clean) {
+      throw new GitControllerError('NO_CHANGES', 'Project worktree has no uncommitted changes');
+    }
+    await this.run(
+      ['stash', 'push', '--include-untracked', '--message', `web-chat2codex discard ${new Date().toISOString()}`],
+      initial.repositoryRoot,
+    );
+    const confirmed = await this.readRepositoryStatus(initial.repositoryRoot);
+    if (!confirmed.clean) {
+      throw new GitControllerError('COMMAND_FAILED', 'Worktree changes were stashed but the repository is not clean', {
+        paths: confirmed.worktree,
+      });
+    }
+    return {
+      phase: 'COMPLETED',
+      localCommit: confirmed.head,
+      remoteCommit: confirmed.remoteTrackingHead,
+      createdCommit: false,
+      pushed: false,
+      changedPaths,
+      clean: true,
+    };
+  }
+
   async syncGovernance(input: GovernanceSyncInput): Promise<GitSyncResult> {
     const message = commitMessageForGovernance(input.changeId);
     const allowedPaths = assertSafePathList(input.changedPaths, 'Governance paths');

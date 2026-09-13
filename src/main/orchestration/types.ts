@@ -1,6 +1,7 @@
 import type {
   DashboardCommand,
   DashboardCommandResult,
+  DashboardRoundRecord,
   DashboardSnapshot,
   LoopGraphNodeId,
   LoopGraphSnapshot,
@@ -149,6 +150,7 @@ export interface OrchestratorState {
   pendingReconciliationSync: PendingReconciliationSyncState | null;
   autoRepair: AutoRepairState | null;
   executionMetrics: ExecutionMetricsState;
+  roundHistory: DashboardRoundRecord[];
   executionRecovery: ExecutionRecoveryRecord | null;
   /** Optional for backwards compatibility with state files written before manual Git maintenance. */
   manualGitOperation?: GitManualOperationRecord;
@@ -191,6 +193,7 @@ export interface GitOrchestratorPort {
   captureBaseline(repositoryPath: string, options?: CaptureBaselineOptions): Promise<GitBaseline>;
   readRepositoryStatus?(repositoryPath: string): Promise<GitRepositoryStatus>;
   commitAndPushProject?(repositoryPath: string): Promise<GitManualCommitAndPushResult>;
+  discardWorktreeChanges?(repositoryPath: string): Promise<GitManualCommitAndPushResult>;
   syncGovernance(input: GovernanceSyncInput): Promise<GitSyncResult>;
   syncCode(input: CodeSyncInput): Promise<GitSyncResult>;
 }

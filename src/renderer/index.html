@@ -113,11 +113,7 @@
           </div>
           <dl class="dashboard-grid">
             <div>
-              <dt>项目</dt>
-              <dd id="dashboard-project">未选择项目</dd>
-            </div>
-            <div>
-              <dt>任务</dt>
+              <dt>任务摘要</dt>
               <dd id="dashboard-task">无</dd>
             </div>
             <div>
@@ -135,10 +131,6 @@
               <dd id="dashboard-total-duration">时长：—</dd>
               <dd id="dashboard-total-rounds">轮次：—</dd>
               <dd id="dashboard-total-sessions">连续运行次数：—</dd>
-            </div>
-            <div>
-              <dt>最近异常</dt>
-              <dd id="dashboard-error" class="dashboard-error">无</dd>
             </div>
           </dl>
           <div class="dashboard-notices" aria-live="polite">
@@ -171,6 +163,40 @@
               <ul id="loop-graph-details-list" class="loop-graph-details-list"></ul>
             </section>
           </section>
+          <section class="round-history-section" aria-labelledby="round-history-title">
+            <div class="round-history-heading">
+              <div>
+                <p class="eyebrow">ROUND HISTORY</p>
+                <h3 id="round-history-title">最近循环记录</h3>
+              </div>
+              <div class="round-history-pagination" aria-label="循环记录翻页">
+                <button id="round-history-previous" class="button-secondary" type="button" aria-label="查看较新记录">
+                  ←
+                </button>
+                <span id="round-history-page" class="muted">第 1 页</span>
+                <button id="round-history-next" class="button-secondary" type="button" aria-label="查看更早记录">
+                  →
+                </button>
+              </div>
+            </div>
+            <div class="round-history-table-wrap">
+              <table class="round-history-table">
+                <thead>
+                  <tr>
+                    <th>轮次</th>
+                    <th>任务类型</th>
+                    <th>任务标题</th>
+                    <th>Luna 结果</th>
+                    <th>报告摘要</th>
+                    <th>测试总状态</th>
+                    <th>执行耗时</th>
+                    <th>任务完成时间</th>
+                  </tr>
+                </thead>
+                <tbody id="round-history-body"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
       </section>
 
@@ -197,8 +223,29 @@
             <button class="button-secondary" type="button" data-dashboard-command="align-latest-baseline">
               对齐最新基线
             </button>
+            <button class="button-secondary" type="button" data-dashboard-command="discard-worktree-changes">
+              放弃未提交修改
+            </button>
+            <button class="button-secondary" type="button" data-dashboard-command="finish-round-wait-sol">
+              结束本轮并等待新任务
+            </button>
           </div>
           <p class="helper-text">遇到基线阻塞时使用：先提交并同步工作区，再对齐最新基线；不会自动启动下一轮。</p>
+          <details class="maintenance-help">
+            <summary>维护动作流程与适用场景</summary>
+            <dl>
+              <dt>提交并同步 Git</dt>
+              <dd>保留当前修改，创建提交并推送远端。适合确认修改属于当前项目且应保留时使用。</dd>
+              <dt>对齐最新基线</dt>
+              <dd>只刷新本地编排器记录的基线，不删除文件，也不会启动下一轮；工作区必须干净。</dd>
+              <dt>放弃未提交修改</dt>
+              <dd>仅人工触发。修改会先放入 Git stash，再清理工作区，适合确认这些修改不应继续保留时使用。</dd>
+              <dt>结束本轮并等待新任务</dt>
+              <dd>
+                跳过当前已确认不再执行的输出，标记为已处理并进入等待 Sol 新输出；存在待同步代码或治理更新时不可用。
+              </dd>
+            </dl>
+          </details>
           <p class="helper-text">按钮的可用条件、处理中状态和禁用原因以后台快照为准。</p>
         </div>
       </section>
