@@ -538,8 +538,12 @@ describe('dedicated Edge profile and CDP state adapter', () => {
       consecutiveStableSamples: 1,
     });
     await expect(adapter.sample('target-1')).resolves.toMatchObject({
-      status: 'COMPLETED_CANDIDATE',
+      status: 'AMBIGUOUS',
       consecutiveStableSamples: 2,
+    });
+    await expect(adapter.sample('target-1')).resolves.toMatchObject({
+      status: 'UNCONSUMABLE_CANDIDATE',
+      consecutiveStableSamples: 3,
     });
     transport.value.latestAssistantText = '[WRITING_BLOCK type="LUNA_TASK"]\n{"task_id":"x"}';
     adapter.reset('target-1');
@@ -553,12 +557,14 @@ describe('dedicated Edge profile and CDP state adapter', () => {
 
   it('anchors mixed reasoning text to the latest complete Writing Block sequence', async () => {
     const transport = new FakeTransport();
-    transport.value.latestAssistantText = '思考过程\n[WRITING_BLOCK type="LUNA_TASK"]\n{}\n[/WRITING_BLOCK]';
+    transport.value.latestAssistantText =
+      '思考过程\n[WRITING_BLOCK type="BLOCKED"]\n{"code":"NEEDS_USER_ACTION","reason":"需要确认"}\n[/WRITING_BLOCK]';
     const adapter = new EdgeStateAdapter(transport, { stableSampleCount: 2 });
     await adapter.sample('target-1');
     await expect(adapter.sample('target-1')).resolves.toMatchObject({
       status: 'COMPLETED_CANDIDATE',
-      latestAssistantText: '[WRITING_BLOCK type="LUNA_TASK"]\n{}\n[/WRITING_BLOCK]',
+      latestAssistantText:
+        '[WRITING_BLOCK type="BLOCKED"]\n{"code":"NEEDS_USER_ACTION","reason":"需要确认"}\n[/WRITING_BLOCK]',
     });
     expect(hasMixedWritingBlockContent(transport.value.latestAssistantText as string)).toBe(true);
     expect(hasMixedWritingBlockContent('[WRITING_BLOCK type="LUNA_TASK"]\n{}\n[/WRITING_BLOCK]')).toBe(false);
@@ -713,11 +719,61 @@ describe('dedicated Edge profile and CDP state adapter', () => {
   it('extracts a visible complete Writing Block candidate inside the assistant message', () => {
     const script = domSnapshotScript();
     expect(script).toContain('const assistantRootText = text(assistantNode);');
+    expect(script).toContain('const assistantNodes = [...new Set(');
     expect(script).toContain('const finalAnswerCandidates = assistantNode === null');
-    expect(script).toContain('const finalAssistant = finalAnswer?.value || assistantRootText;');
+    expect(script).toContain('const latestProtocolNode = [...assistantNodes]');
+    expect(script).toContain(
+      'const finalAssistant = finalAnswer?.value || latestProtocolNode?.value || assistantRootText;',
+    );
     expect(script).toContain('finalAnswerBoundaryFound: finalAnswer !== undefined');
     expect(script).toContain('const isFinalPayload = (value) =>');
     expect(script).toContain('const loginWall = authPath || explicitLoginNodes.length > 0');
+  });
+
+  it('gates completion on protocol readiness and preserves sanitized capture diagnostics', async () => {
+    const transport = new FakeTransport();
+    transport.value = {
+      ...transport.value,
+      latestAssistantText: '稳定但不是协议输出。',
+      captureDiagnostics: {
+        assistantNodeCount: 4,
+        completeCandidateCount: 0,
+        selectedAssistantNodeIndex: 3,
+        writingBlockOpenCount: 1,
+        writingBlockCloseCount: 0,
+        userMessageMarkerCount: 0,
+        ignored: 'not persisted',
+      },
+    };
+    const adapter = new EdgeStateAdapter(transport);
+    await expect(adapter.readPage('target-1')).resolves.toMatchObject({
+      protocolReady: false,
+      protocolDiagnostics: {
+        assistantNodeCount: 4,
+        completeCandidateCount: 0,
+        selectedAssistantNodeIndex: 3,
+        writingBlockOpenCount: 1,
+        writingBlockCloseCount: 0,
+        userMessageMarkerCount: 0,
+      },
+    });
+
+    transport.value = {
+      ...transport.value,
+      latestAssistantText: '[WRITING_BLOCK type="BLOCKED"]\n{"code":"WAIT","reason":"稍后重试"}\n[/WRITING_BLOCK]',
+      captureDiagnostics: undefined,
+    };
+    await expect(adapter.readPage('target-1')).resolves.toMatchObject({
+      protocolReady: true,
+      protocolDiagnostics: {
+        assistantNodeCount: 0,
+        completeCandidateCount: 0,
+        selectedAssistantNodeIndex: null,
+        writingBlockOpenCount: 1,
+        writingBlockCloseCount: 1,
+        userMessageMarkerCount: 0,
+      },
+    });
   });
 
   it('normalizes the angle-bracket wrapper observed in the ChatGPT DOM', async () => {

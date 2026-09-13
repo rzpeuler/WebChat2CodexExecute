@@ -1215,6 +1215,13 @@ export class MainOrchestrator implements Orchestrator {
         return this.pauseForCode('AUTH_REQUIRED', '需要在专用 Edge profile 中完成登录。', true);
       if (observation.status === 'NETWORK_ERROR' || observation.status === 'SESSION_LOST')
         return this.pauseForCode(observation.status, 'Sol 页面或网络尚未恢复，请检查后重试。');
+      if (observation.status === 'UNCONSUMABLE_CANDIDATE')
+        return this.pauseForCode(
+          'SOL_OUTPUT_UNCONSUMABLE',
+          'Sol 输出已稳定，但采集文本中没有可执行的 Writing Block 或 USER_MESSAGE。W2C 已完成有限重采集，请检查专用 Edge 中的最终回答并重试。',
+          true,
+          '请确认专用 Edge 显示的是完整 Sol 最终回答；必要时重新打开 Edge 或让 Sol 完整重输出一个协议块。',
+        );
       if (observation.status !== 'COMPLETED_CANDIDATE') {
         const message = '等待 Sol 产生新的稳定输出。';
         await this.enterWaiting(message);
@@ -1251,6 +1258,13 @@ export class MainOrchestrator implements Orchestrator {
       return this.pauseForCode('AUTH_REQUIRED', '需要在专用 Edge profile 中完成登录。', true);
     if (observation.status === 'NETWORK_ERROR' || observation.status === 'SESSION_LOST')
       return this.pauseForCode(observation.status, 'Sol 页面或网络尚未恢复，请检查后重试。');
+    if (observation.status === 'UNCONSUMABLE_CANDIDATE')
+      return this.pauseForCode(
+        'SOL_OUTPUT_UNCONSUMABLE',
+        'Sol 输出已稳定，但采集文本中没有可执行的 Writing Block 或 USER_MESSAGE。W2C 已完成有限重采集，请检查专用 Edge 中的最终回答并重试。',
+        true,
+        '请确认专用 Edge 显示的是完整 Sol 最终回答；必要时重新打开 Edge 或让 Sol 完整重输出一个协议块。',
+      );
     if (observation.status !== 'COMPLETED_CANDIDATE') {
       this.markNodesNotApplicable([
         'parse-task',

@@ -100,6 +100,26 @@ describe('automation runtime lifecycle', () => {
     expect(sleep).toHaveBeenCalledOnce();
   });
 
+  it('stops reconciliation polling when a stable output remains unconsumable', async () => {
+    const sleep = vi.fn(async () => undefined);
+
+    await expect(
+      waitForReconciliationOutput({
+        before: observation(),
+        observe: vi.fn(async () =>
+          observation({
+            latestAssistantText: '稳定但没有协议块。',
+            latestAssistantHash: 'stable-unconsumable',
+            status: 'UNCONSUMABLE_CANDIDATE',
+          }),
+        ),
+        sleep,
+      }),
+    ).rejects.toMatchObject({ code: 'SOL_OUTPUT_UNCONSUMABLE' });
+
+    expect(sleep).toHaveBeenCalledOnce();
+  });
+
   it('shares concurrent Edge startup and rejects new startup after stop begins', async () => {
     const startup = deferred<void>();
     let starts = 0;

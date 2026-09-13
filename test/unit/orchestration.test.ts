@@ -188,6 +188,31 @@ describe('P0 main orchestration', () => {
     );
   });
 
+  it('pauses with the same actionable error after bounded unconsumable resampling', async () => {
+    const notifier = { notify: vi.fn() };
+    const startTask = vi.fn();
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation('稳定但没有协议块。', 'UNCONSUMABLE_CANDIDATE')) },
+      notifier,
+      codex: { startTask },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    const result = await orchestrator.runRound();
+
+    expect(result).toMatchObject({ status: 'PAUSED' });
+    expect(orchestrator.getState()).toMatchObject({
+      active: false,
+      status: 'NEEDS_USER_ACTION',
+      recentError: { code: 'SOL_OUTPUT_UNCONSUMABLE' },
+    });
+    expect(startTask).not.toHaveBeenCalled();
+    expect(notifier.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.objectContaining({ code: 'SOL_OUTPUT_UNCONSUMABLE' }) }),
+    );
+  });
+
   it('notifies the user and keeps waiting when Sol emits a user-facing message', async () => {
     const notifier = { notify: vi.fn() };
     const options = baseOptions({

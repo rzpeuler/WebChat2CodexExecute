@@ -1,13 +1,22 @@
 import { createHash } from 'node:crypto';
-import type { CdpTransport, EdgeAdapterRules, EdgePageSnapshot, EdgeSolObservation, CdpTarget } from './types.js';
+import type {
+  CdpTransport,
+  EdgeAdapterRules,
+  EdgePageSnapshot,
+  EdgeProtocolCaptureDiagnostics,
+  EdgeSolObservation,
+  CdpTarget,
+} from './types.js';
 import {
+  extractUserMessage,
   normalizeWritingBlockMarkers,
+  parseWritingBlocks,
   selectLatestValidWritingBlockSequence,
 } from '../../shared/protocol/writing-block.js';
 import { hasKnownIdentity, isAllowedChatGptUrl } from './url-security.js';
 
 export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
-  version: 'chatgpt-dom-2026-09-13',
+  version: 'chatgpt-dom-2026-09-14-candidate-stability',
   assistantSelectors: [
     '[data-message-author-role="assistant"]',
     'article[data-testid*="conversation-turn"] [data-message-author-role="assistant"]',
@@ -41,7 +50,7 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
   const text = (node) => isVisible(node) ? (node.innerText || node.textContent || '').trim() : '';
   const all = (selectors, root = document) => selectors.flatMap((selector) => Array.from(root.querySelectorAll(selector)));
   const visibleAll = (selectors, root = document) => all(selectors, root).filter(isVisible);
-  const assistantNodes = visibleAll(${JSON.stringify(rules.assistantSelectors)});
+  const assistantNodes = [...new Set(visibleAll(${JSON.stringify(rules.assistantSelectors)}))];
   const assistantNode = assistantNodes.at(-1) || null;
   const assistantRootText = text(assistantNode);
   const normalizeMarkers = (value) => value
@@ -61,19 +70,29 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
   };
   const finalAnswerCandidates = assistantNode === null
     ? []
-    : [assistantNode, ...visibleAll(${JSON.stringify(rules.finalAnswerSelectors)}, assistantNode),
-       ...Array.from(assistantNode.querySelectorAll('*')).filter(isVisible)]
-      .map((node, index) => {
+    : assistantNodes.flatMap((root, nodeIndex) => [
+        root,
+        ...visibleAll(${JSON.stringify(rules.finalAnswerSelectors)}, root),
+        ...Array.from(root.querySelectorAll('*')).filter(isVisible),
+      ].map((node, index) => {
         let depth = 0;
-        for (let parent = node.parentElement; parent !== null && parent !== assistantNode; parent = parent.parentElement)
+        for (let parent = node.parentElement; parent !== null && parent !== root; parent = parent.parentElement)
           depth += 1;
-        return { node, index, depth, value: text(node) };
-      })
+        return { node, index, nodeIndex, depth, value: text(node) };
+      }))
       .filter(({ value }) => isFinalPayload(value));
   const finalAnswer = finalAnswerCandidates
-    .sort((left, right) => right.depth - left.depth || right.index - left.index)
-    .at(0);
-  const finalAssistant = finalAnswer?.value || assistantRootText;
+    .sort((left, right) => left.nodeIndex - right.nodeIndex || left.depth - right.depth || left.index - right.index)
+    .at(-1);
+  const latestProtocolNode = [...assistantNodes]
+    .map((node, nodeIndex) => ({ nodeIndex, value: text(node) }))
+    .reverse()
+    .find(({ value }) => /\\[WRITING_BLOCK\\b|\\[USER_MESSAGE\\]/.test(normalizeMarkers(value)));
+  const finalAssistant = finalAnswer?.value || latestProtocolNode?.value || assistantRootText;
+  const normalizedAssistant = normalizeMarkers(finalAssistant);
+  const writingBlockOpenCount = (normalizedAssistant.match(/\\[WRITING_BLOCK\\b/g) || []).length;
+  const writingBlockCloseCount = (normalizedAssistant.match(/\\[\\/WRITING_BLOCK\\]/g) || []).length;
+  const userMessageMarkerCount = (normalizedAssistant.match(/\\[USER_MESSAGE\\]/g) || []).length;
   const errors = all(${JSON.stringify(rules.errorSelectors)}).map(text).filter(Boolean).join('\\n');
   const status = all(['[aria-live="polite"]', '[role="status"]', 'button[aria-label]']).map(text).filter(Boolean).join('\\n');
   const project = document.querySelector('[data-project-id], meta[name="chatgpt-project-id"]');
@@ -103,6 +122,14 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
     accountFingerprint: accountValue || (accountFromStorage ? 'user-' + accountFromStorage : null),
     latestAssistantText: finalAssistant,
     finalAnswerBoundaryFound: finalAnswer !== undefined,
+    captureDiagnostics: {
+      assistantNodeCount: assistantNodes.length,
+      completeCandidateCount: finalAnswerCandidates.length,
+      selectedAssistantNodeIndex: finalAnswer?.nodeIndex ?? latestProtocolNode?.nodeIndex ?? (assistantNode === null ? null : assistantNodes.length - 1),
+      writingBlockOpenCount,
+      writingBlockCloseCount,
+      userMessageMarkerCount,
+    },
     statusText: status,
     errorText: errors,
     loginWall,
@@ -119,17 +146,72 @@ export const EDGE_DOM_SNAPSHOT_SCRIPT = domSnapshotScript();
 export interface EdgeStateAdapterOptions {
   rules?: EdgeAdapterRules;
   stableSampleCount?: number;
+  unconsumableSampleCount?: number;
   now?: () => Date;
 }
 
 interface StableSample {
   hash: string | null;
   count: number;
+  unconsumableCount: number;
 }
 
 export function hashMessage(text: string): string | null {
   const normalized = text.trim();
   return normalized === '' ? null : createHash('sha256').update(normalized, 'utf8').digest('hex');
+}
+
+function markerCount(text: string, marker: string): number {
+  return text.split(marker).length - 1;
+}
+
+function protocolDiagnosticsForText(text: string): EdgeProtocolCaptureDiagnostics {
+  const normalized = normalizeWritingBlockMarkers(text);
+  return {
+    assistantNodeCount: 0,
+    completeCandidateCount: 0,
+    selectedAssistantNodeIndex: null,
+    writingBlockOpenCount: markerCount(normalized, '[WRITING_BLOCK'),
+    writingBlockCloseCount: markerCount(normalized, '[/WRITING_BLOCK]'),
+    userMessageMarkerCount: markerCount(normalized, '[USER_MESSAGE]'),
+  };
+}
+
+function protocolReady(text: string): boolean {
+  if (extractUserMessage(text) !== null) return true;
+  try {
+    return parseWritingBlocks(text).blocks.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function captureDiagnostics(value: unknown): EdgeProtocolCaptureDiagnostics | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  const numbers = [
+    candidate.assistantNodeCount,
+    candidate.completeCandidateCount,
+    candidate.writingBlockOpenCount,
+    candidate.writingBlockCloseCount,
+    candidate.userMessageMarkerCount,
+  ];
+  if (numbers.some((item) => typeof item !== 'number' || !Number.isInteger(item) || item < 0)) return undefined;
+  const selected = candidate.selectedAssistantNodeIndex;
+  if (
+    selected !== null &&
+    selected !== undefined &&
+    (typeof selected !== 'number' || !Number.isInteger(selected) || selected < 0)
+  )
+    return undefined;
+  return {
+    assistantNodeCount: candidate.assistantNodeCount as number,
+    completeCandidateCount: candidate.completeCandidateCount as number,
+    selectedAssistantNodeIndex: (selected ?? null) as number | null,
+    writingBlockOpenCount: candidate.writingBlockOpenCount as number,
+    writingBlockCloseCount: candidate.writingBlockCloseCount as number,
+    userMessageMarkerCount: candidate.userMessageMarkerCount as number,
+  };
 }
 
 export function hasIncompleteWritingBlock(text: string): boolean {
@@ -178,6 +260,7 @@ export class EdgeStateAdapter {
   readonly rules: EdgeAdapterRules;
   private readonly transport: CdpTransport;
   private readonly stableSampleCount: number;
+  private readonly unconsumableSampleCount: number;
   private readonly now: () => Date;
   private readonly stableSamples = new Map<string, StableSample>();
 
@@ -185,6 +268,7 @@ export class EdgeStateAdapter {
     this.transport = transport;
     this.rules = options.rules ?? DEFAULT_EDGE_ADAPTER_RULES;
     this.stableSampleCount = Math.max(2, options.stableSampleCount ?? 2);
+    this.unconsumableSampleCount = Math.max(2, options.unconsumableSampleCount ?? 3);
     this.now = options.now ?? (() => new Date());
   }
 
@@ -194,6 +278,7 @@ export class EdgeStateAdapter {
       typeof raw.latestAssistantText === 'string' ? raw.latestAssistantText : '',
     );
     const text = raw.finalAnswerBoundaryFound === false ? rawText : (extractWritingBlockTail(rawText) ?? rawText);
+    const diagnostics = captureDiagnostics(raw.captureDiagnostics) ?? protocolDiagnosticsForText(text);
     const errorText = typeof raw.errorText === 'string' ? raw.errorText : '';
     const statusText = typeof raw.statusText === 'string' ? raw.statusText : '';
     const combined = `${errorText}\n${statusText}`;
@@ -213,6 +298,8 @@ export class EdgeStateAdapter {
       ...(typeof raw.finalAnswerBoundaryFound === 'boolean'
         ? { finalAnswerBoundaryFound: raw.finalAnswerBoundaryFound }
         : {}),
+      protocolReady: protocolReady(text),
+      protocolDiagnostics: diagnostics,
       statusText,
       errorText,
       loginWall: booleanOrFalse(raw.loginWall),
@@ -229,8 +316,17 @@ export class EdgeStateAdapter {
     const page = await this.readPage(targetId);
     const previous = this.stableSamples.get(targetId);
     const count = previous?.hash === page.latestAssistantHash ? previous.count + 1 : 1;
-    this.stableSamples.set(targetId, { hash: page.latestAssistantHash, count });
-    const status = this.classify(page, count);
+    const unconsumableCount = page.protocolReady
+      ? 0
+      : previous?.hash === page.latestAssistantHash
+        ? previous.unconsumableCount + 1
+        : 1;
+    this.stableSamples.set(targetId, {
+      hash: page.latestAssistantHash,
+      count,
+      unconsumableCount,
+    });
+    const status = this.classify(page, count, unconsumableCount);
     return { ...page, status, adapterVersion: this.rules.version, consecutiveStableSamples: count };
   }
 
@@ -239,7 +335,11 @@ export class EdgeStateAdapter {
     else this.stableSamples.delete(targetId);
   }
 
-  private classify(page: EdgePageSnapshot, stableCount: number): EdgeSolObservation['status'] {
+  private classify(
+    page: EdgePageSnapshot,
+    stableCount: number,
+    unconsumableCount: number,
+  ): EdgeSolObservation['status'] {
     if (page.loginWall) return 'AUTH_REQUIRED';
     if (page.contextLimit) return 'CONTEXT_LIMIT';
     if (page.networkError) return 'NETWORK_ERROR';
@@ -247,7 +347,10 @@ export class EdgeStateAdapter {
     if (page.projectFingerprint === null || page.url === '') return 'AMBIGUOUS';
     if (page.isThinking) return 'THINKING';
     if (stableCount >= this.stableSampleCount && page.latestAssistantHash !== null) {
-      return page.writingBlockIncomplete ? 'AMBIGUOUS' : 'COMPLETED_CANDIDATE';
+      if (page.writingBlockIncomplete) return 'AMBIGUOUS';
+      if (page.protocolReady === true) return 'COMPLETED_CANDIDATE';
+      if (unconsumableCount >= this.unconsumableSampleCount) return 'UNCONSUMABLE_CANDIDATE';
+      return 'AMBIGUOUS';
     }
     return page.latestAssistantHash === null ? 'AMBIGUOUS' : 'THINKING';
   }

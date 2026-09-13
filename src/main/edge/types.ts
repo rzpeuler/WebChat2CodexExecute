@@ -3,6 +3,7 @@ import type { StateSnapshotStore } from '../state/persistence.js';
 export const EDGE_SOL_STATUSES = [
   'THINKING',
   'COMPLETED_CANDIDATE',
+  'UNCONSUMABLE_CANDIDATE',
   'NETWORK_ERROR',
   'CONTEXT_LIMIT',
   'AUTH_REQUIRED',
@@ -10,6 +11,15 @@ export const EDGE_SOL_STATUSES = [
   'AMBIGUOUS',
 ] as const;
 export type EdgeSolStatus = (typeof EDGE_SOL_STATUSES)[number];
+
+export interface EdgeProtocolCaptureDiagnostics {
+  assistantNodeCount: number;
+  completeCandidateCount: number;
+  selectedAssistantNodeIndex: number | null;
+  writingBlockOpenCount: number;
+  writingBlockCloseCount: number;
+  userMessageMarkerCount: number;
+}
 
 export interface EdgeExecutableLocatorOptions {
   executablePath?: string;
@@ -115,6 +125,8 @@ export interface EdgePageSnapshot {
   latestAssistantText: string;
   latestAssistantHash: string | null;
   finalAnswerBoundaryFound?: boolean;
+  protocolReady?: boolean;
+  protocolDiagnostics?: EdgeProtocolCaptureDiagnostics;
   statusText: string;
   errorText: string;
   loginWall: boolean;

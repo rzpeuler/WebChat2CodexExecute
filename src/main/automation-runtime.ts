@@ -93,6 +93,12 @@ export async function waitForReconciliationOutput({
         current.status === 'NETWORK_ERROR' ? '读取 Sol 回复时发生网络错误。' : 'Sol 会话已丢失。',
       );
     }
+    if (current.status === 'UNCONSUMABLE_CANDIDATE') {
+      throw new OrchestratorError(
+        'SOL_OUTPUT_UNCONSUMABLE',
+        'Sol 输出已稳定，但采集文本中没有可执行的 Writing Block 或 USER_MESSAGE。W2C 已完成有限重采集。',
+      );
+    }
 
     const currentHash = current.latestAssistantHash ?? hashObservedText(current.latestAssistantText);
     const currentTime = now();
