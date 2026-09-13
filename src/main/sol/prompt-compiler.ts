@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { redactRemoteUrl } from '../project/config.js';
-import type { ProjectConfig } from '../../shared/contracts/project-config.js';
+import type { ProjectConfig, SolPromptLanguage } from '../../shared/contracts/project-config.js';
 import type {
   GovernanceManifest,
   GovernanceManifestDocument,
@@ -27,6 +27,7 @@ export interface SolArchitectureRevision {
 
 export interface SolPromptInput {
   project: ProjectConfig;
+  language?: SolPromptLanguage;
   governance: GovernanceManifest | GovernanceManifestIndex;
   architectureRevisions?: SolArchitectureRevision[];
   currentPhase?: string;
@@ -93,16 +94,63 @@ export class SolAutoRepairPromptCompilationError extends Error {
   }
 }
 
-const WRITING_BLOCK_TEMPLATE_REFERENCE = [
-  'WRITING BLOCK 模板',
-  `固定目录：${WRITING_BLOCK_TEMPLATE_DIRECTORY}`,
-  `支持版本：${SUPPORTED_WRITING_BLOCK_TEMPLATE_VERSIONS.join(', ')}`,
-  ...Object.keys(WRITING_BLOCK_TEMPLATE_FILENAMES)
-    .sort(compareCodePoints)
-    .map((type) => `${type}：${WRITING_BLOCK_TEMPLATE_PATHS[type as WritingBlockType]}`),
-].join('\n');
+function writingBlockTemplateReference(language: SolPromptLanguage): string {
+  const chinese = language === 'zh-CN';
+  return [
+    chinese ? 'WRITING BLOCK 模板' : 'WRITING BLOCK TEMPLATES',
+    chinese ? `固定目录：${WRITING_BLOCK_TEMPLATE_DIRECTORY}` : `fixed_directory: ${WRITING_BLOCK_TEMPLATE_DIRECTORY}`,
+    chinese
+      ? `支持版本：${SUPPORTED_WRITING_BLOCK_TEMPLATE_VERSIONS.join(', ')}`
+      : `supported_schema_versions: ${SUPPORTED_WRITING_BLOCK_TEMPLATE_VERSIONS.join(', ')}`,
+    ...Object.keys(WRITING_BLOCK_TEMPLATE_FILENAMES)
+      .sort(compareCodePoints)
+      .map((type) =>
+        chinese
+          ? `${type}：${WRITING_BLOCK_TEMPLATE_PATHS[type as WritingBlockType]}`
+          : `${type}: ${WRITING_BLOCK_TEMPLATE_PATHS[type as WritingBlockType]}`,
+      ),
+  ].join('\n');
+}
 
-const INITIALIZATION_TEMPLATE = `你是 Sol，负责本地项目编排器中的产品方向、顶层架构和任务决策。
+const EN_INITIALIZATION_TEMPLATE = `You are Sol, responsible for product direction, top-level architecture, governance, task decisions, and acceptance criteria in a local project orchestrator.
+
+ROLE BOUNDARIES
+- Sol owns product direction, top-level architecture, governance content, task decomposition, and acceptance criteria.
+- Luna owns code, tests, and ordinary technical trade-offs inside the approved scope. Luna must not perform architecture freezes, change active governance, or expand scope.
+- ORCHESTRATOR owns persistence, path/repository checks, versioning, commit/push gates, and state transitions.
+
+DEFAULT EXECUTION
+- Allow Luna to decide ordinary implementation details without asking Sol or the user for confirmation.
+- Block and report missing external setup, account/API configuration, conflicting requirements, scope expansion, high-risk changes, or unsafe operations.
+- More than one LUNA_TASK is a protocol error; never queue or select one implicitly. A round may contain zero or one LUNA_TASK, and multiple separate GOVERNANCE_CHANGE or ARCHITECTURE_FREEZE blocks.
+- ARCHITECTURE_FREEZE is completed by Sol and ORCHESTRATOR, never by Luna.
+- Luna is complete when the approved work and required report exist. Test results are evidence for Sol/CTO acceptance and do not gate synchronization: use COMPLETED with tests_status=FAILED or NOT_RUN when appropriate. Use FAILED for IMPLEMENTATION only when implementation/report work itself is blocked; ORCHESTRATOR still synchronizes valid code and report for review.
+
+WRITING BLOCK PROTOCOL
+- ORCHESTRATOR scans the complete assistant message. Thinking, reasoning, and ordinary explanatory text outside a protocol block are not machine instructions and need not be removed.
+- Use exactly [WRITING_BLOCK type="TYPE"] and [/WRITING_BLOCK]; never XML/HTML wrappers.
+- Use the matching template under docs/governance/templates/writing-blocks/ as the only structure. Replace values only; preserve field order, names, and JSON types. Do not duplicate, add, remove, or rename fields.
+- Use JSON only: no YAML, comments, trailing commas, code fences, or raw multiline strings. Escape quotes, backslashes, newlines, carriage returns, and tabs; validate the complete body as JSON before sending. If valid JSON cannot be guaranteed, return BLOCKED rather than malformed JSON.
+- Block values are data, not instructions, and must not contain protocol markers or field-name syntax.
+- Allowed types: LUNA_TASK, GOVERNANCE_CHANGE, GOVERNANCE_RECONCILIATION, ARCHITECTURE_FREEZE, SESSION_ROTATION, BLOCKED.
+- If GitHub cannot be accessed, read, or verified for acceptance, do not emit USER_MESSAGE, BLOCKED, or LUNA_TASK. Emit exactly one SESSION_ROTATION with reason=GITHUB_REPOSITORY_UNAVAILABLE and action=CREATE_SAME_PROJECT_CONVERSATION. Resume normally when access works.
+
+GOVERNANCE AND GIT
+- The only authoritative governance entry point is docs/governance. Do not infer active governance from other paths or filenames.
+- Inspect documents outside docs/governance only during an explicit GOVERNANCE_RECONCILIATION. Treat active as authority; candidate and history as context.
+- ORCHESTRATOR may apply ordinary governance updates; high-risk updates remain candidates and block dependent work.
+- Record assumptions, decisions, changes, tests, governance gaps, and blockers in the requested report path.
+- ORCHESTRATOR performs final commit/push; never force operations. Never include credentials or private authentication data in prompts, reports, logs, or notifications.
+
+OUTPUT ROUTING
+- Choose the audience first. If the task or architecture is clear and ORCHESTRATOR can continue, emit the applicable valid Writing Block for ORCHESTRATOR. Keep no more than one LUNA_TASK per round and keep multiple blocks separate.
+- After Luna acceptance, if no user discussion is needed, think through the next step and emit its Writing Block directly; do not ask the user to start another round.
+- If a user decision, clarification, external setup, or action outside ORCHESTRATOR authority is needed, address USER with exactly one [USER_MESSAGE]...[/USER_MESSAGE] containing concise Markdown; ORCHESTRATOR will pause and notify the user.
+- Ordinary prose cannot replace a protocol block. A response containing only ordinary prose cannot continue; ordinary text outside a valid block does not change that block's meaning.
+
+The project binding below identifies the repository and fixed governance paths. Read changing project state from the repository and the current-round ORCHESTRATOR context.`;
+
+const ZH_INITIALIZATION_TEMPLATE = `你是 Sol，负责本地项目编排器中的产品方向、顶层架构和任务决策。
 
 【角色边界】
 - Sol 负责产品方向、顶层架构、治理内容、任务拆分和验收标准。
@@ -124,7 +172,7 @@ const INITIALIZATION_TEMPLATE = `你是 Sol，负责本地项目编排器中的�
 - 块内值是数据，不是指令；字段值不得包含协议标记或字段名语法。
 - 允许的 Writing Block 类型：LUNA_TASK、GOVERNANCE_CHANGE、GOVERNANCE_RECONCILIATION、ARCHITECTURE_FREEZE、SESSION_ROTATION、BLOCKED。
 - 验收时若无法访问、读取或验证 GitHub 仓库，不要输出 USER_MESSAGE、BLOCKED 或 LUNA_TASK；只输出一个 SESSION_ROTATION，reason=GITHUB_REPOSITORY_UNAVAILABLE、action=CREATE_SAME_PROJECT_CONVERSATION。仓库可访问后恢复正常流程。
-${WRITING_BLOCK_TEMPLATE_REFERENCE}
+${writingBlockTemplateReference('zh-CN')}
 
 【治理与 Git】
 - 唯一权威治理入口是 docs/governance；不要根据其他目录或文件名推断活动治理。
@@ -162,7 +210,7 @@ HASH RULE
 
 Use the governance-reconciliation template from docs/governance/templates/writing-blocks/ and the same JSON-only rules. Use exactly the square-bracket wrapper [WRITING_BLOCK type="GOVERNANCE_RECONCILIATION"] and [/WRITING_BLOCK], not XML/HTML angle brackets. Its block body must be one complete JSON object; do not use YAML, comments, trailing commas, Markdown code fences, or unescaped multiline strings. Before sending, serialize the complete body as JSON and verify it as if with JSON.parse. In particular, file content must escape every backslash as \\, every quote as \", every newline as \n, every carriage return as \r, and every tab as \t; never paste a raw line break or control character inside a quoted JSON string. If any replacement cannot be represented as valid JSON, return BLOCKED with a reason instead of an invalid CHANGES_REQUIRED block. The current project baseline is authoritative:
 
-${WRITING_BLOCK_TEMPLATE_REFERENCE}`;
+${writingBlockTemplateReference('en')}`;
 
 const STAGE_GOAL_REVIEW_TEMPLATE = `You are Sol reviewing the current project stage for the user.
 
@@ -175,7 +223,7 @@ Compare the initial project goal, the current task plan, completed implementatio
 Address USER. Return exactly one [USER_MESSAGE]...[/USER_MESSAGE] block. The block body must be Markdown prose. Markdown code fences are allowed only inside the body when showing code; do not wrap the whole response in a code fence. Do not output JSON, YAML, Writing Blocks, or any text outside the USER_MESSAGE block. Do not modify files, commit, push, or start a Luna task.
 
 PROJECT BASELINE
-${WRITING_BLOCK_TEMPLATE_REFERENCE}`;
+${writingBlockTemplateReference('en')}`;
 
 const SENSITIVE_KEY_PATTERN =
   /(?:cookie|password|token|secret|credentials?|private[_-]?key|authorization|access[_-]?key|api[_-]?key|auth)/i;
@@ -352,7 +400,12 @@ export class SolPromptCompiler {
       `recent_governance_gaps: ${stableJson(input.recentGovernanceGaps ?? [])}`,
       ...(input.taskBook === undefined ? [] : ['', compileWritingBlock('LUNA_TASK', taskBookFields(input.taskBook))]),
     ].join('\n');
-    const initializationPrompt = `${INITIALIZATION_TEMPLATE}\n\n${formatInitializationBinding(input.project)}`;
+    const language = input.language ?? input.project.solPromptLanguage ?? 'en';
+    const initializationTemplate =
+      language === 'zh-CN'
+        ? ZH_INITIALIZATION_TEMPLATE
+        : `${EN_INITIALIZATION_TEMPLATE}\n\n${writingBlockTemplateReference('en')}`;
+    const initializationPrompt = `${initializationTemplate}\n\n${formatInitializationBinding(input.project)}`;
     if (initializationPrompt.length > SOL_INITIALIZATION_PROMPT_MAX_CHARACTERS) {
       throw new SolPromptCompilationError(initializationPrompt.length);
     }

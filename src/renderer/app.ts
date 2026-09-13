@@ -19,6 +19,7 @@ const remoteUrlElement = document.querySelector<HTMLInputElement>('#remote-url')
 const directoryNameElement = document.querySelector<HTMLInputElement>('#directory-name');
 const targetBranchElement = document.querySelector<HTMLInputElement>('#target-branch');
 const reportDirectoryElement = document.querySelector<HTMLInputElement>('#report-directory');
+const solPromptLanguageElement = document.querySelector<HTMLSelectElement>('#sol-prompt-language');
 const detailsElement = document.querySelector<HTMLElement>('#project-details');
 const promptElement = document.querySelector<HTMLElement>('#prompt-preview');
 const viewProjectDetailsButton = document.querySelector<HTMLButtonElement>('#view-project-details');
@@ -212,6 +213,7 @@ function hydrateSavedProjectConfig(config: ProjectConfig): void {
   if (targetBranchElement !== null) targetBranchElement.value = config.targetBranch;
   if (reportDirectoryElement !== null)
     reportDirectoryElement.value = projectRelativePath(config.localPath, config.reportDirectory);
+  if (solPromptLanguageElement !== null) solPromptLanguageElement.value = config.solPromptLanguage ?? 'en';
 }
 
 async function loadSavedProjectConfig(): Promise<void> {
@@ -233,6 +235,7 @@ async function loadSavedProjectConfig(): Promise<void> {
       if (targetBranchElement !== null) targetBranchElement.value = saved.targetBranch;
       if (reportDirectoryElement !== null)
         reportDirectoryElement.value = projectRelativePath(saved.localPath, saved.reportDirectory);
+      if (solPromptLanguageElement !== null) solPromptLanguageElement.value = saved.solPromptLanguage ?? 'en';
       if (detailsElement !== null) detailsElement.textContent = JSON.stringify(scanned, null, 2);
       if (viewProjectDetailsButton !== null) viewProjectDetailsButton.disabled = false;
       setStatus(`已加载上次项目：${scanned.localPath}。Git 状态已刷新。`);
@@ -259,6 +262,7 @@ function getConfigInput(): ProjectConfigInput {
     currentBranch: scanResult.currentBranch,
     headCommit: scanResult.headCommit,
     governanceManifestPath: scanResult.governanceManifestPath,
+    solPromptLanguage: solPromptLanguageElement?.value === 'zh-CN' ? 'zh-CN' : 'en',
   };
 }
 

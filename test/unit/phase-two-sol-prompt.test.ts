@@ -21,6 +21,7 @@ const project: ProjectConfig = {
   currentBranch: 'main',
   headCommit: '0123456789012345678901234567890123456789',
   governanceManifestPath: 'C:\\Projects\\demo\\docs\\governance\\governance-manifest.yaml',
+  solPromptLanguage: 'en',
 };
 
 const governance = indexGovernanceManifest({
@@ -70,13 +71,28 @@ describe('Sol initialization prompt compiler', () => {
     expect(first.initializationPrompt).not.toContain('governance_history');
     expect(first.initializationPrompt).not.toContain('architecture_revisions');
     expect(first.initializationPrompt).toContain('ARCHITECTURE_FREEZE');
-    expect(first.initializationPrompt).toContain('禁止交给 Luna');
+    expect(first.initializationPrompt).toContain(
+      'ARCHITECTURE_FREEZE is completed by Sol and ORCHESTRATOR, never by Luna.',
+    );
     expect(first.initializationPromptLength).toBe(first.initializationPrompt.length);
     expect(first.initializationPromptLength).toBeLessThanOrEqual(first.initializationPromptMaxLength);
     expect(first.dynamicContext).toContain('current_commit: 0123456789012345678901234567890123456789');
     expect(first.dynamicContext).toContain('governance_active');
     expect(first.dynamicContext).toContain('architecture_revisions');
     expect(first.dynamicContext).toContain('[WRITING_BLOCK type="LUNA_TASK"]');
+  });
+
+  it('uses English by default and supports the Chinese initialization prompt option', () => {
+    const compiler = new SolPromptCompiler();
+    const english = compiler.compile({ project, governance });
+    const chinese = compiler.compile({ project: { ...project, solPromptLanguage: 'zh-CN' }, governance });
+
+    expect(english.initializationPrompt).toContain('You are Sol');
+    expect(english.initializationPrompt).not.toContain('你是 Sol');
+    expect(chinese.initializationPrompt).toContain('你是 Sol');
+    expect(chinese.initializationPrompt).not.toContain('You are Sol');
+    expect(english.initializationPromptLength).toBeLessThanOrEqual(english.initializationPromptMaxLength);
+    expect(chinese.initializationPromptLength).toBeLessThanOrEqual(chinese.initializationPromptMaxLength);
   });
 
   it('rejects an initialization prompt that exceeds the hard character budget', () => {
@@ -116,10 +132,10 @@ describe('Sol initialization prompt compiler', () => {
     expect(roundContext).not.toContain('ghp_very-secret-value');
     expect(roundContext).toContain('[REDACTED]');
     expect(roundContext).toContain('[WRITING_BLOCK type="LUNA_TASK"]');
-    expect(prompt).toContain('每轮最多一个 LUNA_TASK');
-    expect(prompt).toContain('GOVERNANCE_CHANGE 和 ARCHITECTURE_FREEZE 可有多个');
+    expect(prompt).toContain('More than one LUNA_TASK is a protocol error');
+    expect(prompt).toContain('multiple separate GOVERNANCE_CHANGE or ARCHITECTURE_FREEZE blocks');
     expect(prompt).toContain('[USER_MESSAGE]');
-    expect(prompt).toContain('不要附加总结或要求用户启动下一轮');
+    expect(prompt).toContain('do not ask the user to start another round');
   });
 
   it('redacts sensitive assignments through comma, semicolon, and Chinese punctuation', () => {

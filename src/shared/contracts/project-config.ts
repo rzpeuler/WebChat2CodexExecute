@@ -8,7 +8,11 @@ export interface ProjectConfig {
   currentBranch: string;
   headCommit: string;
   governanceManifestPath: string;
+  solPromptLanguage: SolPromptLanguage;
 }
+
+export const SOL_PROMPT_LANGUAGES = ['en', 'zh-CN'] as const;
+export type SolPromptLanguage = (typeof SOL_PROMPT_LANGUAGES)[number];
 
 export interface ProjectScanResult {
   projectId: string;
@@ -76,6 +80,7 @@ export interface ProjectConfigInput {
   currentBranch?: string;
   headCommit?: string;
   governanceManifestPath?: string;
+  solPromptLanguage?: SolPromptLanguage;
 }
 
 export const PROJECT_CONFIG_SCHEMA_VERSION = 1 as const;
@@ -163,7 +168,17 @@ export function parseProjectConfig(value: unknown): ProjectConfig {
   if (!hasFixedGovernanceManifestPath(config)) {
     throw new TypeError(`治理 manifest 路径必须固定为 ${FIXED_GOVERNANCE_MANIFEST_RELATIVE_PATH}`);
   }
-  return { ...config, remoteUrl: sanitizedRemoteUrl };
+  return {
+    ...config,
+    remoteUrl: sanitizedRemoteUrl,
+    solPromptLanguage: parseSolPromptLanguage(config.solPromptLanguage),
+  };
+}
+
+export function parseSolPromptLanguage(value: unknown): SolPromptLanguage {
+  if (value === undefined) return 'en';
+  if ((SOL_PROMPT_LANGUAGES as readonly unknown[]).includes(value)) return value as SolPromptLanguage;
+  throw new TypeError(`Project config solPromptLanguage must be one of ${SOL_PROMPT_LANGUAGES.join(', ')}`);
 }
 
 export function assertProjectConfigList(value: unknown): asserts value is ProjectConfig[] {

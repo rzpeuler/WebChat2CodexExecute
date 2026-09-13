@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { AtomicJsonFileStore, SnapshotFormatError } from '../state/persistence.js';
 import {
   PROJECT_CONFIG_SCHEMA_VERSION,
+  parseSolPromptLanguage,
   parseProjectConfigList,
   type ProjectConfig,
   type ProjectConfigInput,
@@ -366,6 +367,7 @@ export function normalizeProjectConfig(input: ProjectConfigInput): ProjectConfig
     currentBranch: input.currentBranch?.trim() || 'HEAD',
     headCommit,
     governanceManifestPath,
+    solPromptLanguage: parseSolPromptLanguage(input.solPromptLanguage),
   };
   try {
     assertNoForbiddenKeys(config);
@@ -610,6 +612,7 @@ export class ProjectConfigService {
       return new SolPromptCompiler().compile({
         project,
         governance: manifest ?? { version: 1, documents: [] },
+        language: project.solPromptLanguage,
         writingBlockTemplates,
       });
     } catch (error) {

@@ -81,10 +81,10 @@ describe('Writing Block template validation', () => {
 
     const prompt = await preview(repository);
     expect(prompt.initializationPrompt).toContain('docs/governance/templates/writing-blocks');
-    expect(prompt.initializationPrompt).toContain('块正文必须是一个完整 JSON 对象');
-    expect(prompt.initializationPrompt).toContain('尾逗号');
+    expect(prompt.initializationPrompt).toContain('Use JSON only');
+    expect(prompt.initializationPrompt).toContain('trailing commas');
     expect(prompt.initializationPrompt).toContain('luna-task.template.json');
-    expect(prompt.initializationPrompt).toContain('普通实现细节');
+    expect(prompt.initializationPrompt).toContain('ordinary technical trade-offs');
     expect(prompt.initializationPrompt).not.toContain('<填写唯一任务 ID>');
     expect(prompt.dynamicContext).not.toContain('<填写唯一任务 ID>');
     expect(prompt.dynamicContext).not.toContain('Rule: use \\"quoted\\" text');
@@ -303,6 +303,7 @@ describe('Writing Block template validation', () => {
       currentBranch: scan.currentBranch,
       headCommit: scan.headCommit,
       governanceManifestPath: scan.governanceManifestPath,
+      solPromptLanguage: 'en' as const,
     };
     const compiler = { compileGovernanceReconciliationPrompt: vi.fn(() => 'prompt') };
     const manifestStore = new GovernanceManifestStore(scan.localPath, 'docs/governance/governance-manifest.yaml');
@@ -383,6 +384,7 @@ describe('Writing Block template validation', () => {
       currentBranch: scan.currentBranch,
       headCommit: scan.headCommit,
       governanceManifestPath: scan.governanceManifestPath,
+      solPromptLanguage: 'en' as const,
     };
     const notifier = { notify: vi.fn() } as unknown as NotificationService;
     const edgeStart = vi.spyOn(EdgeProfileManager.prototype, 'startOrReuse');
@@ -441,6 +443,7 @@ describe('Writing Block template validation', () => {
           currentBranch: scan.currentBranch,
           headCommit: scan.headCommit,
           governanceManifestPath: join(repository, 'custom-governance-manifest.yaml'),
+          solPromptLanguage: 'en',
         },
         userDataDirectory,
         notifier,

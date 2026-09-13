@@ -16,6 +16,8 @@ describe('renderer UI layout', () => {
     expect(html).toContain('id="content-dialog"');
     expect(html).toContain('id="content-copy"');
     expect(html).toContain('id="content-dialog-body"');
+    expect(html).toContain('id="sol-prompt-language"');
+    expect(html).toContain('option value="en" selected');
   });
 
   it('wires both configuration and prompt content to the shared dialog', async () => {
@@ -33,6 +35,7 @@ describe('renderer UI layout', () => {
     expect(app).toContain('window.desktopApi.loadProjectConfigs()');
     expect(app).toContain('hydrateSavedProjectConfig');
     expect(app).toContain('projectRelativePath');
+    expect(app).toContain('solPromptLanguage');
     expect(app).toContain('已加载上次项目配置，但 Git 状态刷新失败');
   });
 

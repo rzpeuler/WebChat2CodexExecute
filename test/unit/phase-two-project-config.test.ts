@@ -72,6 +72,21 @@ describe('phase two project configuration', () => {
     expect(persisted).not.toContain('super-secret');
   });
 
+  it('persists the Sol prompt language and defaults legacy configurations to English', async () => {
+    const repository = await gitRepository();
+    const scan = await scanGitProject(repository);
+    const storePath = join(await temporaryDirectory(), 'projects.json');
+    const store = new ProjectConfigStore(storePath);
+    const saved = await store.save({ ...scan, reportDirectory: 'reports', solPromptLanguage: 'zh-CN' });
+
+    expect(saved.solPromptLanguage).toBe('zh-CN');
+    expect((await store.loadAll())[0]?.solPromptLanguage).toBe('zh-CN');
+
+    const { solPromptLanguage: _language, ...legacyConfig } = saved;
+    await writeFile(storePath, JSON.stringify([legacyConfig]), 'utf8');
+    expect((await new ProjectConfigStore(storePath).loadAll())[0]?.solPromptLanguage).toBe('en');
+  });
+
   it('overwrites configurations for the same local directory and preserves the stable project id', async () => {
     const repository = await gitRepository();
     const otherRepository = await gitRepository();

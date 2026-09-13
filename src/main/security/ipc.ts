@@ -1,6 +1,10 @@
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from 'electron';
 import type { RuntimeInfo, RendererApi } from '../../shared/contracts/renderer-api.js';
-import type { ProjectConfigInput, ProjectConfig } from '../../shared/contracts/project-config.js';
+import {
+  SOL_PROMPT_LANGUAGES,
+  type ProjectConfigInput,
+  type ProjectConfig,
+} from '../../shared/contracts/project-config.js';
 import {
   sanitizeDashboardSnapshot,
   validateDashboardCommand,
@@ -103,6 +107,9 @@ function assertProjectConfigInput(value: unknown): asserts value is ProjectConfi
   }
   if (value.remoteUrl !== undefined && value.remoteUrl !== null && typeof value.remoteUrl !== 'string') {
     throw new IpcSecurityError('IPC_INVALID_ARGUMENT', 'remoteUrl must be a string or null');
+  }
+  if (value.solPromptLanguage !== undefined && !SOL_PROMPT_LANGUAGES.includes(value.solPromptLanguage as never)) {
+    throw new IpcSecurityError('IPC_INVALID_ARGUMENT', 'solPromptLanguage must be en or zh-CN');
   }
 }
 

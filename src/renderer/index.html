@@ -59,6 +59,12 @@
               >目标分支<input id="target-branch" value="main" placeholder="已有项目默认使用扫描到的当前分支"
             /></label>
             <label>报告目录<input id="report-directory" required value="docs/task-reports" /></label>
+            <label
+              >Sol 初始化提示词语言<select id="sol-prompt-language">
+                <option value="en" selected>English（默认）</option>
+                <option value="zh-CN">中文</option>
+              </select></label
+            >
           </div>
           <div class="actions">
             <button id="scan" type="button">扫描项目</button>
@@ -71,8 +77,9 @@
           </div>
         </form>
         <p class="helper-text">
-          “升级治理协议”只处理 W2C 托管的治理模板与 manifest，采用增量更新并自动备份；发现用户改动时会停止，不覆盖项目内容。
-          升级后请将生成的最新 Sol 提示词复制到对应 ChatGPT Project 背景。
+          “升级治理协议”只处理 W2C 托管的治理模板与
+          manifest；托管文件内容有改动时会先备份再覆盖，发现缺失、多余或不安全条目时会停止。 升级后请将生成的最新 Sol
+          提示词复制到对应 ChatGPT Project 背景。
         </p>
         <div class="preview-actions">
           <button id="view-project-details" class="button-secondary" type="button" disabled>查看当前配置</button>
