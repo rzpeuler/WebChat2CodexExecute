@@ -13,7 +13,12 @@ import type {
   EdgeProfileOptions,
 } from './types.js';
 import { isAllowedCdpWebSocketUrl } from './url-security.js';
-import { findOwnedEdgeProcessId, setWindowsProcessWindowVisibility } from './windows-window-controller.js';
+import {
+  findOwnedEdgeProcessId,
+  findOwnedEdgeWindowHandle,
+  setWindowsProcessWindowVisibility,
+  setWindowsWindowVisibility,
+} from './windows-window-controller.js';
 
 export type EdgeProfileErrorCode =
   | 'EDGE_EXECUTABLE_NOT_FOUND'
@@ -338,6 +343,7 @@ export class EdgeProfileManager {
   private readonly ownershipStore: StateSnapshotStore<EdgeProfileOwnership>;
   private ownership: EdgeProfileOwnership | null = null;
   private ownedProcessId: number | null = null;
+  private controlledWindowHandle: number | null = null;
 
   constructor(options: EdgeProfileOptions) {
     if (
@@ -387,8 +393,11 @@ export class EdgeProfileManager {
       this.ownership = ownership;
       try {
         this.ownedProcessId = await findOwnedEdgeProcessId(ownership.token, ownership.userDataDirectory);
+        this.controlledWindowHandle = await this.findControlledWindowHandle();
+        await this.hideUncontrolledWindows();
       } catch (error) {
         this.ownedProcessId = null;
+        this.controlledWindowHandle = null;
         console.warn('[edge] unable to resolve the reused Edge process id; CDP remains available', error);
       }
       return this.handle(executablePath, null, true);
@@ -403,6 +412,7 @@ export class EdgeProfileManager {
       `--web-chat2codex-edge-ownership=${ownership.token}`,
       '--no-first-run',
       '--no-default-browser-check',
+      '--new-window',
       ...(this.options.initialUrl === undefined
         ? []
         : [this.options.appMode === false ? this.options.initialUrl : `--app=${this.options.initialUrl}`]),
@@ -421,15 +431,19 @@ export class EdgeProfileManager {
     }
     this.exited = false;
     this.ownedProcessId = this.process.pid ?? null;
+    this.controlledWindowHandle = await this.findControlledWindowHandle();
+    await this.hideUncontrolledWindows();
     this.process.once('exit', () => {
       this.exited = true;
       this.process = null;
       this.ownedProcessId = null;
+      this.controlledWindowHandle = null;
       this.options.onProcessExit?.('exit');
     });
     this.process.once('error', () => {
       this.exited = true;
       this.ownedProcessId = null;
+      this.controlledWindowHandle = null;
       this.options.onProcessExit?.('error');
     });
     const waitForPort = this.options.waitForDebugPort ?? defaultWaitForPort;
@@ -450,24 +464,28 @@ export class EdgeProfileManager {
 
   async hideWindow(): Promise<void> {
     const processId = this.process?.pid ?? this.ownedProcessId;
-    if (processId !== null && processId !== undefined)
-      await setWindowsProcessWindowVisibility(
-        processId,
-        false,
-        this.ownership?.token ?? '',
-        this.options.userDataDirectory,
-      );
+    if (processId === null || processId === undefined) return;
+    await setWindowsProcessWindowVisibility(
+      processId,
+      false,
+      this.ownership?.token ?? '',
+      this.options.userDataDirectory,
+    );
   }
 
   async showWindow(): Promise<void> {
     const processId = this.process?.pid ?? this.ownedProcessId;
-    if (processId !== null && processId !== undefined)
-      await setWindowsProcessWindowVisibility(
-        processId,
-        true,
-        this.ownership?.token ?? '',
-        this.options.userDataDirectory,
-      );
+    if (processId === null || processId === undefined) return;
+    this.controlledWindowHandle ??= await this.findControlledWindowHandle();
+    if (this.controlledWindowHandle === null) return;
+    await setWindowsProcessWindowVisibility(
+      processId,
+      false,
+      this.ownership?.token ?? '',
+      this.options.userDataDirectory,
+      this.controlledWindowHandle,
+    );
+    await setWindowsWindowVisibility(this.controlledWindowHandle, true);
   }
 
   assertUsable(): void {
@@ -483,6 +501,32 @@ export class EdgeProfileManager {
     this.process?.kill();
     this.process = null;
     this.ownedProcessId = null;
+    this.controlledWindowHandle = null;
+  }
+
+  private async findControlledWindowHandle(): Promise<number | null> {
+    if (this.ownedProcessId === null || this.ownership === null) return null;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const windowHandle = await findOwnedEdgeWindowHandle(
+        this.ownedProcessId,
+        this.ownership.token,
+        this.options.userDataDirectory,
+      );
+      if (windowHandle !== null) return windowHandle;
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+    return null;
+  }
+
+  private async hideUncontrolledWindows(): Promise<void> {
+    if (this.ownedProcessId === null || this.controlledWindowHandle === null) return;
+    await setWindowsProcessWindowVisibility(
+      this.ownedProcessId,
+      false,
+      this.ownership?.token ?? '',
+      this.options.userDataDirectory,
+      this.controlledWindowHandle,
+    );
   }
 
   private handle(executablePath: string, process: EdgeProcess | null, reused: boolean): EdgeProfileHandle {
