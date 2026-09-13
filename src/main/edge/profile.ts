@@ -391,6 +391,10 @@ export class EdgeProfileManager {
         );
       }
       this.ownership = ownership;
+      // A previous owned process may have exited while the debugging endpoint
+      // stayed alive briefly. A successful ownership-checked reuse is a fresh
+      // usable lifecycle and must clear the stale exit flag.
+      this.exited = false;
       try {
         this.ownedProcessId = await findOwnedEdgeProcessId(ownership.token, ownership.userDataDirectory);
         this.controlledWindowHandle = await this.findControlledWindowHandle();

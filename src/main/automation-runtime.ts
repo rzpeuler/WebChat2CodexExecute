@@ -5,6 +5,7 @@ import { sanitizeDashboardSnapshot } from '../shared/contracts/dashboard.js';
 import { AtomicJsonFileStore } from './state/persistence.js';
 import {
   EdgeProfileManager,
+  EdgeProfileError,
   EdgeStateAdapter,
   HttpCdpTransport,
   CdpConversationController,
@@ -362,37 +363,42 @@ export async function createAutomationRuntime(
   assertFixedGovernanceManifestPath(config.localPath, config.governanceManifestPath);
   const stateDirectory = join(userDataDirectory, 'state');
   let stopRequested = false;
-  const profile = new EdgeProfileManager({
-    userDataDirectory: join(userDataDirectory, 'edge-profile'),
-    remoteDebuggingPort: DEFAULT_EDGE_PORT,
-    initialUrl: CHATGPT_URL,
-    onProcessExit: () =>
-      stopRequested
-        ? undefined
-        : notifier.notify({
-            project: config.projectId,
-            taskId: null,
-            phase: 'EDGE',
-            suggestion: '请检查专用 Edge 是否仍在运行，然后重试。',
-            error: { code: 'EDGE_PROCESS_EXITED', message: '专用 Edge 进程已退出。' },
-            level: 'NEEDS_USER',
-          }),
-  });
   let transport: HttpCdpTransport | null = null;
   let adapter: EdgeStateAdapter | null = null;
   let conversations: CdpConversationController | null = null;
   let edgeProcess: EdgeProcess | null = null;
+  const invalidateEdgeConnection = (): void => {
+    transport?.close();
+    transport = null;
+    adapter = null;
+    conversations = null;
+    edgeProcess = null;
+  };
+  const profile = new EdgeProfileManager({
+    userDataDirectory: join(userDataDirectory, 'edge-profile'),
+    remoteDebuggingPort: DEFAULT_EDGE_PORT,
+    initialUrl: CHATGPT_URL,
+    onProcessExit: () => {
+      invalidateEdgeConnection();
+      if (!stopRequested) {
+        notifier.notify({
+          project: config.projectId,
+          taskId: null,
+          phase: 'EDGE',
+          suggestion: '专用 Edge 已关闭。点击“打开 Edge”可重新启动并恢复连接。',
+          error: { code: 'EDGE_PROCESS_EXITED', message: '专用 Edge 进程已退出。' },
+          level: 'NEEDS_USER',
+        });
+      }
+    },
+  });
   const bindingStore = new SolSessionBindingStore({
     filePath: join(stateDirectory, `${config.projectId}-sol-session.json`),
   });
 
   const closeEdge = async (): Promise<void> => {
     const process = edgeProcess;
-    edgeProcess = null;
-    transport?.close();
-    transport = null;
-    adapter = null;
-    conversations = null;
+    invalidateEdgeConnection();
     let closeError: unknown = null;
     try {
       profile.close();
@@ -432,8 +438,13 @@ export async function createAutomationRuntime(
   const ensureEdge = async (): Promise<void> => {
     if (stopRequested) throw runtimeLifecycleError('RUNTIME_STOPPING', '自动化运行时正在停止，请稍候。');
     if (transport !== null && adapter !== null && conversations !== null) {
-      profile.assertUsable();
-      return;
+      try {
+        profile.assertUsable();
+        return;
+      } catch (error) {
+        if (!(error instanceof EdgeProfileError) || error.code !== 'EDGE_PROCESS_EXITED') throw error;
+        invalidateEdgeConnection();
+      }
     }
     await ensureEdgeStart();
   };
@@ -784,7 +795,10 @@ export async function createAutomationRuntime(
     return lifecycle.stop();
   };
   const hideEdge = (): Promise<void> => profile.hideWindow();
-  const showEdge = (): Promise<void> => profile.showWindow();
+  const showEdge = async (): Promise<void> => {
+    await ensureEdge();
+    await profile.showWindow();
+  };
   return { orchestrator, executeCommand, hideEdge, showEdge, startPolling: lifecycle.startPolling, stop };
 }
 

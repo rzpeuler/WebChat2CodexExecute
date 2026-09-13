@@ -495,6 +495,41 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     expect(calls[0]?.args).not.toContain('--enable-automation');
   });
 
+  it('can start a replacement Edge process after the owned process exits', async () => {
+    const profileDirectory = await mkdtemp(join(tmpdir(), 'web-chat2codex-edge-restart-'));
+    const processes: EdgeProcess[] = [];
+    const listeners: Array<(...args: unknown[]) => void> = [];
+    const makeProcess = (): EdgeProcess => {
+      const process: EdgeProcess = {
+        exitCode: null,
+        kill: () => true,
+        once: (_event, listener) => {
+          listeners.push(listener);
+        },
+      };
+      processes.push(process);
+      return process;
+    };
+    const manager = new EdgeProfileManager({
+      executablePath: 'C:\\Edge\\msedge.exe',
+      userDataDirectory: profileDirectory,
+      remoteDebuggingPort: 9334,
+      fileExists: async () => true,
+      debugPortProbe: async () => false,
+      waitForDebugPort: async () => true,
+      processRunner: () => makeProcess(),
+    });
+
+    await expect(manager.startOrReuse()).resolves.toMatchObject({ reused: false });
+    const firstExit = listeners.shift();
+    expect(firstExit).toBeDefined();
+    processes[0]!.exitCode = 1;
+    firstExit!();
+
+    await expect(manager.startOrReuse()).resolves.toMatchObject({ reused: false });
+    expect(processes).toHaveLength(2);
+  });
+
   it('requires two stable samples and never marks an incomplete Writing Block complete', async () => {
     const transport = new FakeTransport();
     const adapter = new EdgeStateAdapter(transport, { stableSampleCount: 2 });
