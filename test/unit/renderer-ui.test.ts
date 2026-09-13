@@ -70,4 +70,10 @@ describe('renderer UI layout', () => {
     expect(app).toContain('当前动作不可用');
     expect(app).toContain('动作已处理');
   });
+
+  it('omits round-history records whose displayed fields are all empty', async () => {
+    const app = await readRendererFile('app.ts');
+    expect(app).toContain('function hasRenderableRoundHistoryData(record: DashboardRoundRecord)');
+    expect(app).toContain('snapshot.roundHistory.filter(hasRenderableRoundHistoryData).reverse()');
+  });
 });

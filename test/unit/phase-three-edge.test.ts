@@ -530,10 +530,42 @@ describe('dedicated Edge profile and CDP state adapter', () => {
   });
 
   it('keeps the last contiguous block sequence and never falls back across a newer incomplete block', () => {
-    const first = '[WRITING_BLOCK type="ARCHITECTURE_FREEZE"]\n{"freeze_id":"a"}\n[/WRITING_BLOCK]';
-    const second = '[WRITING_BLOCK type="ARCHITECTURE_FREEZE"]\n{"freeze_id":"b"}\n[/WRITING_BLOCK]';
+    const freeze = (id: string) =>
+      `[WRITING_BLOCK type="ARCHITECTURE_FREEZE"]\n${JSON.stringify({
+        freeze_id: id,
+        version: 1,
+        download_url: `https://example.test/${id}.md`,
+        sha256_if_known: null,
+        reason: 'freeze architecture',
+        affected_scope: ['src'],
+        luna_follow_up: 'Use the frozen architecture.',
+      })}\n[/WRITING_BLOCK]`;
+    const first = freeze('a');
+    const second = freeze('b');
     expect(extractWritingBlockTail(`reasoning\n${first}\n${second}\nend`)).toBe(`${first}\n${second}`);
-    expect(extractWritingBlockTail(`${first}\n[WRITING_BLOCK type="ARCHITECTURE_FREEZE"]\n{"freeze_id":"c"`)).toBeNull();
+    expect(
+      extractWritingBlockTail(`${first}\n[WRITING_BLOCK type="ARCHITECTURE_FREEZE"]\n{"freeze_id":"c"`),
+    ).toBeNull();
+  });
+
+  it('skips an invalid earlier candidate and selects the newest valid candidate of the same type', () => {
+    const validTask = {
+      task_id: 'task-2',
+      title: 'Valid task',
+      objective: 'Run the approved task.',
+      base_commit: '0123456789012345678901234567890123456789',
+      scope: ['src'],
+      out_of_scope: ['docs'],
+      deliverables: ['implementation'],
+      validation_commands: ['npm test'],
+      governance_revision: 1,
+      architecture_revision_set: [],
+      report_path: 'docs/task-reports/task-2.md',
+      remote_sync_policy: { push: false },
+    };
+    const invalid = '[WRITING_BLOCK type="LUNA_TASK"]\n{bad json}\n[/WRITING_BLOCK]';
+    const valid = `[WRITING_BLOCK type="LUNA_TASK"]\n${JSON.stringify(validTask)}\n[/WRITING_BLOCK]`;
+    expect(extractWritingBlockTail(`思考\n${invalid}\n${valid}`)).toBe(valid);
   });
 
   it('persists an ownership token and rejects an external process on a reused port', async () => {
@@ -645,12 +677,11 @@ describe('dedicated Edge profile and CDP state adapter', () => {
 
   it('extracts a visible complete Writing Block candidate inside the assistant message', () => {
     const script = domSnapshotScript();
-    expect(script).toContain("const OPEN_MARKER = '[WRITING_BLOCK';");
-    expect(script).toContain("const ANGLE_OPEN_MARKER = '<WRITING_BLOCK';");
-    expect(script).toContain('const assistantCandidates = assistantNode === null');
-    expect(script).toContain('const finalAssistant = assistantRootTail ||');
-    expect(script).toContain('extractWritingBlockTail');
-    expect(script).toContain('right.value.length - left.value.length');
+    expect(script).toContain('const assistantRootText = text(assistantNode);');
+    expect(script).toContain('const finalAssistant = assistantRootText;');
+    expect(script).toContain('Node-side extraction scans this whole');
+    expect(script).not.toContain('assistantCandidates');
+    expect(script).not.toContain('right.value.length - left.value.length');
     expect(script).toContain('const loginWall = authPath || explicitLoginNodes.length > 0');
   });
 

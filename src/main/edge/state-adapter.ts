@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { CdpTransport, EdgeAdapterRules, EdgePageSnapshot, EdgeSolObservation, CdpTarget } from './types.js';
-import { normalizeWritingBlockMarkers } from '../../shared/protocol/writing-block.js';
+import {
+  normalizeWritingBlockMarkers,
+  selectLatestValidWritingBlockSequence,
+} from '../../shared/protocol/writing-block.js';
 import { hasKnownIdentity, isAllowedChatGptUrl } from './url-security.js';
 
 export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
@@ -21,90 +24,12 @@ export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
   sessionLostPatterns: [/conversation.*not found/i, /chat.*unavailable/i, /会话不存在/i],
 };
 
-/**
- * Extract the last complete, contiguous Writing Block sequence from one
- * assistant message. A newer unclosed block returns null so an older block
- * can never be consumed by mistake.
- */
 export function extractWritingBlockTail(value: string): string | null {
-  const normalized = normalizeWritingBlockMarkers(value);
-  const markerPattern = /\[WRITING_BLOCK\b[^\]]*\]|\[\/WRITING_BLOCK\]/g;
-  const complete: Array<{ start: number; end: number }> = [];
-  let depth = 0;
-  let currentStart: number | null = null;
-  let match: RegExpExecArray | null;
-
-  while ((match = markerPattern.exec(normalized)) !== null) {
-    const token = match[0];
-    if (token === '[/WRITING_BLOCK]') {
-      if (depth === 0 || currentStart === null) return null;
-      depth -= 1;
-      if (depth === 0) {
-        complete.push({ start: currentStart, end: match.index + token.length });
-        currentStart = null;
-      }
-      continue;
-    }
-    if (depth === 0) currentStart = match.index;
-    depth += 1;
-  }
-
-  if (depth !== 0 || complete.length === 0) return null;
-
-  let first = complete.length - 1;
-  while (first > 0) {
-    const previous = complete[first - 1]!;
-    const current = complete[first]!;
-    if (normalized.slice(previous.end, current.start).trim() !== '') break;
-    first -= 1;
-  }
-  return normalized.slice(complete[first]!.start, complete.at(-1)!.end).trim();
+  return selectLatestValidWritingBlockSequence(normalizeWritingBlockMarkers(value));
 }
 
 export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER_RULES): string {
   return `(() => {
-  const OPEN_MARKER = '[WRITING_BLOCK';
-  const CLOSE_MARKER = '[/WRITING_BLOCK]';
-  const ANGLE_OPEN_MARKER = '<WRITING_BLOCK';
-  const ANGLE_CLOSE_MARKER = '</WRITING_BLOCK>';
-  const hasOpenMarker = (value) => value.includes(OPEN_MARKER) || value.includes(ANGLE_OPEN_MARKER);
-  const hasCloseMarker = (value) => value.includes(CLOSE_MARKER) || value.includes(ANGLE_CLOSE_MARKER);
-  const normalizedMarkers = (value) => value
-    .replaceAll(ANGLE_OPEN_MARKER, OPEN_MARKER)
-    .replaceAll(ANGLE_CLOSE_MARKER, CLOSE_MARKER);
-  const extractWritingBlockTail = (value) => {
-    const normalized = normalizedMarkers(value);
-    const markerPattern = /\\[WRITING_BLOCK\\b[^\\]]*\\]|\\[\\/WRITING_BLOCK\\]/g;
-    const complete = [];
-    let depth = 0;
-    let currentStart = null;
-    let match;
-    while ((match = markerPattern.exec(normalized)) !== null) {
-      const token = match[0];
-      if (token === CLOSE_MARKER) {
-        if (depth === 0 || currentStart === null) return null;
-        depth -= 1;
-        if (depth === 0) {
-          complete.push({ start: currentStart, end: match.index + token.length });
-          currentStart = null;
-        }
-      } else {
-        if (depth === 0) currentStart = match.index;
-        depth += 1;
-      }
-    }
-    if (depth !== 0 || complete.length === 0) return null;
-    let first = complete.length - 1;
-    while (first > 0) {
-      const previous = complete[first - 1];
-      const current = complete[first];
-      if (normalized.slice(previous.end, current.start).trim() !== '') break;
-      first -= 1;
-    }
-    return normalized.slice(complete[first].start, complete[complete.length - 1].end).trim();
-  };
-  const writingBlockCount = (value) =>
-    (normalizedMarkers(value).match(/\\[WRITING_BLOCK\\b/g) || []).length;
   const isVisible = (node) => {
     if (!(node instanceof HTMLElement)) return false;
     const style = window.getComputedStyle(node);
@@ -118,25 +43,11 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
   const assistantNodes = visibleAll(${JSON.stringify(rules.assistantSelectors)});
   const assistantNode = assistantNodes.at(-1) || null;
   const assistantRootText = text(assistantNode);
-  const assistantRootHasWritingBlockMarker = hasOpenMarker(assistantRootText) || hasCloseMarker(assistantRootText);
-  const assistantRootTail = extractWritingBlockTail(assistantRootText);
-  const assistantCandidates = assistantNode === null
-    ? []
-    : assistantRootHasWritingBlockMarker && assistantRootTail === null
-      ? []
-      : [assistantNode, ...Array.from(assistantNode.querySelectorAll('*'))]
-        .filter(isVisible)
-        .map((node) => ({ node, value: extractWritingBlockTail(text(node)) }))
-        .filter(({ value }) => typeof value === 'string' && hasOpenMarker(value) && hasCloseMarker(value))
-        .map((candidate) => ({ ...candidate, blockCount: writingBlockCount(candidate.value) }));
-  // The assistant turn's root is the authoritative DOM boundary. If its tail
-  // contains a complete block sequence, prefer it over descendant nodes:
-  // descendant nodes can represent an intermediate thought/markdown fragment
-  // and choosing the longest fragment reintroduces block-outside-content errors.
-  const finalAssistant = assistantRootTail ||
-    assistantCandidates
-      .sort((left, right) => right.blockCount - left.blockCount || right.value.length - left.value.length)
-      .at(0)?.value || assistantRootText;
+  // Return the complete assistant turn. Node-side extraction scans this whole
+  // text and delegates every candidate to the real Writing Block validator;
+  // selecting a descendant or the longest fragment here can splice together
+  // an incomplete thought and a valid final block.
+  const finalAssistant = assistantRootText;
   const errors = all(${JSON.stringify(rules.errorSelectors)}).map(text).filter(Boolean).join('\\n');
   const status = all(['[aria-live="polite"]', '[role="status"]', 'button[aria-label]']).map(text).filter(Boolean).join('\\n');
   const project = document.querySelector('[data-project-id], meta[name="chatgpt-project-id"]');

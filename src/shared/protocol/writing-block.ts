@@ -388,6 +388,75 @@ export function normalizeWritingBlockMarkers(input: string): string {
     .replace(ANGLE_CLOSE_MARKER_PATTERN, CLOSE_MARKER);
 }
 
+interface CompleteWritingBlockCandidate {
+  start: number;
+  end: number;
+}
+
+function completeWritingBlockCandidates(input: string): CompleteWritingBlockCandidate[] {
+  const normalized = normalizeWritingBlockMarkers(input);
+  const openingPattern = /\[WRITING_BLOCK\b[^\]]*\]/g;
+  const candidates: CompleteWritingBlockCandidate[] = [];
+  let opening: RegExpExecArray | null;
+  while ((opening = openingPattern.exec(normalized)) !== null) {
+    const closeStart = normalized.indexOf(CLOSE_MARKER, opening.index + opening[0].length);
+    if (closeStart < 0) continue;
+    const end = closeStart + CLOSE_MARKER.length;
+    candidates.push({ start: opening.index, end });
+  }
+  return candidates;
+}
+
+function candidateSequenceText(
+  input: string,
+  candidates: readonly CompleteWritingBlockCandidate[],
+  start: number,
+  end: number,
+): string | null {
+  const first = candidates[start];
+  const last = candidates[end];
+  if (first === undefined || last === undefined) return null;
+  const normalized = normalizeWritingBlockMarkers(input);
+  for (let index = start + 1; index <= end; index += 1) {
+    const previous = candidates[index - 1]!;
+    const current = candidates[index]!;
+    if (normalized.slice(previous.end, current.start).trim() !== '') return null;
+  }
+  return normalized.slice(first.start, last.end).trim();
+}
+
+/**
+ * Select the newest complete block sequence that passes the real protocol
+ * validator. Invalid candidates are skipped; a structurally complete latest
+ * candidate is returned as a fallback so the caller can report its precise
+ * protocol error when no candidate is valid.
+ */
+export function selectLatestValidWritingBlockSequence(input: string): string | null {
+  const normalized = normalizeWritingBlockMarkers(input);
+  const candidates = completeWritingBlockCandidates(normalized);
+  if (candidates.length === 0) return null;
+
+  // A newer unfinished block must never make an older answer look current.
+  if (normalized.lastIndexOf(OPEN_MARKER) > normalized.lastIndexOf(CLOSE_MARKER)) return null;
+
+  for (let end = candidates.length - 1; end >= 0; end -= 1) {
+    for (let start = 0; start <= end; start += 1) {
+      const text = candidateSequenceText(normalized, candidates, start, end);
+      if (text === null) continue;
+      try {
+        parseWritingBlocks(text);
+        return text;
+      } catch {
+        // This candidate is structurally complete but does not satisfy the
+        // template/schema. Continue with the next candidate in the tail.
+      }
+    }
+  }
+
+  const last = candidates.at(-1)!;
+  return normalized.slice(last.start, last.end).trim();
+}
+
 function decodeUnicodeEscapes(value: string): string {
   return value.replace(/\\u([0-9a-f]{4})/gi, (_match, code: string) => String.fromCharCode(Number.parseInt(code, 16)));
 }
@@ -959,7 +1028,7 @@ function buildBlock(
             ? ARCHITECTURE_FREEZE_REQUIRED_FIELDS
             : type === 'SESSION_ROTATION'
               ? SESSION_ROTATION_REQUIRED_FIELDS
-            : BLOCKED_REQUIRED_FIELDS;
+              : BLOCKED_REQUIRED_FIELDS;
   for (const field of requiredFields) knownFields.add(field);
   if (type === 'LUNA_TASK') {
     knownFields.add('task_kind');
@@ -1098,8 +1167,7 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
     architectureFreezes: blocks.filter(
       (block): block is ArchitectureFreezeBlock => block.type === 'ARCHITECTURE_FREEZE',
     ),
-    sessionRotation:
-      blocks.find((block): block is SessionRotationBlock => block.type === 'SESSION_ROTATION') ?? null,
+    sessionRotation: blocks.find((block): block is SessionRotationBlock => block.type === 'SESSION_ROTATION') ?? null,
     blocked: blocks.filter((block): block is BlockedBlock => block.type === 'BLOCKED'),
   };
 }

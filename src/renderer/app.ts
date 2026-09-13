@@ -669,9 +669,29 @@ function appendRoundHistoryCell(row: HTMLTableRowElement, value: string, fullVal
   row.append(cell);
 }
 
+function hasRoundHistoryDisplayValue(value: string | number | null): boolean {
+  if (typeof value === 'string') return value.trim() !== '';
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+function hasRenderableRoundHistoryData(record: DashboardRoundRecord): boolean {
+  return [
+    record.taskKind,
+    record.taskTitle,
+    record.lunaStatus,
+    record.reportSummary,
+    record.testsStatus,
+    record.elapsedMs,
+    record.completedAt,
+  ].some((value) => hasRoundHistoryDisplayValue(value));
+}
+
 function renderRoundHistory(snapshot: DashboardSnapshot): void {
   if (roundHistoryBodyElement === null) return;
-  const records = [...snapshot.roundHistory].reverse();
+  // A round can be persisted before its task/report fields are populated. Do
+  // not turn that intermediate snapshot into an empty-looking table row; the
+  // next update will render the same round once it has meaningful data.
+  const records = snapshot.roundHistory.filter(hasRenderableRoundHistoryData).reverse();
   const totalPages = Math.max(1, Math.ceil(records.length / ROUND_HISTORY_PAGE_SIZE));
   roundHistoryPage = Math.min(roundHistoryPage, totalPages - 1);
   const pageRecords = records.slice(
