@@ -16,10 +16,18 @@ export type WritingBlockType = (typeof WRITING_BLOCK_TYPES)[number];
 
 export function extractUserMessage(input: unknown): string | null {
   if (typeof input !== 'string') return null;
-  const trimmed = input.trim();
-  if (!trimmed.startsWith(USER_MESSAGE_OPEN_MARKER) || !trimmed.endsWith(USER_MESSAGE_CLOSE_MARKER)) return null;
-  const message = trimmed.slice(USER_MESSAGE_OPEN_MARKER.length, -USER_MESSAGE_CLOSE_MARKER.length).trim();
-  if (message === '' || message.includes(USER_MESSAGE_OPEN_MARKER) || message.includes(USER_MESSAGE_CLOSE_MARKER))
+  const start = input.indexOf(USER_MESSAGE_OPEN_MARKER);
+  if (start < 0) return null;
+  const bodyStart = start + USER_MESSAGE_OPEN_MARKER.length;
+  const end = input.indexOf(USER_MESSAGE_CLOSE_MARKER, bodyStart);
+  if (end < 0) return null;
+  const message = input.slice(bodyStart, end).trim();
+  if (
+    message === '' ||
+    message.includes(USER_MESSAGE_OPEN_MARKER) ||
+    message.includes(USER_MESSAGE_CLOSE_MARKER) ||
+    input.indexOf(USER_MESSAGE_OPEN_MARKER, bodyStart) >= 0
+  )
     return null;
   return message;
 }
@@ -393,18 +401,201 @@ interface CompleteWritingBlockCandidate {
   end: number;
 }
 
+const TEMPLATE_FIELD_ORDER: Record<WritingBlockType, readonly string[]> = {
+  LUNA_TASK: [
+    'schema_version',
+    'task_kind',
+    'task_id',
+    'title',
+    'objective',
+    'base_commit',
+    'scope',
+    'out_of_scope',
+    'deliverables',
+    'validation_commands',
+    'governance_revision',
+    'architecture_revision_set',
+    'report_path',
+    'remote_sync_policy',
+    'execution_semantics',
+  ],
+  GOVERNANCE_CHANGE: [
+    'schema_version',
+    'change_id',
+    'operation',
+    'document_id',
+    'path',
+    'reason',
+    'risk_level',
+    'affected_agents',
+    'content',
+  ],
+  GOVERNANCE_RECONCILIATION: ['schema_version', 'status', 'baseline_commit', 'reason', 'files'],
+  ARCHITECTURE_FREEZE: [
+    'schema_version',
+    'freeze_id',
+    'version',
+    'download_url',
+    'sha256_if_known',
+    'reason',
+    'affected_scope',
+    'luna_follow_up',
+  ],
+  SESSION_ROTATION: ['schema_version', 'reason', 'action'],
+  BLOCKED: ['schema_version', 'code', 'reason'],
+};
+
+function skipJsonWhitespace(source: string, start: number): number {
+  let cursor = start;
+  while (cursor < source.length && /\s/.test(source[cursor]!)) cursor += 1;
+  return cursor;
+}
+
+function readJsonString(source: string, start: number): { end: number; value: string } | null {
+  if (source[start] !== '"') return null;
+  let cursor = start + 1;
+  let escaped = false;
+  while (cursor < source.length) {
+    const character = source[cursor]!;
+    if (escaped) {
+      escaped = false;
+      cursor += 1;
+      continue;
+    }
+    if (character === '\\') {
+      escaped = true;
+      cursor += 1;
+      continue;
+    }
+    if (character === '"') {
+      try {
+        return { end: cursor + 1, value: JSON.parse(source.slice(start, cursor + 1)) as string };
+      } catch {
+        return null;
+      }
+    }
+    cursor += 1;
+  }
+  return null;
+}
+
+function scanJsonValueEnd(source: string, start: number): number | null {
+  const first = source[start];
+  if (first === '"') return readJsonString(source, start)?.end ?? null;
+  if (first !== '{' && first !== '[') {
+    let cursor = start;
+    while (cursor < source.length && !',}]'.includes(source[cursor]!)) cursor += 1;
+    return cursor === start ? null : cursor;
+  }
+  const stack: string[] = [first === '{' ? '}' : ']'];
+  let cursor = start + 1;
+  let escaped = false;
+  let inString = false;
+  while (cursor < source.length) {
+    const character = source[cursor]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      cursor += 1;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      cursor += 1;
+      continue;
+    }
+    if (character === '{') stack.push('}');
+    else if (character === '[') stack.push(']');
+    else if (character === '}' || character === ']') {
+      if (stack.at(-1) !== character) return null;
+      stack.pop();
+      if (stack.length === 0) return cursor + 1;
+    }
+    cursor += 1;
+  }
+  return null;
+}
+
+function topLevelJsonKeys(source: string): string[] | null {
+  let cursor = skipJsonWhitespace(source, 0);
+  if (source[cursor] !== '{') return null;
+  cursor = skipJsonWhitespace(source, cursor + 1);
+  const keys: string[] = [];
+  if (source[cursor] === '}') return keys;
+  while (cursor < source.length) {
+    cursor = skipJsonWhitespace(source, cursor);
+    const key = readJsonString(source, cursor);
+    if (key === null) return null;
+    keys.push(key.value);
+    cursor = skipJsonWhitespace(source, key.end);
+    if (source[cursor] !== ':') return null;
+    cursor = skipJsonWhitespace(source, cursor + 1);
+    const valueEnd = scanJsonValueEnd(source, cursor);
+    if (valueEnd === null) return null;
+    cursor = skipJsonWhitespace(source, valueEnd);
+    if (source[cursor] === '}') return keys;
+    if (source[cursor] !== ',') return null;
+    cursor = skipJsonWhitespace(source, cursor + 1);
+  }
+  return null;
+}
+
+function assertTemplateFieldOrder(source: string, blockIndex: number, blockType: WritingBlockType): void {
+  const keys = topLevelJsonKeys(source);
+  if (keys === null) return;
+  const order = TEMPLATE_FIELD_ORDER[blockType];
+  const seen = new Set<string>();
+  let lastKnownIndex = -1;
+  for (const key of keys) {
+    if (seen.has(key)) {
+      throw new WritingBlockProtocolError('WRITING_BLOCK_INVALID_FIELD', `字段 ${key} 重复出现。`, {
+        blockIndex,
+        blockType,
+        field: key,
+      });
+    }
+    seen.add(key);
+    const knownIndex = order.indexOf(key);
+    if (knownIndex >= 0 && knownIndex < lastKnownIndex) {
+      throw new WritingBlockProtocolError(
+        'WRITING_BLOCK_INVALID_FIELD',
+        `字段 ${key} 不符合 ${blockType} 模板字段顺序。请按模板顺序输出字段。`,
+        { blockIndex, blockType, field: key },
+      );
+    }
+    if (knownIndex >= 0) lastKnownIndex = knownIndex;
+  }
+}
+
+function findJsonObjectEnd(input: string, bodyStart: number): number | null {
+  const start = skipJsonWhitespace(input, bodyStart);
+  if (input[start] !== '{') return null;
+  return scanJsonValueEnd(input, start);
+}
+
 function completeWritingBlockCandidates(input: string): CompleteWritingBlockCandidate[] {
   const normalized = normalizeWritingBlockMarkers(input);
   const openingPattern = /\[WRITING_BLOCK\b[^\]]*\]/g;
   const candidates: CompleteWritingBlockCandidate[] = [];
   let opening: RegExpExecArray | null;
   while ((opening = openingPattern.exec(normalized)) !== null) {
+    const objectEnd = findJsonObjectEnd(normalized, opening.index + opening[0].length);
+    if (objectEnd !== null) {
+      const closeStart = normalized.indexOf(CLOSE_MARKER, objectEnd);
+      if (closeStart >= 0 && normalized.slice(objectEnd, closeStart).trim() === '') {
+        candidates.push({ start: opening.index, end: closeStart + CLOSE_MARKER.length });
+        continue;
+      }
+    }
+    // Keep a loose fallback so a sole malformed candidate still produces a
+    // useful JSON/header diagnostic instead of looking like ordinary prose.
     const closeStart = normalized.indexOf(CLOSE_MARKER, opening.index + opening[0].length);
-    if (closeStart < 0) continue;
-    const end = closeStart + CLOSE_MARKER.length;
-    candidates.push({ start: opening.index, end });
+    if (closeStart >= 0) candidates.push({ start: opening.index, end: closeStart + CLOSE_MARKER.length });
   }
-  return candidates;
+  return candidates.filter(
+    (candidate) => !candidates.some((container) => container.start < candidate.start && container.end >= candidate.end),
+  );
 }
 
 function candidateSequenceText(
@@ -417,12 +608,10 @@ function candidateSequenceText(
   const last = candidates[end];
   if (first === undefined || last === undefined) return null;
   const normalized = normalizeWritingBlockMarkers(input);
-  for (let index = start + 1; index <= end; index += 1) {
-    const previous = candidates[index - 1]!;
-    const current = candidates[index]!;
-    if (normalized.slice(previous.end, current.start).trim() !== '') return null;
-  }
-  return normalized.slice(first.start, last.end).trim();
+  return candidates
+    .slice(start, end + 1)
+    .map((candidate) => normalized.slice(candidate.start, candidate.end).trim())
+    .join('\n');
 }
 
 /**
@@ -444,7 +633,7 @@ export function selectLatestValidWritingBlockSequence(input: string): string | n
       const text = candidateSequenceText(normalized, candidates, start, end);
       if (text === null) continue;
       try {
-        parseWritingBlocks(text);
+        parseWritingBlocksStrict(text);
         return text;
       } catch {
         // This candidate is structurally complete but does not satisfy the
@@ -782,7 +971,8 @@ function parseBody(
             assertNoReservedClosingMarker(parsed, blockIndex);
             return parsed;
           }
-        } catch {
+        } catch (repairError) {
+          if (repairError instanceof WritingBlockProtocolError) throw repairError;
           // Fall through to the original strict JSON diagnostic.
         }
       }
@@ -1058,15 +1248,25 @@ function buildBlock(
     knownFields.add('reason');
     knownFields.add('action');
   }
+  assertTemplateFieldOrder(rawBody, blockIndex, type);
   const extensions = Object.fromEntries(Object.entries(normalized).filter(([key]) => !knownFields.has(key)));
   normalized.schema_version = fields.schema_version ?? WRITING_BLOCK_SCHEMA_VERSION;
   return { type, fields: normalized as never, extensions, rawBody } as WritingBlock;
 }
 
-export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
-  if (typeof input !== 'string') {
-    throw new WritingBlockProtocolError('WRITING_BLOCK_INPUT_INVALID', 'Writing block input must be a string');
-  }
+function emptyParsedWritingBlocks(): ParsedWritingBlocks {
+  return {
+    blocks: [],
+    lunaTask: null,
+    governanceChanges: [],
+    governanceReconciliation: null,
+    architectureFreezes: [],
+    sessionRotation: null,
+    blocked: [],
+  };
+}
+
+function parseWritingBlocksStrict(input: string): ParsedWritingBlocks {
   const inputText = normalizeWritingBlockMarkers(input);
   const blocks: WritingBlock[] = [];
   let cursor = 0;
@@ -1076,27 +1276,11 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
     if (nextClose >= 0 && (nextOpen < 0 || nextClose < nextOpen)) {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
-        `第 ${blocks.length} 个 Writing Block 之外发现结束标记。请只输出完整的 Writing Block。`,
+        `第 ${blocks.length} 个 Writing Block 之外发现结束标记。`,
         { blockIndex: blocks.length },
       );
     }
-    if (nextOpen < 0) {
-      if (inputText.slice(cursor).trim() !== '') {
-        throw new WritingBlockProtocolError(
-          'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
-          `第 ${blocks.length} 个 Writing Block 之外存在非空白文本。请删除块外说明文字。`,
-          { blockIndex: blocks.length },
-        );
-      }
-      break;
-    }
-    if (inputText.slice(cursor, nextOpen).trim() !== '') {
-      throw new WritingBlockProtocolError(
-        'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
-        `第 ${blocks.length} 个 Writing Block 之外存在非空白文本。请删除块外说明文字。`,
-        { blockIndex: blocks.length },
-      );
-    }
+    if (nextOpen < 0) break;
     const blockIndex = blocks.length;
     const header = parseHeader(inputText, nextOpen, blockIndex);
     const bodyEnd = inputText.indexOf(CLOSE_MARKER, header.end);
@@ -1112,10 +1296,7 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_NESTED',
         `第 ${blockIndex} 个 Writing Block（类型 ${header.type}）包含嵌套块。请拆分为同级块。`,
-        {
-          blockIndex,
-          blockType: header.type,
-        },
+        { blockIndex, blockType: header.type },
       );
     }
     let fields: Record<string, unknown>;
@@ -1138,10 +1319,7 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
       throw new WritingBlockProtocolError(
         'WRITING_BLOCK_DUPLICATE_LUNA_TASK',
         `第 ${blockIndex} 个 Writing Block（类型 LUNA_TASK）违反规则：一回合最多一个 LUNA_TASK。`,
-        {
-          blockIndex,
-          blockType: block.type,
-        },
+        { blockIndex, blockType: block.type },
       );
     }
     if (
@@ -1185,6 +1363,37 @@ export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
     sessionRotation: blocks.find((block): block is SessionRotationBlock => block.type === 'SESSION_ROTATION') ?? null,
     blocked: blocks.filter((block): block is BlockedBlock => block.type === 'BLOCKED'),
   };
+}
+
+export function parseWritingBlocks(input: unknown): ParsedWritingBlocks {
+  if (typeof input !== 'string') {
+    throw new WritingBlockProtocolError('WRITING_BLOCK_INPUT_INVALID', 'Writing block input must be a string');
+  }
+  const inputText = normalizeWritingBlockMarkers(input);
+  if (!inputText.includes(OPEN_MARKER) && !inputText.includes(CLOSE_MARKER)) return emptyParsedWritingBlocks();
+  const candidates = completeWritingBlockCandidates(inputText);
+  const candidateResults = candidates.map((candidate) => {
+    const text = inputText.slice(candidate.start, candidate.end).trim();
+    try {
+      parseWritingBlocksStrict(text);
+      return { text, valid: true };
+    } catch {
+      // Invalid candidates are discarded so a later complete template-shaped
+      // block can be consumed from a message that also contains reasoning.
+      return { text, valid: false };
+    }
+  });
+  let lastValidIndex = -1;
+  for (let index = 0; index < candidateResults.length; index += 1) {
+    if (candidateResults[index]!.valid) lastValidIndex = index;
+  }
+  const trailingInvalid = candidateResults.slice(lastValidIndex + 1).find((candidate) => !candidate.valid);
+  if (trailingInvalid !== undefined) return parseWritingBlocksStrict(trailingInvalid.text);
+  const validCandidates = candidateResults.filter((candidate) => candidate.valid).map((candidate) => candidate.text);
+  if (validCandidates.length > 0) return parseWritingBlocksStrict(validCandidates.join('\n'));
+  return parseWritingBlocksStrict(
+    candidates.at(-1) === undefined ? inputText : inputText.slice(candidates.at(-1)!.start, candidates.at(-1)!.end),
+  );
 }
 
 export function parseWritingBlock(input: unknown): WritingBlock {

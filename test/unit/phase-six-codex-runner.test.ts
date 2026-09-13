@@ -23,7 +23,7 @@ afterEach(async () => {
 function task(reportPath = 'reports/task-1.md', taskKind: 'IMPLEMENTATION' | 'TEST' = 'IMPLEMENTATION'): LunaTaskBlock {
   return parseWritingBlock(
     `[WRITING_BLOCK type="LUNA_TASK"]
-{"task_id":"task-1","title":"Implement","objective":"Implement the task","base_commit":"BASE","task_kind":"${taskKind}","scope":["${taskKind === 'TEST' ? 'tests/**' : 'src'}"],"out_of_scope":["docs/superpowers"],"deliverables":["code"],"validation_commands":["npm test"],"governance_revision":1,"architecture_revision_set":[1],"report_path":"${reportPath}","remote_sync_policy":"push"}
+{"task_kind":"${taskKind}","task_id":"task-1","title":"Implement","objective":"Implement the task","base_commit":"BASE","scope":["${taskKind === 'TEST' ? 'tests/**' : 'src'}"],"out_of_scope":["docs/superpowers"],"deliverables":["code"],"validation_commands":["npm test"],"governance_revision":1,"architecture_revision_set":[1],"report_path":"${reportPath}","remote_sync_policy":"push"}
 [/WRITING_BLOCK]`,
   ) as LunaTaskBlock;
 }

@@ -247,9 +247,7 @@ export class EdgeStateAdapter {
     if (page.projectFingerprint === null || page.url === '') return 'AMBIGUOUS';
     if (page.isThinking) return 'THINKING';
     if (stableCount >= this.stableSampleCount && page.latestAssistantHash !== null) {
-      return page.writingBlockIncomplete || hasMixedWritingBlockContent(page.latestAssistantText)
-        ? 'AMBIGUOUS'
-        : 'COMPLETED_CANDIDATE';
+      return page.writingBlockIncomplete ? 'AMBIGUOUS' : 'COMPLETED_CANDIDATE';
     }
     return page.latestAssistantHash === null ? 'AMBIGUOUS' : 'THINKING';
   }

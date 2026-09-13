@@ -117,6 +117,18 @@ const writingBlockTemplates = {
       git_owner: 'ORCHESTRATOR',
       luna_must_not_commit_or_push: true,
     },
+    output_contract: {
+      response_audience: ['ORCHESTRATOR', 'USER'],
+      orchestrator_output:
+        'Emit the applicable Writing Block using this template; ordinary reasoning text may appear elsewhere in the assistant message.',
+      user_output:
+        'When user action, a decision, external setup, or an out-of-authority matter is required, emit exactly one USER_MESSAGE block.',
+      candidate_rule:
+        'The orchestrator scans the complete assistant message and consumes only a complete candidate whose top-level fields follow this template order.',
+      duplicate_rule: 'Do not repeat a top-level field or any Writing Block/User Message marker inside a field value.',
+      no_executable_prose:
+        'Do not rely on ordinary prose to request an orchestrator action; represent every executable action in the applicable block.',
+    },
     task_kind_options: LUNA_TASK_KINDS,
     test_task_contract: {
       allowed_changes: ['tests/**', '<the exact report_path>'],
@@ -173,6 +185,7 @@ const writingBlockTemplates = {
       'PASS 和 BLOCKED 的 files 必须省略或保持为空数组；CHANGES_REQUIRED 必须填写 baseline_commit 和至少一个 files 项。',
       'CHANGES_REQUIRED.files[].sha256_before 必须是 canonical-text-v1 的 SHA-256：使用实际检查到的完整文件内容，以 strict/fatal UTF-8 解码，移除全部前导 BOM，将 CRLF 和 CR 转为 LF，保留所有其他字符（包括空格和末尾换行，不做 trim），再对规范化后的 UTF-8 字节计算。',
       '任何非法 UTF-8 都属于无法可靠读取或计算；不得用替代字符（�）继续规范化或计算哈希，必须返回 BLOCKED。只能基于实际检查到的完整文件内容计算 sha256_before，不得猜测或使用片段、摘要、旧哈希或原始字节哈希。',
+      '普通思考或说明文字可以出现在 assistant 消息的其他位置；只有完整的 GOVERNANCE_RECONCILIATION block 会被 ORCHESTRATOR 消费。需要用户决定或外部操作时，改为输出一个 USER_MESSAGE block。',
     ],
     variants: {
       PASS: {

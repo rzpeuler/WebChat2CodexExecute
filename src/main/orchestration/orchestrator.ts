@@ -1345,6 +1345,14 @@ export class MainOrchestrator implements Orchestrator {
       return this.pauseFor(error, 'Writing Block 协议无效，已拒绝启动 Luna。');
     }
     this.state.autoRepair = null;
+    if (parsed.blocks.length === 0) {
+      return this.pauseForCode(
+        'SOL_OUTPUT_UNCONSUMABLE',
+        'Sol 本轮输出中没有可执行的 Writing Block，也没有 USER_MESSAGE。W2C 无法判断下一步动作。',
+        true,
+        '请让 Sol 根据当前情况输出一个合法的 Writing Block；如果需要用户决定或外部配置，请输出 USER_MESSAGE block。',
+      );
+    }
     if (parsed.sessionRotation !== null) {
       return this.handleSessionRotation(parsed.sessionRotation, observation, outputKey);
     }
@@ -1981,7 +1989,11 @@ export class MainOrchestrator implements Orchestrator {
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', this.state.taskId);
     this.updateGraphNode('wait-sol', {
       summary: '第一次同项目会话恢复未解决 GitHub 访问问题。',
-      details: [`恢复尝试：${current.attempt}/${current.maxAttempts}`, `5 分钟后自动创建第二个同项目会话。`, `时间：${nextRetryAt}`],
+      details: [
+        `恢复尝试：${current.attempt}/${current.maxAttempts}`,
+        `5 分钟后自动创建第二个同项目会话。`,
+        `时间：${nextRetryAt}`,
+      ],
     });
     await this.persist();
     return result('WAITING', this.state, 'GitHub 仓库访问仍失败，5 分钟后自动再次新建同项目 Sol 会话。');

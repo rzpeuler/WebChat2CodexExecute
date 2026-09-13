@@ -42,7 +42,7 @@ const task = {
 describe('Writing Block protocol', () => {
   it('extracts a strictly wrapped user-facing message', () => {
     expect(extractUserMessage('[USER_MESSAGE]\n需要确认产品取舍。\n[/USER_MESSAGE]')).toBe('需要确认产品取舍。');
-    expect(extractUserMessage('说明\n[USER_MESSAGE]需要确认[/USER_MESSAGE]')).toBeNull();
+    expect(extractUserMessage('思考说明\n[USER_MESSAGE]需要确认[/USER_MESSAGE]')).toBe('需要确认');
     expect(extractUserMessage('[USER_MESSAGE]\n[/USER_MESSAGE]')).toBeNull();
   });
   it('accepts the angle-bracket wrapper emitted by the ChatGPT DOM as a compatibility alias', () => {
@@ -76,6 +76,29 @@ line two"
     expect(parsed.governanceReconciliation?.fields.files?.[0]?.content).toBe('line one\nline two');
     expect(() => parseWritingBlocks(output.replace('"path": "README.md"', '"path": "../README.md"'))).toThrow(
       /project-relative path/,
+    );
+  });
+
+  it('extracts valid protocol blocks from a complete assistant message with ordinary text around them', () => {
+    const source = [
+      '思考：已确认下一步可以由 ORCHESTRATOR 执行。',
+      formatWritingBlock('BLOCKED', { code: 'NEEDS_USER_ACTION', reason: '需要外部配置。' }),
+      '这是面向人的补充说明，不是机器指令。',
+    ].join('\n\n');
+    const parsed = parseWritingBlocks(source);
+    expect(parsed.blocks).toHaveLength(1);
+    expect(parsed.blocked[0]?.fields.reason).toBe('需要外部配置。');
+  });
+
+  it('rejects duplicate top-level fields and fields outside the template order', () => {
+    const duplicate = `[WRITING_BLOCK type="BLOCKED"]\n{"schema_version":1,"code":"A","code":"B","reason":"需要处理"}\n[/WRITING_BLOCK]`;
+    expect(() => parseWritingBlocks(duplicate)).toThrowError(
+      expect.objectContaining({ code: 'WRITING_BLOCK_INVALID_FIELD', field: 'code' }),
+    );
+
+    const outOfOrder = `[WRITING_BLOCK type="BLOCKED"]\n{"reason":"需要处理","code":"A"}\n[/WRITING_BLOCK]`;
+    expect(() => parseWritingBlocks(outOfOrder)).toThrowError(
+      expect.objectContaining({ code: 'WRITING_BLOCK_INVALID_FIELD', field: 'code' }),
     );
   });
 
@@ -129,9 +152,7 @@ line two"
       const serialized = stringifyWritingBlockTemplate(type);
       expect(JSON.parse(serialized)).toEqual(WRITING_BLOCK_TEMPLATES[type]);
       expect(serialized).not.toContain('[/WRITING_BLOCK]');
-      expect(() => parseWritingBlocks(serialized)).toThrowError(
-        expect.objectContaining({ code: 'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT' }),
-      );
+      expect(parseWritingBlocks(serialized).blocks).toHaveLength(0);
       expect(WRITING_BLOCK_TEMPLATE_FILENAMES[type]).toMatch(/\.template\.json$/);
       expect(WRITING_BLOCK_TEMPLATE_PATHS[type]).toBe(
         `${WRITING_BLOCK_TEMPLATE_DIRECTORY}/${WRITING_BLOCK_TEMPLATE_FILENAMES[type]}`,
@@ -308,8 +329,7 @@ line two"
   });
 
   it('reports block index, type, and field with actionable diagnostics', () => {
-    const first = formatWritingBlock('BLOCKED', { code: 'BLOCKED', reason: 'first' });
-    const second = block('GOVERNANCE_CHANGE', {
+    const source = block('GOVERNANCE_CHANGE', {
       change_id: 'change-1',
       operation: 'replace_document',
       document_id: 'policy',
@@ -320,17 +340,17 @@ line two"
     });
 
     try {
-      parseWritingBlocks(`${first}\n${second}`);
+      parseWritingBlocks(source);
       throw new Error('expected protocol error');
     } catch (error) {
       expect(error).toMatchObject({
         code: 'WRITING_BLOCK_MISSING_FIELD',
-        blockIndex: 1,
+        blockIndex: 0,
         blockType: 'GOVERNANCE_CHANGE',
         field: 'content',
       });
       expect(error).toBeInstanceOf(WritingBlockProtocolError);
-      expect((error as Error).message).toContain('第 1 个 Writing Block');
+      expect((error as Error).message).toContain('第 0 个 Writing Block');
       expect((error as Error).message).toContain('类型 GOVERNANCE_CHANGE');
       expect((error as Error).message).toContain('字段 content');
     }
@@ -389,11 +409,7 @@ line two"
       '[WRITING_BLOCK type="BLOCKED"]\n{"schema_version":1,"code":"BLOCKED","reason":"bad"}',
       'WRITING_BLOCK_UNCLOSED',
     ],
-    [
-      'out-of-block text',
-      '说明文字\n' + formatWritingBlock('BLOCKED', { code: 'BLOCKED', reason: 'bad' }),
-      'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
-    ],
+    ['out-of-block text', '说明文字\n' + formatWritingBlock('BLOCKED', { code: 'BLOCKED', reason: 'bad' }), null],
     [
       'nested block',
       '[WRITING_BLOCK type="BLOCKED"]\n' +
@@ -401,7 +417,11 @@ line two"
         '\n[/WRITING_BLOCK]',
       'WRITING_BLOCK_NESTED',
     ],
-  ])('fails closed for JSON boundary fixture: %s', (_name, source, code) => {
+  ])('handles JSON boundary fixture: %s', (_name, source, code) => {
+    if (code === null) {
+      expect(parseWritingBlocks(source).blocks).toHaveLength(1);
+      return;
+    }
     expect(() => parseWritingBlocks(source)).toThrowError(expect.objectContaining({ code, blockIndex: 0 }));
   });
 
@@ -572,10 +592,14 @@ line two"
     ['half-open block', '[WRITING_BLOCK type="LUNA_TASK"]\n{"task_id":"x"}', 'WRITING_BLOCK_UNCLOSED'],
     ['unknown type', '[WRITING_BLOCK type="UNKNOWN"]\n{}\n[/WRITING_BLOCK]', 'WRITING_BLOCK_UNKNOWN_TYPE'],
     ['invalid header', "[WRITING_BLOCK type='LUNA_TASK']\n{}\n[/WRITING_BLOCK]", 'WRITING_BLOCK_HEADER_INVALID'],
-    ['out-of-block task book', '{"task_id":"outside"}', 'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT'],
+    ['ordinary text without a protocol block', '{"task_id":"outside"}', null],
     ['missing field', block('LUNA_TASK', { ...task, title: undefined }), 'WRITING_BLOCK_MISSING_FIELD'],
     ['bad body', '[WRITING_BLOCK type="LUNA_TASK"]\n{bad\n[/WRITING_BLOCK]', 'WRITING_BLOCK_BODY_INVALID_JSON'],
-  ])('fails closed for %s', (_name, source, code) => {
+  ])('handles %s', (_name, source, code) => {
+    if (code === null) {
+      expect(parseWritingBlocks(source).blocks).toHaveLength(0);
+      return;
+    }
     expect(() => parseWritingBlocks(source)).toThrowError(expect.objectContaining({ code }));
   });
 
@@ -622,8 +646,17 @@ line two"
       expect.objectContaining({ code: 'WRITING_BLOCK_MISSING_FIELD', field: 'sha256_if_known' }),
     );
     expect(
-      parseWritingBlocks(block('ARCHITECTURE_FREEZE', { ...missing, sha256_if_known: null })).architectureFreezes[0]
-        ?.fields,
+      parseWritingBlocks(
+        block('ARCHITECTURE_FREEZE', {
+          freeze_id: missing.freeze_id,
+          version: missing.version,
+          download_url: missing.download_url,
+          sha256_if_known: null,
+          reason: missing.reason,
+          affected_scope: missing.affected_scope,
+          luna_follow_up: missing.luna_follow_up,
+        }),
+      ).architectureFreezes[0]?.fields,
     ).toMatchObject({ sha256_if_known: null });
   });
 

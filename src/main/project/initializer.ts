@@ -133,6 +133,8 @@ Role authority is defined from the single \`docs/governance\` entry point.
 - Luna implements approved tasks and reports validation evidence and governance gaps.
 - The automation layer enforces repository, path, protocol, and Git safety boundaries.
 - No role may silently broaden scope or promote unregistered documents to active governance.
+- Sol chooses the response audience: emit protocol blocks for work the orchestrator can execute, and emit one USER_MESSAGE block only when user action, a decision, or external setup is required.
+- Ordinary reasoning or explanatory text is not an executable instruction; the orchestrator extracts valid protocol blocks from the complete assistant message.
 `,
   ],
   [
@@ -145,6 +147,8 @@ This policy is active through the \`docs/governance\` manifest only.
 - Never force-push or rewrite shared history through automation.
 - Commit only approved changed paths after required validation passes.
 - Treat remote uncertainty and baseline drift as blocking conditions.
+- The orchestrator consumes only valid template-shaped Writing Blocks. Sol must keep their field order and must not duplicate fields or protocol markers.
+- The orchestrator does not infer user intent from ordinary prose. If work cannot be represented by an accepted protocol block, Sol must emit exactly one USER_MESSAGE block.
 `,
   ],
 ]);

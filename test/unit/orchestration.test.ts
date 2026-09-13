@@ -26,6 +26,7 @@ const baseline: GitBaseline = {
 };
 
 function observation(text: string, status: EdgeSolObservation['status'] = 'COMPLETED_CANDIDATE'): EdgeSolObservation {
+  const effectiveStatus = text === '' && status === 'COMPLETED_CANDIDATE' ? 'AMBIGUOUS' : status;
   return {
     targetId: 'tab-1',
     title: 'Sol',
@@ -33,17 +34,17 @@ function observation(text: string, status: EdgeSolObservation['status'] = 'COMPL
     projectFingerprint: 'p1',
     accountFingerprint: 'a1',
     latestAssistantText: text,
-    latestAssistantHash: createHash('sha256').update(text, 'utf8').digest('hex'),
+    latestAssistantHash: text === '' ? null : createHash('sha256').update(text, 'utf8').digest('hex'),
     statusText: '',
     errorText: '',
     loginWall: false,
     sessionMissing: false,
-    contextLimit: status === 'CONTEXT_LIMIT',
-    networkError: status === 'NETWORK_ERROR',
-    isThinking: status === 'THINKING',
+    contextLimit: effectiveStatus === 'CONTEXT_LIMIT',
+    networkError: effectiveStatus === 'NETWORK_ERROR',
+    isThinking: effectiveStatus === 'THINKING',
     writingBlockIncomplete: false,
     sampledAt: '2026-09-10T00:00:00.000Z',
-    status,
+    status: effectiveStatus,
     adapterVersion: 'test',
     consecutiveStableSamples: 2,
   };
@@ -52,8 +53,8 @@ function observation(text: string, status: EdgeSolObservation['status'] = 'COMPL
 function taskText(): string {
   return `[WRITING_BLOCK type="LUNA_TASK"]
 {
-  "task_id": "task-1",
   "task_kind": "IMPLEMENTATION",
+  "task_id": "task-1",
   "title": "Implement feature",
   "objective": "Implement the feature",
   "base_commit": "base-commit",
@@ -165,6 +166,28 @@ function baseOptions(overrides: Partial<OrchestratorOptions> = {}): Orchestrator
 }
 
 describe('P0 main orchestration', () => {
+  it('pauses and notifies the user when a stable Sol response has no protocol block', async () => {
+    const notifier = { notify: vi.fn() };
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation('普通说明，但没有协议块。')) },
+      notifier,
+    });
+    const orchestrator = new MainOrchestrator(options);
+    await orchestrator.start();
+
+    const result = await orchestrator.runRound();
+
+    expect(result).toMatchObject({ status: 'PAUSED' });
+    expect(orchestrator.getState()).toMatchObject({
+      active: false,
+      status: 'NEEDS_USER_ACTION',
+      recentError: { code: 'SOL_OUTPUT_UNCONSUMABLE' },
+    });
+    expect(notifier.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.objectContaining({ code: 'SOL_OUTPUT_UNCONSUMABLE' }) }),
+    );
+  });
+
   it('notifies the user and keeps waiting when Sol emits a user-facing message', async () => {
     const notifier = { notify: vi.fn() };
     const options = baseOptions({
@@ -588,7 +611,7 @@ describe('P0 main orchestration', () => {
     expect(graph.currentNodeId).toBe('wait-sol');
     expect(graph.nodes.map((node) => node.state)).toEqual([
       'COMPLETED',
-      'COMPLETED',
+      'NOT_APPLICABLE',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
@@ -761,7 +784,9 @@ describe('P0 main orchestration', () => {
       .mockResolvedValueOnce({ status: 'ROTATED', conversationId: 'c3' });
     const options = baseOptions({
       now: () => new Date(nowMs),
-      edge: { observe: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(third) },
+      edge: {
+        observe: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(third),
+      },
       contextRecovery: { recover: vi.fn(async () => ({ status: 'RECOVERED' })), recoverRepositoryAccess },
     });
     const orchestrator = new MainOrchestrator(options);
