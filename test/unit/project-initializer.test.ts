@@ -307,12 +307,9 @@ describe('project initializer', () => {
       backupPath: '.web-chat2codex/backups/governance-upgrade/governance-upgrade-run',
       idempotent: false,
     });
-    expect(
-      await readFile(
-        join(repository, ...result.backupPath!.split('/'), 'governance-manifest.yaml'),
-        'utf8',
-      ),
-    ).toBe(previousManifestSource);
+    expect(await readFile(join(repository, ...result.backupPath!.split('/'), 'governance-manifest.yaml'), 'utf8')).toBe(
+      previousManifestSource,
+    );
     expect(await readFile(manifestPath, 'utf8')).toContain(WRITING_BLOCK_TEMPLATE_PATHS.SESSION_ROTATION);
     expect(
       await readFile(
@@ -370,6 +367,39 @@ describe('project initializer', () => {
       '# local policy\n',
     );
     expect(await readFile(rulesPath, 'utf8')).toContain('This document is active governance');
+  });
+
+  it('backs up and replaces edited files in the current managed tree during an explicit upgrade', async () => {
+    const repository = await gitRepository();
+    const initializer = new ProjectInitializer({ runId: () => 'current-upgrade-drift-run' });
+    await initializer.initialize({ mode: 'adopt', targetDirectory: repository });
+
+    const rulesPath = join(repository, 'docs', 'governance', 'PROJECT_RULES.md');
+    const templatePath = join(repository, 'docs', 'governance', 'templates', 'writing-blocks', 'blocked.template.json');
+    await writeFile(rulesPath, '# local policy\n', 'utf8');
+    await writeFile(templatePath, '{"locally":"changed"}\n', 'utf8');
+
+    const result = await initializer.upgradeGovernance(repository);
+
+    expect(result).toMatchObject({
+      changedPaths: expect.arrayContaining([
+        'docs/governance/PROJECT_RULES.md',
+        'docs/governance/templates/writing-blocks/blocked.template.json',
+      ]),
+      backupPath: '.web-chat2codex/backups/governance-upgrade/current-upgrade-drift-run',
+      idempotent: false,
+    });
+    expect(await readFile(join(repository, ...result.backupPath!.split('/'), 'PROJECT_RULES.md'), 'utf8')).toBe(
+      '# local policy\n',
+    );
+    expect(
+      await readFile(
+        join(repository, ...result.backupPath!.split('/'), 'templates', 'writing-blocks', 'blocked.template.json'),
+        'utf8',
+      ),
+    ).toBe('{"locally":"changed"}\n');
+    expect(await readFile(rulesPath, 'utf8')).toContain('This document is active governance');
+    expect(await readFile(templatePath, 'utf8')).toContain('"schema_version"');
   });
 
   it('recursively detects modified templates without overwriting or backing them up', async () => {

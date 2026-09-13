@@ -723,12 +723,28 @@ export class ProjectInitializer {
       });
     }
     const currentEntries = expectedManagedEntries(STANDARD_MANAGED_FILES);
+    let originalFiles: Map<string, string> | null = null;
     if (
       actualEntries.length === currentEntries.length &&
       actualEntries.every((entry, index) => entry === currentEntries[index])
     ) {
-      const current = await assertManagedDirectoryUnchanged(projectRoot, governancePath);
-      if (current === 'current') {
+      originalFiles = new Map<string, string>();
+      for (const fileName of STANDARD_MANAGED_FILES.keys()) {
+        const actual = await readFile(join(governancePath, ...fileName.split('/')), 'utf8').catch((error) => {
+          throw new ProjectInitializationError('INITIALIZATION_DRIFT', '当前托管治理文件无法读取，未执行升级。', {
+            paths: [managedEntryPath(fileName)],
+            cause: error,
+          });
+        });
+        originalFiles!.set(fileName, actual);
+      }
+
+      const changedPaths = uniqueSorted(
+        [...STANDARD_MANAGED_FILES.entries()]
+          .filter(([fileName, expected]) => originalFiles!.get(fileName) !== expected)
+          .map(([fileName]) => managedEntryPath(fileName)),
+      );
+      if (changedPaths.length === 0) {
         return {
           projectRoot,
           governanceManifestPath: MANIFEST_PATH,
@@ -739,27 +755,29 @@ export class ProjectInitializer {
       }
     }
 
-    const previousEntries = expectedManagedEntries(PREVIOUS_STANDARD_MANAGED_FILES);
-    const paths = uniqueSorted([
-      ...previousEntries.filter((entry) => !actualEntries.includes(entry)),
-      ...actualEntries.filter((entry) => !previousEntries.includes(entry)),
-    ]);
-    if (paths.length > 0) {
-      throw new ProjectInitializationError(
-        'INITIALIZATION_DRIFT',
-        '当前治理目录不是可安全增量升级的旧版托管结构，未覆盖任何文件。',
-        { paths: paths.map(managedEntryPath) },
-      );
-    }
-    const originalFiles = new Map<string, string>();
-    for (const fileName of PREVIOUS_STANDARD_MANAGED_FILES) {
-      const actual = await readFile(join(governancePath, fileName), 'utf8').catch((error) => {
-        throw new ProjectInitializationError('INITIALIZATION_DRIFT', '旧版托管治理文件无法读取，未执行升级。', {
-          paths: [managedEntryPath(fileName)],
-          cause: error,
+    if (originalFiles === null) {
+      const previousEntries = expectedManagedEntries(PREVIOUS_STANDARD_MANAGED_FILES);
+      const paths = uniqueSorted([
+        ...previousEntries.filter((entry) => !actualEntries.includes(entry)),
+        ...actualEntries.filter((entry) => !previousEntries.includes(entry)),
+      ]);
+      if (paths.length > 0) {
+        throw new ProjectInitializationError(
+          'INITIALIZATION_DRIFT',
+          '当前治理目录不是可安全增量升级的旧版托管结构，未覆盖任何文件。',
+          { paths: paths.map(managedEntryPath) },
+        );
+      }
+      originalFiles = new Map<string, string>();
+      for (const fileName of PREVIOUS_STANDARD_MANAGED_FILES) {
+        const actual = await readFile(join(governancePath, fileName), 'utf8').catch((error) => {
+          throw new ProjectInitializationError('INITIALIZATION_DRIFT', '旧版托管治理文件无法读取，未执行升级。', {
+            paths: [managedEntryPath(fileName)],
+            cause: error,
+          });
         });
-      });
-      originalFiles.set(fileName, actual);
+        originalFiles.set(fileName, actual);
+      }
     }
 
     const runId = assertRunId(this.createRunId());
@@ -769,9 +787,13 @@ export class ProjectInitializer {
       projectRoot,
       ...`${GOVERNANCE_DIRECTORY}/${SESSION_ROTATION_TEMPLATE_ENTRY}`.split('/'),
     );
+    const addsSessionTemplate = !originalFiles.has(SESSION_ROTATION_TEMPLATE_ENTRY);
     await assertSafeProjectPath(projectRoot, backupPath);
     await assertSafeProjectPath(projectRoot, sessionTemplatePath);
-    if ((await pathState(backupPath)) !== 'missing' || (await pathState(sessionTemplatePath)) !== 'missing') {
+    if (
+      (await pathState(backupPath)) !== 'missing' ||
+      (addsSessionTemplate && (await pathState(sessionTemplatePath)) !== 'missing')
+    ) {
       throw new ProjectInitializationError('INITIALIZATION_FAILED', '治理升级目标路径已存在，未写入任何文件。', {
         backupPath: null,
         recovery: '请更换运行 ID 后重试。',
@@ -802,7 +824,7 @@ export class ProjectInitializer {
         await mkdir(dirname(targetPath), { recursive: true }).catch(() => undefined);
         await writeFile(targetPath, contents, { encoding: 'utf8' }).catch(() => undefined);
       }
-      await rm(sessionTemplatePath, { force: true }).catch(() => undefined);
+      if (addsSessionTemplate) await rm(sessionTemplatePath, { force: true }).catch(() => undefined);
       throw new ProjectInitializationError('INITIALIZATION_FAILED', '治理协议增量升级失败，已尝试恢复原 manifest。', {
         backupPath: backupRelativePath,
         recovery: '请检查治理目录和备份后重试。升级前的托管文件已保留在 backupPath。',
