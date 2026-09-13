@@ -213,6 +213,37 @@ describe('P0 main orchestration', () => {
     );
   });
 
+  it('sends a precise repair prompt when a complete candidate has invalid JSON', async () => {
+    const invalidJson = String.raw`[WRITING_BLOCK type="LUNA_TASK"]
+{"task_id":"task-1","path":"C:\codex.exe"}
+[/WRITING_BLOCK]`;
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation(invalidJson, 'UNCONSUMABLE_CANDIDATE')) },
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    const result = await orchestrator.runRound();
+
+    expect(result).toMatchObject({ status: 'WAITING' });
+    expect(orchestrator.getState()).toMatchObject({
+      active: true,
+      phase: 'WAITING_FOR_SOL',
+      recentError: null,
+      autoRepair: {
+        errorCode: 'WRITING_BLOCK_BODY_INVALID_JSON',
+        status: 'WAITING_FOR_SOL',
+        attempt: 1,
+      },
+    });
+    expect(options.codex.startTask).not.toHaveBeenCalled();
+    expect(options.sol?.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('JSON 中的反斜杠必须写成'),
+      }),
+    );
+  });
+
   it('notifies the user and keeps waiting when Sol emits a user-facing message', async () => {
     const notifier = { notify: vi.fn() };
     const options = baseOptions({

@@ -480,6 +480,8 @@ export function compileSolAutoRepairPrompt(input: SolAutoRepairPromptInput): str
       ? ['请只更新 base_commit 为当前真实 base_commit，不要改变其他任务内容。']
       : []),
     `请重新输出一个完整、合法的 ${outputType} Writing Block。`,
+    '正文必须是可严格解析的 JSON 或 YAML 对象：JSON 中的反斜杠必须写成 \\\\，Windows 路径也可统一使用正斜杠；不得出现未转义控制字符、注释、尾逗号或重复字段。',
+    '同时检查头部标记、闭合标记、块类型、schema_version、必填字段、字段类型和枚举值；每种受限块按协议只输出允许的数量，SESSION_ROTATION 不得与其他块混合。',
     '只能输出目标 Writing Block，不得输出解释、Markdown 代码围栏或块外文本。',
     '不要执行代码，不要修改仓库，不要 commit，不要 push。',
   ]

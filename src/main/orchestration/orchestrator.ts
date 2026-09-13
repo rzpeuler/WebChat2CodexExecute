@@ -1215,13 +1215,16 @@ export class MainOrchestrator implements Orchestrator {
         return this.pauseForCode('AUTH_REQUIRED', '需要在专用 Edge profile 中完成登录。', true);
       if (observation.status === 'NETWORK_ERROR' || observation.status === 'SESSION_LOST')
         return this.pauseForCode(observation.status, 'Sol 页面或网络尚未恢复，请检查后重试。');
-      if (observation.status === 'UNCONSUMABLE_CANDIDATE')
+      if (observation.status === 'UNCONSUMABLE_CANDIDATE') {
+        const repaired = await this.tryAutoRepairUnconsumableCandidate(observation);
+        if (repaired !== null) return repaired;
         return this.pauseForCode(
           'SOL_OUTPUT_UNCONSUMABLE',
           'Sol 输出已稳定，但采集文本中没有可执行的 Writing Block 或 USER_MESSAGE。W2C 已完成有限重采集，请检查专用 Edge 中的最终回答并重试。',
           true,
           '请确认专用 Edge 显示的是完整 Sol 最终回答；必要时重新打开 Edge 或让 Sol 完整重输出一个协议块。',
         );
+      }
       if (observation.status !== 'COMPLETED_CANDIDATE') {
         const message = '等待 Sol 产生新的稳定输出。';
         await this.enterWaiting(message);
@@ -1258,13 +1261,16 @@ export class MainOrchestrator implements Orchestrator {
       return this.pauseForCode('AUTH_REQUIRED', '需要在专用 Edge profile 中完成登录。', true);
     if (observation.status === 'NETWORK_ERROR' || observation.status === 'SESSION_LOST')
       return this.pauseForCode(observation.status, 'Sol 页面或网络尚未恢复，请检查后重试。');
-    if (observation.status === 'UNCONSUMABLE_CANDIDATE')
+    if (observation.status === 'UNCONSUMABLE_CANDIDATE') {
+      const repaired = await this.tryAutoRepairUnconsumableCandidate(observation);
+      if (repaired !== null) return repaired;
       return this.pauseForCode(
         'SOL_OUTPUT_UNCONSUMABLE',
         'Sol 输出已稳定，但采集文本中没有可执行的 Writing Block 或 USER_MESSAGE。W2C 已完成有限重采集，请检查专用 Edge 中的最终回答并重试。',
         true,
         '请确认专用 Edge 显示的是完整 Sol 最终回答；必要时重新打开 Edge 或让 Sol 完整重输出一个协议块。',
       );
+    }
     if (observation.status !== 'COMPLETED_CANDIDATE') {
       this.markNodesNotApplicable([
         'parse-task',
@@ -1805,8 +1811,8 @@ export class MainOrchestrator implements Orchestrator {
     if (this.sol === undefined) return null;
 
     const previous = this.state.autoRepair;
-    if (previous !== null && previous.errorCode === code) return null;
-    const attempt = previous === null ? 1 : previous.attempt + 1;
+    if (previous !== null && previous.errorCode === code && previous.outputKey === outputKey) return null;
+    const attempt = previous === null || previous.errorCode !== code ? 1 : previous.attempt + 1;
     if (attempt > MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND) {
       this.state.autoRepair = {
         ...(previous ?? {
@@ -1898,6 +1904,33 @@ export class MainOrchestrator implements Orchestrator {
     });
     await this.persist();
     return result('WAITING', this.state, '已向 Sol 发送自动修复提示词，正在等待新的 Writing Block。');
+  }
+
+  private async tryAutoRepairUnconsumableCandidate(
+    observation: EdgeSolObservation,
+  ): Promise<OrchestratorResult | null> {
+    if (!hasProtocolCandidate(observation)) return null;
+
+    const outputKey = outputKeyFor(observation);
+    await this.setPhase('PARSING', 'RUNNING');
+    try {
+      // Keep a complete-but-invalid candidate available to the parser so Sol
+      // receives the concrete protocol error instead of a generic no-output
+      // message.
+      parseWritingBlocks(observation.latestAssistantText);
+      return null;
+    } catch (error) {
+      this.prepareRecoveryRecord(outputKey, 'UNKNOWN', null);
+      const repaired = await this.tryAutoRepair(
+        error,
+        observation,
+        outputKey,
+        inferAutoRepairOutputType(observation.latestAssistantText),
+        null,
+      );
+      if (repaired !== null) return repaired;
+      return this.pauseFor(error, 'Writing Block 协议无效，已拒绝启动 Luna。');
+    }
   }
 
   private async readSnapshots(task: LunaTaskBlock): Promise<OrchestratorSnapshots> {
@@ -3250,12 +3283,19 @@ const AUTO_REPAIRABLE_WRITING_BLOCK_ERROR_CODES = new Set([
   'WRITING_BLOCK_OUT_OF_BLOCK_CONTENT',
   'WRITING_BLOCK_HEADER_INVALID',
   'WRITING_BLOCK_UNCLOSED',
+  'WRITING_BLOCK_NESTED',
+  'WRITING_BLOCK_UNKNOWN_TYPE',
+  'WRITING_BLOCK_BODY_NOT_OBJECT',
   'WRITING_BLOCK_BODY_INVALID_JSON',
   'WRITING_BLOCK_BODY_INVALID_YAML',
-  'WRITING_BLOCK_UNKNOWN_TYPE',
+  'WRITING_BLOCK_UNSUPPORTED_VERSION',
   'WRITING_BLOCK_MISSING_FIELD',
   'WRITING_BLOCK_INVALID_FIELD',
+  'WRITING_BLOCK_RESERVED_MARKER',
   'WRITING_BLOCK_DUPLICATE_LUNA_TASK',
+  'WRITING_BLOCK_DUPLICATE_GOVERNANCE_RECONCILIATION',
+  'WRITING_BLOCK_DUPLICATE_SESSION_ROTATION',
+  'WRITING_BLOCK_SESSION_ROTATION_MIXED',
 ]);
 
 function isAutoRepairableError(code: string, phase: OrchestratorState['phase']): boolean {
@@ -3266,6 +3306,19 @@ function isAutoRepairableError(code: string, phase: OrchestratorState['phase']):
 function inferAutoRepairOutputType(value: string): AutoRepairState['outputType'] {
   const match = /\[WRITING_BLOCK\s+type="(LUNA_TASK|GOVERNANCE_RECONCILIATION)"\]/.exec(value);
   return match?.[1] === 'LUNA_TASK' || match?.[1] === 'GOVERNANCE_RECONCILIATION' ? match[1] : 'UNKNOWN';
+}
+
+function hasProtocolCandidate(observation: EdgeSolObservation): boolean {
+  const diagnostics = observation.protocolDiagnostics;
+  if (
+    diagnostics !== undefined &&
+    (diagnostics.completeCandidateCount > 0 ||
+      diagnostics.writingBlockOpenCount > 0 ||
+      diagnostics.writingBlockCloseCount > 0 ||
+      diagnostics.userMessageMarkerCount > 0)
+  )
+    return true;
+  return /(?:\[|<)(?:WRITING_BLOCK\b|USER_MESSAGE\])/.test(observation.latestAssistantText);
 }
 
 function dashboardNeedsNewSol(error: { code: string; message: string } | null): boolean {

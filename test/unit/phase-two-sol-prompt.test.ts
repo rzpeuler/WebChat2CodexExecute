@@ -432,6 +432,21 @@ describe('Sol initialization prompt compiler', () => {
     expect(prompt).not.toContain('super-secret');
   });
 
+  it('includes common protocol serialization and structural repair rules', () => {
+    const prompt = compileSolAutoRepairPrompt({
+      errorCode: 'WRITING_BLOCK_BODY_INVALID_JSON',
+      errorMessage: 'JSON 正文无效：发现未转义反斜杠。',
+      outputType: 'LUNA_TASK',
+      taskId: 'task-1',
+      attempt: 1,
+      maxAttempts: 2,
+    });
+    expect(prompt).toContain('JSON 中的反斜杠必须写成');
+    expect(prompt).toContain('不得出现未转义控制字符');
+    expect(prompt).toContain('字段类型和枚举值');
+    expect(prompt).toContain('SESSION_ROTATION 不得与其他块混合');
+  });
+
   it('requires canonical-text-v1 hashes from the actual complete file content', () => {
     const prompt = compileSolGovernanceReconciliationPrompt({ project, baselineCommit: project.headCommit });
 
