@@ -13,6 +13,7 @@ import type {
   EdgeProfileOptions,
 } from './types.js';
 import { isAllowedCdpWebSocketUrl } from './url-security.js';
+import { setWindowsProcessWindowVisibility } from './windows-window-controller.js';
 
 export type EdgeProfileErrorCode =
   | 'EDGE_EXECUTABLE_NOT_FOUND'
@@ -389,7 +390,9 @@ export class EdgeProfileManager {
       `--web-chat2codex-edge-ownership=${ownership.token}`,
       '--no-first-run',
       '--no-default-browser-check',
-      ...(this.options.initialUrl === undefined ? [] : [this.options.initialUrl]),
+      ...(this.options.initialUrl === undefined
+        ? []
+        : [this.options.appMode === false ? this.options.initialUrl : `--app=${this.options.initialUrl}`]),
     ];
     try {
       this.process = this.processRunner(executablePath, args, {
@@ -427,6 +430,16 @@ export class EdgeProfileManager {
 
   markLoginRequired(): void {
     this.loginRequired = true;
+  }
+
+  async hideWindow(): Promise<void> {
+    const processId = this.process?.pid;
+    if (processId !== undefined) await setWindowsProcessWindowVisibility(processId, false);
+  }
+
+  async showWindow(): Promise<void> {
+    const processId = this.process?.pid;
+    if (processId !== undefined) await setWindowsProcessWindowVisibility(processId, true);
   }
 
   assertUsable(): void {

@@ -136,6 +136,8 @@ export interface AutomationRuntime {
   executeCommand(
     command: Parameters<MainOrchestrator['executeCommand']>[0],
   ): ReturnType<MainOrchestrator['executeCommand']>;
+  hideEdge(): Promise<void>;
+  showEdge(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -769,7 +771,9 @@ export async function createAutomationRuntime(
     stopRequested = true;
     return lifecycle.stop();
   };
-  return { orchestrator, executeCommand, startPolling: lifecycle.startPolling, stop };
+  const hideEdge = (): Promise<void> => profile.hideWindow();
+  const showEdge = (): Promise<void> => profile.showWindow();
+  return { orchestrator, executeCommand, hideEdge, showEdge, startPolling: lifecycle.startPolling, stop };
 }
 
 function waitForEdgeProcessExit(process: EdgeProcess, timeoutMs: number): Promise<void> {

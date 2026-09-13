@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Notification } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, Tray } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { acquireSingleInstanceLock, type SingleInstanceHost } from './lifecycle/single-instance.js';
@@ -32,6 +32,7 @@ import type {
 import { GitController } from './git/index.js';
 
 const appDirectory = dirname(fileURLToPath(import.meta.url));
+app.setName('web-chat2codex-exe');
 let mainWindow: BrowserWindow | null = null;
 let ipcRegistered = false;
 let applicationState: ApplicationState | null = null;
@@ -39,6 +40,9 @@ let automationRuntime: AutomationRuntime | null = null;
 let activeRuntimeConfig: ProjectConfig | null = null;
 let runtimeWindowGeneration = 0;
 let runtimeWindowClosed = true;
+let tray: Tray | null = null;
+let isQuitting = false;
+let quitPromise: Promise<void> | null = null;
 
 const notificationService = new NotificationService(({ title, body }) => new Notification({ title, body }), {
   logger: (event, details) => console.warn(`[notification] ${event}`, details),
@@ -53,6 +57,19 @@ function focusMainWindow(): void {
   }
   mainWindow.show();
   mainWindow.focus();
+  void automationRuntime?.showEdge().catch((error) => console.warn('[tray] Edge restore failed', error));
+}
+
+function hideToTray(): void {
+  mainWindow?.hide();
+  void automationRuntime?.hideEdge().catch((error) => console.warn('[tray] Edge hide failed', error));
+}
+
+function trayIcon(): Electron.NativeImage {
+  const svg = encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="3" fill="#2563eb"/><path d="M4 5h8M4 8h8M4 11h5" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  );
+  return nativeImage.createFromDataURL(`data:image/svg+xml,${svg}`);
 }
 
 const singleInstanceHost: SingleInstanceHost = {
@@ -97,6 +114,76 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
           activeRuntimeConfig = null;
         }
       };
+
+      const requestQuit = (): Promise<void> => {
+        if (quitPromise !== null) return quitPromise;
+        quitPromise = (async () => {
+          const snapshot = automationRuntime?.orchestrator.getDashboardSnapshot();
+          const running = snapshot?.status === 'RUNNING' || snapshot?.stage === 'RUNNING_LUNA';
+          if (running) {
+            const lunaRunning = snapshot?.stage === 'RUNNING_LUNA';
+            const confirmationOptions: Electron.MessageBoxOptions = {
+              type: 'warning',
+              title: '确认退出 Web Chat 2 Codex',
+              buttons: ['取消退出', '确认退出'],
+              defaultId: 0,
+              cancelId: 0,
+              message: lunaRunning ? 'Luna 正在执行任务，确认完全退出吗？' : '自动循环正在运行，确认完全退出吗？',
+              detail: lunaRunning
+                ? '退出会停止当前 Luna 执行并保存中断状态；下次启动后可按恢复状态继续。'
+                : '退出会停止自动循环、保存当前状态并关闭专用 Edge。',
+            };
+            const confirmation =
+              mainWindow === null
+                ? await dialog.showMessageBox(confirmationOptions)
+                : await dialog.showMessageBox(mainWindow, confirmationOptions);
+            if (confirmation.response !== 1) return;
+          }
+
+          isQuitting = true;
+          try {
+            await stopRuntime();
+            tray?.destroy();
+            tray = null;
+            app.quit();
+          } catch (error) {
+            isQuitting = false;
+            const errorOptions = {
+              type: 'error',
+              title: '退出未完成',
+              message: '后台进程未能安全停止，软件保持运行。',
+              detail: error instanceof Error ? error.message : String(error),
+            } as const;
+            if (mainWindow === null) await dialog.showMessageBox(errorOptions);
+            else await dialog.showMessageBox(mainWindow, errorOptions);
+          }
+        })().finally(() => {
+          if (!isQuitting) quitPromise = null;
+        });
+        return quitPromise;
+      };
+
+      app.on('before-quit', (event) => {
+        if (isQuitting) return;
+        event.preventDefault();
+        void requestQuit();
+      });
+
+      tray = new Tray(trayIcon());
+      tray.setToolTip('Web Chat 2 Codex');
+      tray.setContextMenu(
+        Menu.buildFromTemplate([
+          { label: '打开 W2C', click: focusMainWindow },
+          {
+            label: '显示专用 Edge',
+            click: () =>
+              void automationRuntime?.showEdge().catch((error) => console.warn('[tray] Edge restore failed', error)),
+          },
+          { type: 'separator' },
+          { label: '退出 W2C', click: () => void requestQuit() },
+        ]),
+      );
+      tray.on('double-click', focusMainWindow);
 
       const installRuntime = async (config: ProjectConfig, generation: number): Promise<void> => {
         if (runtimeWindowClosed || generation !== runtimeWindowGeneration) return;
@@ -281,30 +368,17 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
       },
     });
     attachWindowSecurityHandlers(mainWindow, trustedRendererUrl);
+    mainWindow.on('close', (event) => {
+      if (isQuitting) return;
+      event.preventDefault();
+      hideToTray();
+    });
     await mainWindow.loadFile(rendererPath);
     mainWindow.on('closed', () => {
       mainWindow = null;
       runtimeWindowClosed = true;
       runtimeWindowGeneration += 1;
       activeRuntimeConfig = null;
-      const closingRuntime = automationRuntime;
-      if (closingRuntime !== null) {
-        void closingRuntime.stop().then(
-          () => {
-            if (automationRuntime === closingRuntime) automationRuntime = null;
-          },
-          (error) => {
-            notificationService.notify({
-              project: 'Web Chat 2 Codex',
-              taskId: null,
-              phase: 'SHUTDOWN',
-              suggestion: '运行时未能安全停止，请保持应用关闭并检查状态后重试。',
-              error,
-              level: 'FATAL',
-            });
-          },
-        );
-      }
       initializationGate.reset();
     });
   };
@@ -364,11 +438,7 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     }
   });
 
-  app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-      app.quit();
-    }
-  });
+  app.on('window-all-closed', () => undefined);
 }
 
 function configsEqual(left: ProjectConfig, right: ProjectConfig): boolean {

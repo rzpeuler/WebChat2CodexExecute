@@ -44,6 +44,7 @@ export interface EdgeProfileOptions {
   userDataDirectory: string;
   remoteDebuggingPort: number;
   initialUrl?: string;
+  appMode?: boolean;
   fileExists?: (filePath: string) => Promise<boolean>;
   processRunner?: EdgeProcessRunner;
   debugPortProbe?: (port: number) => Promise<boolean>;

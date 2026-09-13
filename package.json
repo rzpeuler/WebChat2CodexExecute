@@ -9,16 +9,50 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/copy-renderer-assets.mjs",
-    "start": "npm run build && electron ."
+    "start": "npm run build && electron .",
+    "dist:win": "npm run build && electron-builder --win nsis"
   },
   "dependencies": {
-    "electron": "^38.1.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "electron": "^38.8.6",
+    "electron-builder": "^26.15.3",
     "prettier": "^3.6.2",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
+  },
+  "build": {
+    "appId": "com.rzpeuler.webchat2codex",
+    "productName": "Web Chat 2 Codex",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/yaml/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Web-Chat-2-Codex-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Web Chat 2 Codex"
+    }
   }
 }
