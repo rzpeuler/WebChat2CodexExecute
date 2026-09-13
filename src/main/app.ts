@@ -86,6 +86,8 @@ function hideToTray(): void {
 }
 
 function trayIcon(): Electron.NativeImage {
+  const packagedIcon = nativeImage.createFromPath(join(app.getAppPath(), 'build', 'icon.ico'));
+  if (!packagedIcon.isEmpty()) return packagedIcon.resize({ width: 16, height: 16 });
   const svg = encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="3" fill="#2563eb"/><path d="M4 5h8M4 8h8M4 11h5" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>',
   );

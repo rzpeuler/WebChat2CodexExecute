@@ -33,6 +33,7 @@
     "icon": "build/icon.ico",
     "files": [
       "dist/**/*",
+      "build/icon.ico",
       "node_modules/yaml/**/*",
       "package.json"
     ],
