@@ -222,20 +222,15 @@ const STANDARD_MANAGED_FILES = new Map<string, string>([
 ]);
 
 // Version 2 projects created before SESSION_ROTATION was introduced contain
-// every current managed file except this one template and its manifest entry.
-// Upgrade accepts only this exact additive delta; user-edited governance is
-// still rejected instead of being overwritten.
+// every current managed path except this one template and its manifest entry.
+// The upgrade action is explicit: content differences in these registered W2C
+// files are treated as a protocol version migration and are backed up before
+// the current managed files are written.
 const SESSION_ROTATION_TEMPLATE_ENTRY = `${WRITING_BLOCK_TEMPLATE_RELATIVE_DIRECTORY}/${WRITING_BLOCK_TEMPLATE_FILENAMES.SESSION_ROTATION}`;
-const PREVIOUS_STANDARD_MANIFEST: GovernanceManifest = {
-  ...STANDARD_MANIFEST,
-  documents: STANDARD_MANIFEST.documents.filter(
-    (document) => document.path !== WRITING_BLOCK_TEMPLATE_PATHS.SESSION_ROTATION,
-  ),
-};
-const PREVIOUS_STANDARD_MANAGED_FILES = new Map<string, string>([
-  ...STANDARD_DOCUMENTS,
-  ['governance-manifest.yaml', stringify(PREVIOUS_STANDARD_MANIFEST)],
-  ...[...STANDARD_TEMPLATE_FILES.entries()].filter(([fileName]) => fileName !== SESSION_ROTATION_TEMPLATE_ENTRY),
+const PREVIOUS_STANDARD_MANAGED_FILES = new Set<string>([
+  ...STANDARD_DOCUMENTS.keys(),
+  'governance-manifest.yaml',
+  ...[...STANDARD_TEMPLATE_FILES.keys()].filter((fileName) => fileName !== SESSION_ROTATION_TEMPLATE_ENTRY),
 ]);
 
 const LEGACY_MANAGED_FILES = new Map<string, string>([
@@ -399,15 +394,16 @@ function hasManagedMarker(source: string): boolean {
 
 type ManagedDirectoryState = 'current' | 'legacy' | false;
 
-function expectedManagedEntries(files: ReadonlyMap<string, string>): string[] {
+function expectedManagedEntries(files: ReadonlyMap<string, string> | ReadonlySet<string>): string[] {
+  const fileNames = [...(files instanceof Map ? files.keys() : files.values())];
   const directories = new Set<string>();
-  for (const fileName of files.keys()) {
+  for (const fileName of fileNames) {
     const segments = fileName.split('/');
     for (let index = 1; index < segments.length; index += 1) {
       directories.add(`${segments.slice(0, index).join('/')}/`);
     }
   }
-  return uniqueSorted([...directories, ...files.keys()]);
+  return uniqueSorted([...directories, ...fileNames]);
 }
 
 async function listManagedEntries(directoryPath: string, currentPath = directoryPath): Promise<string[]> {
@@ -707,6 +703,11 @@ export class ProjectInitializer {
         cause: error,
       });
     }
+    if (!hasManagedMarker(manifestSource)) {
+      throw new ProjectInitializationError('INITIALIZATION_DRIFT', '治理 manifest 不是 W2C 托管版本，未执行升级。', {
+        paths: [MANIFEST_PATH],
+      });
+    }
 
     let actualEntries: string[];
     try {
@@ -746,24 +747,19 @@ export class ProjectInitializer {
         { paths: paths.map(managedEntryPath) },
       );
     }
-    for (const [fileName, expected] of PREVIOUS_STANDARD_MANAGED_FILES) {
+    const originalFiles = new Map<string, string>();
+    for (const fileName of PREVIOUS_STANDARD_MANAGED_FILES) {
       const actual = await readFile(join(governancePath, fileName), 'utf8').catch((error) => {
         throw new ProjectInitializationError('INITIALIZATION_DRIFT', '旧版托管治理文件无法读取，未执行升级。', {
           paths: [managedEntryPath(fileName)],
           cause: error,
         });
       });
-      if (actual !== expected) {
-        throw new ProjectInitializationError(
-          'INITIALIZATION_DRIFT',
-          '发现用户修改过的治理文件，未执行覆盖式升级。请先检查 details.paths。',
-          { paths: [managedEntryPath(fileName)] },
-        );
-      }
+      originalFiles.set(fileName, actual);
     }
 
     const runId = assertRunId(this.createRunId());
-    const backupRelativePath = `${TOOL_DIRECTORY}/backups/governance-upgrade/${runId}/${MANIFEST_PATH}`;
+    const backupRelativePath = `${TOOL_DIRECTORY}/backups/governance-upgrade/${runId}`;
     const backupPath = join(projectRoot, ...backupRelativePath.split('/'));
     const sessionTemplatePath = join(
       projectRoot,
@@ -778,21 +774,34 @@ export class ProjectInitializer {
       });
     }
 
+    const changedPaths = uniqueSorted(
+      [...STANDARD_MANAGED_FILES.entries()]
+        .filter(([fileName, expected]) => originalFiles.get(fileName) !== expected)
+        .map(([fileName]) => managedEntryPath(fileName)),
+    );
+
     try {
-      await mkdir(dirname(backupPath), { recursive: true });
-      await writeFile(backupPath, manifestSource, { encoding: 'utf8', flag: 'wx' });
-      await mkdir(dirname(sessionTemplatePath), { recursive: true });
-      await writeFile(sessionTemplatePath, STANDARD_TEMPLATE_FILES.get(SESSION_ROTATION_TEMPLATE_ENTRY)!, {
-        encoding: 'utf8',
-        flag: 'wx',
-      });
-      await writeFile(manifestPath, STANDARD_MANIFEST_SOURCE, { encoding: 'utf8' });
+      await mkdir(backupPath, { recursive: true });
+      for (const [fileName, contents] of originalFiles) {
+        const targetPath = join(backupPath, ...fileName.split('/'));
+        await mkdir(dirname(targetPath), { recursive: true });
+        await writeFile(targetPath, contents, { encoding: 'utf8', flag: 'wx' });
+      }
+      for (const [fileName, contents] of STANDARD_MANAGED_FILES) {
+        const targetPath = join(governancePath, ...fileName.split('/'));
+        await mkdir(dirname(targetPath), { recursive: true });
+        await writeFile(targetPath, contents, { encoding: 'utf8' });
+      }
     } catch (error) {
+      for (const [fileName, contents] of originalFiles) {
+        const targetPath = join(governancePath, ...fileName.split('/'));
+        await mkdir(dirname(targetPath), { recursive: true }).catch(() => undefined);
+        await writeFile(targetPath, contents, { encoding: 'utf8' }).catch(() => undefined);
+      }
       await rm(sessionTemplatePath, { force: true }).catch(() => undefined);
-      await writeFile(manifestPath, manifestSource, { encoding: 'utf8' }).catch(() => undefined);
       throw new ProjectInitializationError('INITIALIZATION_FAILED', '治理协议增量升级失败，已尝试恢复原 manifest。', {
-        backupPath,
-        recovery: '请检查治理目录和备份后重试。',
+        backupPath: backupRelativePath,
+        recovery: '请检查治理目录和备份后重试。升级前的托管文件已保留在 backupPath。',
         cause: error,
       });
     }
@@ -800,10 +809,7 @@ export class ProjectInitializer {
     return {
       projectRoot,
       governanceManifestPath: MANIFEST_PATH,
-      changedPaths: [
-        `${GOVERNANCE_DIRECTORY}/${SESSION_ROTATION_TEMPLATE_ENTRY}`,
-        MANIFEST_PATH,
-      ],
+      changedPaths,
       backupPath: backupRelativePath,
       idempotent: false,
     };

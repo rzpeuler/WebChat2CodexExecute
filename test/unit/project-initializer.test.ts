@@ -301,13 +301,18 @@ describe('project initializer', () => {
       projectRoot: await realpath(repository),
       governanceManifestPath: 'docs/governance/governance-manifest.yaml',
       changedPaths: [
-        'docs/governance/templates/writing-blocks/session-rotation.template.json',
         'docs/governance/governance-manifest.yaml',
+        'docs/governance/templates/writing-blocks/session-rotation.template.json',
       ],
-      backupPath: '.web-chat2codex/backups/governance-upgrade/governance-upgrade-run/docs/governance/governance-manifest.yaml',
+      backupPath: '.web-chat2codex/backups/governance-upgrade/governance-upgrade-run',
       idempotent: false,
     });
-    expect(await readFile(join(repository, ...result.backupPath!.split('/')), 'utf8')).toBe(previousManifestSource);
+    expect(
+      await readFile(
+        join(repository, ...result.backupPath!.split('/'), 'governance-manifest.yaml'),
+        'utf8',
+      ),
+    ).toBe(previousManifestSource);
     expect(await readFile(manifestPath, 'utf8')).toContain(WRITING_BLOCK_TEMPLATE_PATHS.SESSION_ROTATION);
     expect(
       await readFile(
@@ -330,7 +335,7 @@ describe('project initializer', () => {
     });
   });
 
-  it('refuses a governance protocol upgrade when an old managed file was edited', async () => {
+  it('upgrades an old managed file when it was edited and preserves the old content in the backup', async () => {
     const repository = await gitRepository();
     const initializer = new ProjectInitializer({ runId: () => 'governance-upgrade-drift-run' });
     await initializer.initialize({ mode: 'adopt', targetDirectory: repository });
@@ -353,12 +358,18 @@ describe('project initializer', () => {
     const rulesPath = join(repository, 'docs', 'governance', 'PROJECT_RULES.md');
     await writeFile(rulesPath, '# local policy\n', 'utf8');
 
-    await expect(initializer.upgradeGovernance(repository)).rejects.toMatchObject({
-      code: 'INITIALIZATION_DRIFT',
-      details: { paths: ['docs/governance/PROJECT_RULES.md'] },
-    });
-    expect(await readFile(rulesPath, 'utf8')).toBe('# local policy\n');
-    await expect(access(join(repository, '.web-chat2codex', 'backups', 'governance-upgrade'))).rejects.toThrow();
+    const result = await initializer.upgradeGovernance(repository);
+    expect(result.changedPaths).toEqual(
+      expect.arrayContaining([
+        'docs/governance/PROJECT_RULES.md',
+        'docs/governance/templates/writing-blocks/session-rotation.template.json',
+        'docs/governance/governance-manifest.yaml',
+      ]),
+    );
+    expect(await readFile(join(repository, ...result.backupPath!.split('/'), 'PROJECT_RULES.md'), 'utf8')).toBe(
+      '# local policy\n',
+    );
+    expect(await readFile(rulesPath, 'utf8')).toContain('This document is active governance');
   });
 
   it('recursively detects modified templates without overwriting or backing them up', async () => {
