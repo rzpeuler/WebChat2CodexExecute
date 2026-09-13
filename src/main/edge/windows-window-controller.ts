@@ -7,10 +7,19 @@ const WINDOW_CONTROLLER_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $rootPid = __ROOT_PID__
 $showCommand = __SHOW_COMMAND__
+$ownershipToken = '__OWNERSHIP_TOKEN__'
+$userDataDirectory = '__USER_DATA_DIRECTORY__'
 
 $processIds = [System.Collections.Generic.HashSet[uint32]]::new()
 [void]$processIds.Add([uint32]$rootPid)
 $edgeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'")
+$edgeProcesses | ForEach-Object {
+  $commandLine = [string]$_.CommandLine
+  if (($ownershipToken -ne '' -and $commandLine -like "*$ownershipToken*") -or
+      ($userDataDirectory -ne '' -and $commandLine -like "*$userDataDirectory*")) {
+    [void]$processIds.Add([uint32]$_.ProcessId)
+  }
+}
 $changed = $true
 while ($changed) {
   $changed = $false
@@ -66,8 +75,13 @@ public static class W2CWindowController {
 const ROOT_PROCESS_LOOKUP_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ownershipToken = '__OWNERSHIP_TOKEN__'
+$userDataDirectory = '__USER_DATA_DIRECTORY__'
 $process = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |
-  Where-Object { $_.CommandLine -like "*$ownershipToken*" } |
+  Where-Object {
+    $commandLine = [string]$_.CommandLine
+    ($ownershipToken -ne '' -and $commandLine -like "*$ownershipToken*") -or
+      ($userDataDirectory -ne '' -and $commandLine -like "*$userDataDirectory*")
+  } |
   Select-Object -First 1
 if ($null -ne $process) { [Console]::WriteLine([int]$process.ProcessId) }
 `;
@@ -89,20 +103,28 @@ async function runHiddenPowerShell(script: string): Promise<string> {
   return result.stdout.trim();
 }
 
-export async function findOwnedEdgeProcessId(ownershipToken: string): Promise<number | null> {
+export async function findOwnedEdgeProcessId(ownershipToken: string, userDataDirectory = ''): Promise<number | null> {
   if (process.platform !== 'win32' || ownershipToken.trim() === '') return null;
   const output = await runHiddenPowerShell(
-    ROOT_PROCESS_LOOKUP_SCRIPT.replace('__OWNERSHIP_TOKEN__', powershellSingleQuote(ownershipToken)),
+    ROOT_PROCESS_LOOKUP_SCRIPT.replace('__OWNERSHIP_TOKEN__', powershellSingleQuote(ownershipToken)).replace(
+      '__USER_DATA_DIRECTORY__',
+      powershellSingleQuote(userDataDirectory),
+    ),
   );
   const processId = Number.parseInt(output, 10);
   return Number.isInteger(processId) && processId > 0 ? processId : null;
 }
 
-export async function setWindowsProcessWindowVisibility(processId: number, visible: boolean): Promise<void> {
+export async function setWindowsProcessWindowVisibility(
+  processId: number,
+  visible: boolean,
+  ownershipToken = '',
+  userDataDirectory = '',
+): Promise<void> {
   if (process.platform !== 'win32' || !Number.isInteger(processId) || processId <= 0) return;
-  const script = WINDOW_CONTROLLER_SCRIPT.replace('__ROOT_PID__', String(processId)).replace(
-    '__SHOW_COMMAND__',
-    visible ? '9' : '0',
-  );
+  const script = WINDOW_CONTROLLER_SCRIPT.replace('__ROOT_PID__', String(processId))
+    .replace('__SHOW_COMMAND__', visible ? '9' : '0')
+    .replace('__OWNERSHIP_TOKEN__', powershellSingleQuote(ownershipToken))
+    .replace('__USER_DATA_DIRECTORY__', powershellSingleQuote(userDataDirectory));
   await runHiddenPowerShell(script);
 }

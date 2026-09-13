@@ -185,6 +185,12 @@ async function defaultOwnershipProbe(
     ) {
       return false;
     }
+    try {
+      const processId = await findOwnedEdgeProcessId(ownership.token, ownership.userDataDirectory);
+      if (processId !== null) return true;
+    } catch {
+      // Fall back to the CDP command-line probe when process inspection is unavailable.
+    }
     let socket: WebSocket;
     try {
       socket = webSocketFactory(record.webSocketDebuggerUrl);
@@ -380,7 +386,7 @@ export class EdgeProfileManager {
       }
       this.ownership = ownership;
       try {
-        this.ownedProcessId = await findOwnedEdgeProcessId(ownership.token);
+        this.ownedProcessId = await findOwnedEdgeProcessId(ownership.token, ownership.userDataDirectory);
       } catch (error) {
         this.ownedProcessId = null;
         console.warn('[edge] unable to resolve the reused Edge process id; CDP remains available', error);
@@ -444,12 +450,24 @@ export class EdgeProfileManager {
 
   async hideWindow(): Promise<void> {
     const processId = this.process?.pid ?? this.ownedProcessId;
-    if (processId !== null && processId !== undefined) await setWindowsProcessWindowVisibility(processId, false);
+    if (processId !== null && processId !== undefined)
+      await setWindowsProcessWindowVisibility(
+        processId,
+        false,
+        this.ownership?.token ?? '',
+        this.options.userDataDirectory,
+      );
   }
 
   async showWindow(): Promise<void> {
     const processId = this.process?.pid ?? this.ownedProcessId;
-    if (processId !== null && processId !== undefined) await setWindowsProcessWindowVisibility(processId, true);
+    if (processId !== null && processId !== undefined)
+      await setWindowsProcessWindowVisibility(
+        processId,
+        true,
+        this.ownership?.token ?? '',
+        this.options.userDataDirectory,
+      );
   }
 
   assertUsable(): void {

@@ -731,6 +731,7 @@ export async function createAutomationRuntime(
       openEdge: async () => {
         assertRuntimeOperationAllowed();
         await ensureEdge();
+        await profile.showWindow();
       },
       openProject: async () => {
         assertRuntimeOperationAllowed();
