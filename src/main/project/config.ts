@@ -31,6 +31,11 @@ const execFile = promisify(execFileCallback);
 export const DEFAULT_MANIFEST_RELATIVE_PATH = 'docs/governance/governance-manifest.yaml';
 const FORBIDDEN_CONFIG_KEYS = /cookie|password|token|secret|api[_-]?key/i;
 
+export interface ProjectSelectionStore {
+  load(): Promise<string | null>;
+  save(projectId: string): Promise<void>;
+}
+
 export type ProjectConfigErrorCode =
   | 'INVALID_PROJECT_PATH'
   | 'NOT_GIT_REPOSITORY'
@@ -471,7 +476,10 @@ export class ProjectConfigStore {
 }
 
 export class ProjectConfigService {
-  constructor(private readonly store: ProjectConfigStore) {}
+  constructor(
+    private readonly store: ProjectConfigStore,
+    private readonly selectionStore?: ProjectSelectionStore,
+  ) {}
 
   scan(localPath: string): Promise<ProjectScanResult> {
     return scanGitProject(localPath);
@@ -524,15 +532,24 @@ export class ProjectConfigService {
         `Writing Block 模板校验失败：${scan.writingBlockTemplates.error?.message ?? '模板状态无效'}。`,
       );
     }
-    return this.store.save(normalized);
+    const saved = await this.store.save(normalized);
+    await this.selectionStore?.save(saved.projectId);
+    return saved;
   }
 
   load(projectId: string): Promise<ProjectConfig | null> {
     return this.store.get(projectId);
   }
 
-  loadAll(): Promise<ProjectConfig[]> {
-    return this.store.loadAll();
+  async loadAll(): Promise<ProjectConfig[]> {
+    const configs = await this.store.loadAll();
+    const selectedProjectId = await this.selectionStore?.load();
+    if (selectedProjectId === null || selectedProjectId === undefined) return configs;
+    const selectedIndex = configs.findIndex((config) => config.projectId === selectedProjectId);
+    if (selectedIndex <= 0) return configs;
+    const selected = configs[selectedIndex];
+    if (selected === undefined) return configs;
+    return [selected, ...configs.slice(0, selectedIndex), ...configs.slice(selectedIndex + 1)];
   }
 
   async previewSolPrompt(configInput: ProjectConfigInput | ProjectConfig): Promise<SolPromptCompilation> {

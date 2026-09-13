@@ -30,6 +30,7 @@
     "directories": {
       "output": "release"
     },
+    "icon": "build/icon.ico",
     "files": [
       "dist/**/*",
       "node_modules/yaml/**/*",

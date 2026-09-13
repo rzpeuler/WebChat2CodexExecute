@@ -47,8 +47,9 @@ public static class W2CWindowController {
       GetWindowThreadProcessId(hWnd, out ownerPid);
       foreach (var processId in processIds) {
         if (ownerPid == processId) {
-          if (ShowWindowAsync(hWnd, command)) changed++;
+          ShowWindowAsync(hWnd, command);
           if (command != 0) SetForegroundWindow(hWnd);
+          changed++;
           break;
         }
       }
@@ -59,17 +60,24 @@ public static class W2CWindowController {
 }
 '@
 
-$windowCount = [W2CWindowController]::SetForProcesses([uint32[]]$processIds, $showCommand)
-if ($windowCount -eq 0) { exit 2 }
+[void][W2CWindowController]::SetForProcesses([uint32[]]$processIds, $showCommand)
 `;
 
-export async function setWindowsProcessWindowVisibility(processId: number, visible: boolean): Promise<void> {
-  if (process.platform !== 'win32' || !Number.isInteger(processId) || processId <= 0) return;
-  const script = WINDOW_CONTROLLER_SCRIPT.replace('__ROOT_PID__', String(processId)).replace(
-    '__SHOW_COMMAND__',
-    visible ? '9' : '0',
-  );
-  await execFile(
+const ROOT_PROCESS_LOOKUP_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$ownershipToken = '__OWNERSHIP_TOKEN__'
+$process = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |
+  Where-Object { $_.CommandLine -like "*$ownershipToken*" } |
+  Select-Object -First 1
+if ($null -ne $process) { [Console]::WriteLine([int]$process.ProcessId) }
+`;
+
+function powershellSingleQuote(value: string): string {
+  return value.replaceAll("'", "''");
+}
+
+async function runHiddenPowerShell(script: string): Promise<string> {
+  const result = await execFile(
     'powershell.exe',
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script],
     {
@@ -78,4 +86,23 @@ export async function setWindowsProcessWindowVisibility(processId: number, visib
       maxBuffer: 256 * 1024,
     },
   );
+  return result.stdout.trim();
+}
+
+export async function findOwnedEdgeProcessId(ownershipToken: string): Promise<number | null> {
+  if (process.platform !== 'win32' || ownershipToken.trim() === '') return null;
+  const output = await runHiddenPowerShell(
+    ROOT_PROCESS_LOOKUP_SCRIPT.replace('__OWNERSHIP_TOKEN__', powershellSingleQuote(ownershipToken)),
+  );
+  const processId = Number.parseInt(output, 10);
+  return Number.isInteger(processId) && processId > 0 ? processId : null;
+}
+
+export async function setWindowsProcessWindowVisibility(processId: number, visible: boolean): Promise<void> {
+  if (process.platform !== 'win32' || !Number.isInteger(processId) || processId <= 0) return;
+  const script = WINDOW_CONTROLLER_SCRIPT.replace('__ROOT_PID__', String(processId)).replace(
+    '__SHOW_COMMAND__',
+    visible ? '9' : '0',
+  );
+  await runHiddenPowerShell(script);
 }

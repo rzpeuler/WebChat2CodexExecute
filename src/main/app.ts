@@ -30,9 +30,13 @@ import type {
   ProjectRemoteAccessCheckInput,
 } from '../shared/contracts/project-initialization.js';
 import { GitController } from './git/index.js';
+import { migrateMissingUserData, stableUserDataDirectory } from './lifecycle/user-data.js';
 
 const appDirectory = dirname(fileURLToPath(import.meta.url));
 app.setName('web-chat2codex-exe');
+const legacyUserDataDirectory = app.getPath('userData');
+const stableUserDataPath = stableUserDataDirectory(app.getPath('appData'));
+app.setPath('userData', stableUserDataPath);
 let mainWindow: BrowserWindow | null = null;
 let ipcRegistered = false;
 let applicationState: ApplicationState | null = null;
@@ -47,6 +51,22 @@ let quitPromise: Promise<void> | null = null;
 const notificationService = new NotificationService(({ title, body }) => new Notification({ title, body }), {
   logger: (event, details) => console.warn(`[notification] ${event}`, details),
 });
+
+interface LastProjectSelection {
+  schemaVersion: 1;
+  projectId: string;
+}
+
+function parseLastProjectSelection(value: unknown): LastProjectSelection {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('Invalid last project selection.');
+  }
+  const record = value as Record<string, unknown>;
+  if (record.schemaVersion !== 1 || typeof record.projectId !== 'string' || record.projectId.trim() === '') {
+    throw new TypeError('Invalid last project selection.');
+  }
+  return { schemaVersion: 1, projectId: record.projectId };
+}
 
 function focusMainWindow(): void {
   if (mainWindow === null) {
@@ -98,7 +118,14 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
     }
     if (!ipcRegistered) {
       const projectConfigStore = createProjectConfigStore(defaultProjectConfigPath(app.getPath('userData')));
-      const projectConfigService = new ProjectConfigService(projectConfigStore);
+      const lastProjectSelectionStore = new AtomicJsonFileStore<LastProjectSelection>(
+        join(app.getPath('userData'), 'last-project.json'),
+        { validate: parseLastProjectSelection },
+      );
+      const projectConfigService = new ProjectConfigService(projectConfigStore, {
+        load: async () => (await lastProjectSelectionStore.load())?.projectId ?? null,
+        save: async (projectId) => lastProjectSelectionStore.save({ schemaVersion: 1, projectId }),
+      });
       const projectInitializer = new ProjectInitializer();
       const initializationGit = new GitController({
         pendingPushStatePath: join(app.getPath('userData'), 'state', 'initialization-git-pending-push.json'),
@@ -385,6 +412,12 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
 
   const initializationGate = createInitializationGate(
     async () => {
+      await migrateMissingUserData(stableUserDataPath, [
+        legacyUserDataDirectory,
+        join(app.getPath('appData'), 'Web Chat 2 Codex'),
+        join(app.getPath('appData'), 'Web-Chat-2-Codex'),
+        join(app.getPath('appData'), 'Electron'),
+      ]);
       if (applicationState === null) {
         const onPersistenceDiagnostic = (diagnostic: unknown): void => {
           console.warn('[persistence] diagnostic', diagnostic);
