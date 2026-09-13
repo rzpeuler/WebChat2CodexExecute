@@ -273,6 +273,94 @@ describe('project initializer', () => {
     await expect(access(join(repository, '.web-chat2codex', 'backups', 'governance'))).rejects.toThrow();
   });
 
+  it('upgrades the previous managed tree additively, backs up its manifest, and is idempotent', async () => {
+    const repository = await gitRepository();
+    const initializer = new ProjectInitializer({ runId: () => 'governance-upgrade-run' });
+    await initializer.initialize({ mode: 'adopt', targetDirectory: repository });
+
+    const manifestPath = join(repository, 'docs', 'governance', 'governance-manifest.yaml');
+    const previousManifest = parse(await readFile(manifestPath, 'utf8')) as { documents: Array<{ path: string }> };
+    previousManifest.documents = previousManifest.documents.filter(
+      (document) => document.path !== WRITING_BLOCK_TEMPLATE_PATHS.SESSION_ROTATION,
+    );
+    const previousManifestSource = stringify(previousManifest);
+    await writeFile(manifestPath, previousManifestSource, 'utf8');
+    await rm(
+      join(
+        repository,
+        'docs',
+        'governance',
+        'templates',
+        'writing-blocks',
+        WRITING_BLOCK_TEMPLATE_FILENAMES.SESSION_ROTATION,
+      ),
+    );
+
+    const result = await initializer.upgradeGovernance(repository);
+    expect(result).toMatchObject({
+      projectRoot: await realpath(repository),
+      governanceManifestPath: 'docs/governance/governance-manifest.yaml',
+      changedPaths: [
+        'docs/governance/templates/writing-blocks/session-rotation.template.json',
+        'docs/governance/governance-manifest.yaml',
+      ],
+      backupPath: '.web-chat2codex/backups/governance-upgrade/governance-upgrade-run/docs/governance/governance-manifest.yaml',
+      idempotent: false,
+    });
+    expect(await readFile(join(repository, ...result.backupPath!.split('/')), 'utf8')).toBe(previousManifestSource);
+    expect(await readFile(manifestPath, 'utf8')).toContain(WRITING_BLOCK_TEMPLATE_PATHS.SESSION_ROTATION);
+    expect(
+      await readFile(
+        join(
+          repository,
+          'docs',
+          'governance',
+          'templates',
+          'writing-blocks',
+          WRITING_BLOCK_TEMPLATE_FILENAMES.SESSION_ROTATION,
+        ),
+        'utf8',
+      ),
+    ).toBe(`${stringifyWritingBlockTemplate('SESSION_ROTATION')}\n`);
+
+    expect(await initializer.upgradeGovernance(repository)).toMatchObject({
+      changedPaths: [],
+      backupPath: null,
+      idempotent: true,
+    });
+  });
+
+  it('refuses a governance protocol upgrade when an old managed file was edited', async () => {
+    const repository = await gitRepository();
+    const initializer = new ProjectInitializer({ runId: () => 'governance-upgrade-drift-run' });
+    await initializer.initialize({ mode: 'adopt', targetDirectory: repository });
+    const manifestPath = join(repository, 'docs', 'governance', 'governance-manifest.yaml');
+    const previousManifest = parse(await readFile(manifestPath, 'utf8')) as { documents: Array<{ path: string }> };
+    previousManifest.documents = previousManifest.documents.filter(
+      (document) => document.path !== WRITING_BLOCK_TEMPLATE_PATHS.SESSION_ROTATION,
+    );
+    await writeFile(manifestPath, stringify(previousManifest), 'utf8');
+    await rm(
+      join(
+        repository,
+        'docs',
+        'governance',
+        'templates',
+        'writing-blocks',
+        WRITING_BLOCK_TEMPLATE_FILENAMES.SESSION_ROTATION,
+      ),
+    );
+    const rulesPath = join(repository, 'docs', 'governance', 'PROJECT_RULES.md');
+    await writeFile(rulesPath, '# local policy\n', 'utf8');
+
+    await expect(initializer.upgradeGovernance(repository)).rejects.toMatchObject({
+      code: 'INITIALIZATION_DRIFT',
+      details: { paths: ['docs/governance/PROJECT_RULES.md'] },
+    });
+    expect(await readFile(rulesPath, 'utf8')).toBe('# local policy\n');
+    await expect(access(join(repository, '.web-chat2codex', 'backups', 'governance-upgrade'))).rejects.toThrow();
+  });
+
   it('recursively detects modified templates without overwriting or backing them up', async () => {
     const repository = await gitRepository();
     const initializer = new ProjectInitializer({ runId: () => 'template-drift-run' });

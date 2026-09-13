@@ -27,6 +27,7 @@ const selectDirectoryButton = document.querySelector<HTMLButtonElement>('#select
 const checkGitAccessButton = document.querySelector<HTMLButtonElement>('#check-git-access');
 const cloneInitializeButton = document.querySelector<HTMLButtonElement>('#clone-initialize');
 const adoptInitializeButton = document.querySelector<HTMLButtonElement>('#adopt-initialize');
+const upgradeGovernanceButton = document.querySelector<HTMLButtonElement>('#upgrade-governance');
 const saveButton = document.querySelector<HTMLButtonElement>('#save');
 const previewButton = document.querySelector<HTMLButtonElement>('#preview');
 const dashboardHeaderProjectElement = document.querySelector<HTMLElement>('#dashboard-header-project');
@@ -928,6 +929,7 @@ const projectOperationButtons = [
   checkGitAccessButton,
   cloneInitializeButton,
   adoptInitializeButton,
+  upgradeGovernanceButton,
   saveButton,
   previewButton,
 ];
@@ -1016,6 +1018,31 @@ adoptInitializeButton?.addEventListener('click', () => {
     action: () => initializeProject('adopt'),
     successMessage: () => '项目初始化操作已完成。',
     errorFallback: '已有项目初始化失败',
+  });
+});
+
+upgradeGovernanceButton?.addEventListener('click', () => {
+  void runProjectOperation({
+    buttons: projectOperationButtons,
+    startMessage: '正在校验旧版治理结构并增量升级模板…',
+    action: async () => {
+      const result = await window.desktopApi.upgradeProjectGovernance(getConfigInput());
+      await scanSelectedProject();
+      if (promptElement === null) throw new Error('提示词预览区域不可用');
+      const preview = await window.desktopApi.previewSolPrompt(getConfigInput());
+      promptElement.textContent = preview.initializationPrompt;
+      openContentDialog(
+        `治理协议已升级，最新 Sol 提示词（${preview.initializationPromptLength} / ${preview.initializationPromptMaxLength} 字符）`,
+        preview.initializationPrompt,
+        upgradeGovernanceButton,
+      );
+      return { result, preview };
+    },
+    successMessage: ({ result }) =>
+      result.idempotent
+        ? '治理协议已是最新版本，已重新生成 Sol 提示词。'
+        : `治理协议升级完成${result.remoteCommit === undefined ? '' : `，已同步 ${result.remoteCommit}`}。请复制最新 Sol 提示词并更新 Project 背景。`,
+    errorFallback: '治理协议升级失败',
   });
 });
 

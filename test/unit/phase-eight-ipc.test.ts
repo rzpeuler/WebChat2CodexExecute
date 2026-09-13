@@ -6,6 +6,7 @@ import {
   DASHBOARD_SNAPSHOT_CHANNEL,
   IpcSecurityError,
   PROJECT_DIRECTORY_SELECT_CHANNEL,
+  PROJECT_GOVERNANCE_UPGRADE_CHANNEL,
   PROJECT_INITIALIZE_CHANNEL,
   PROJECT_REMOTE_ACCESS_CHECK_CHANNEL,
   registerIpcHandlers,
@@ -104,6 +105,13 @@ describe('phase eight dashboard IPC contract', () => {
           message: 'ok',
         }),
         initialize,
+        upgradeGovernance: async () => ({
+          projectRoot: 'C:/Projects/demo',
+          governanceManifestPath: 'docs/governance/governance-manifest.yaml',
+          changedPaths: [],
+          backupPath: null,
+          idempotent: true,
+        }),
       },
     });
     await expect(handlers.get(PROJECT_DIRECTORY_SELECT_CHANNEL)?.(event)).resolves.toBe('C:/Projects');
@@ -115,6 +123,12 @@ describe('phase eight dashboard IPC contract', () => {
     ).resolves.toMatchObject({ accessible: true, code: 'OK' });
     await expect(
       handlers.get(PROJECT_INITIALIZE_CHANNEL)?.(event, { mode: 'adopt', targetDirectory: 'C:/Projects/demo' }),
+    ).resolves.toMatchObject({ idempotent: true });
+    await expect(
+      handlers.get(PROJECT_GOVERNANCE_UPGRADE_CHANNEL)?.(event, {
+        localPath: 'C:/Projects/demo',
+        reportDirectory: 'docs/task-reports',
+      }),
     ).resolves.toMatchObject({ idempotent: true });
     await expect(
       Promise.resolve().then(() =>

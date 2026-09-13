@@ -22,11 +22,12 @@ import {
 } from './project/config.js';
 import { NotificationService } from './notify/index.js';
 import { createAutomationRuntime, type AutomationRuntime } from './automation-runtime.js';
-import type { ProjectConfig } from '../shared/contracts/project-config.js';
+import type { ProjectConfig, ProjectConfigInput } from '../shared/contracts/project-config.js';
 import { ProjectInitializer } from './project/initializer.js';
 import type {
   ProjectInitializationInput,
   ProjectInitializationResult,
+  ProjectGovernanceUpgradeResult,
   ProjectRemoteAccessCheckInput,
 } from '../shared/contracts/project-initialization.js';
 import { GitController } from './git/index.js';
@@ -327,6 +328,33 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
           remoteCommit: sync.remoteCommit,
         };
       };
+      const upgradeProjectGovernance = (input: ProjectConfigInput): Promise<ProjectGovernanceUpgradeResult> => {
+        const operation = repositoryOperationTail.then(async () => {
+          await stopRuntime();
+          const baseline = await initializationGit.captureBaseline(input.localPath, {
+            requireClean: true,
+            ...(input.targetBranch === undefined ? {} : { expectedBranch: input.targetBranch }),
+            ...(input.remoteUrl === undefined ? {} : { expectedRemoteUrl: input.remoteUrl }),
+          });
+          const upgraded = await projectInitializer.upgradeGovernance(input.localPath);
+          if (upgraded.changedPaths.length === 0) return upgraded;
+          const sync = await initializationGit.syncGovernance({
+            baseline,
+            changeId: 'governance-protocol-upgrade',
+            changedPaths: upgraded.changedPaths,
+          });
+          return {
+            ...upgraded,
+            commit: sync.commit,
+            remoteCommit: sync.remoteCommit,
+          };
+        });
+        repositoryOperationTail = operation.then(
+          () => undefined,
+          () => undefined,
+        );
+        return operation;
+      };
       const savedConfigs = await projectConfigService.loadAll();
       if (savedConfigs[0] !== undefined) {
         void enqueueRuntimeInstall(savedConfigs[0]).catch((error) => {
@@ -357,6 +385,7 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
           },
           checkRemoteAccess: (input: ProjectRemoteAccessCheckInput) => projectInitializer.checkRemoteAccess(input),
           initialize: (input: ProjectInitializationInput) => initializeProject(input),
+          upgradeGovernance: (config: ProjectConfigInput) => upgradeProjectGovernance(config),
         },
         onProjectConfigSaved: (config) =>
           enqueueRuntimeInstall(config).catch((error) => {

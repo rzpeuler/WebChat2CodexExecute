@@ -65,10 +65,15 @@
             <button id="check-git-access" class="button-secondary" type="button">检查 Git 远程授权</button>
             <button id="clone-initialize" type="button">克隆并初始化新项目</button>
             <button id="adopt-initialize" type="button">接管并初始化已有项目</button>
+            <button id="upgrade-governance" class="button-secondary" type="button">升级治理协议与 Sol 提示词</button>
             <button id="save" type="submit">保存配置</button>
             <button id="preview" class="button-secondary" type="button">预览 Sol 提示词</button>
           </div>
         </form>
+        <p class="helper-text">
+          “升级治理协议”只处理 W2C 托管的治理模板与 manifest，采用增量更新并自动备份；发现用户改动时会停止，不覆盖项目内容。
+          升级后请将生成的最新 Sol 提示词复制到对应 ChatGPT Project 背景。
+        </p>
         <div class="preview-actions">
           <button id="view-project-details" class="button-secondary" type="button" disabled>查看当前配置</button>
         </div>

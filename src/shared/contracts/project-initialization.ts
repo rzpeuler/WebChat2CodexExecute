@@ -38,3 +38,13 @@ export interface ProjectInitializationResult {
   commit?: string | null;
   remoteCommit?: string | null;
 }
+
+export interface ProjectGovernanceUpgradeResult {
+  projectRoot: string;
+  governanceManifestPath: string;
+  changedPaths: string[];
+  backupPath: string | null;
+  idempotent: boolean;
+  commit?: string | null;
+  remoteCommit?: string | null;
+}

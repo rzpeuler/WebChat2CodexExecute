@@ -9,6 +9,7 @@ import type {
   ProjectInitializationInput,
   ProjectInitializationMode,
   ProjectInitializationResult,
+  ProjectGovernanceUpgradeResult,
   ProjectRemoteAccessCheckInput,
   ProjectRemoteAccessCheckResult,
 } from '../../shared/contracts/project-initialization.js';
@@ -218,6 +219,23 @@ const STANDARD_MANAGED_FILES = new Map<string, string>([
   ...STANDARD_DOCUMENTS,
   ['governance-manifest.yaml', STANDARD_MANIFEST_SOURCE],
   ...STANDARD_TEMPLATE_FILES,
+]);
+
+// Version 2 projects created before SESSION_ROTATION was introduced contain
+// every current managed file except this one template and its manifest entry.
+// Upgrade accepts only this exact additive delta; user-edited governance is
+// still rejected instead of being overwritten.
+const SESSION_ROTATION_TEMPLATE_ENTRY = `${WRITING_BLOCK_TEMPLATE_RELATIVE_DIRECTORY}/${WRITING_BLOCK_TEMPLATE_FILENAMES.SESSION_ROTATION}`;
+const PREVIOUS_STANDARD_MANIFEST: GovernanceManifest = {
+  ...STANDARD_MANIFEST,
+  documents: STANDARD_MANIFEST.documents.filter(
+    (document) => document.path !== WRITING_BLOCK_TEMPLATE_PATHS.SESSION_ROTATION,
+  ),
+};
+const PREVIOUS_STANDARD_MANAGED_FILES = new Map<string, string>([
+  ...STANDARD_DOCUMENTS,
+  ['governance-manifest.yaml', stringify(PREVIOUS_STANDARD_MANIFEST)],
+  ...[...STANDARD_TEMPLATE_FILES.entries()].filter(([fileName]) => fileName !== SESSION_ROTATION_TEMPLATE_ENTRY),
 ]);
 
 const LEGACY_MANAGED_FILES = new Map<string, string>([
@@ -673,6 +691,122 @@ export class ProjectInitializer {
 
     const projectRoot = input.mode === 'clone' ? await this.clone(input) : await this.adopt(input.targetDirectory);
     return this.initializeGovernance(projectRoot, input.mode);
+  }
+
+  async upgradeGovernance(targetDirectory: string): Promise<ProjectGovernanceUpgradeResult> {
+    const projectRoot = await this.adopt(targetDirectory);
+    const governancePath = join(projectRoot, ...GOVERNANCE_DIRECTORY.split('/'));
+    const manifestPath = join(governancePath, 'governance-manifest.yaml');
+    await assertSafeProjectPath(projectRoot, governancePath);
+    let manifestSource: string;
+    try {
+      manifestSource = await readFile(manifestPath, 'utf8');
+    } catch (error) {
+      throw new ProjectInitializationError('INITIALIZATION_DRIFT', '缺少治理 manifest，无法执行增量升级。', {
+        paths: [MANIFEST_PATH],
+        cause: error,
+      });
+    }
+
+    let actualEntries: string[];
+    try {
+      actualEntries = await listManagedEntries(governancePath);
+    } catch (error) {
+      throw new ProjectInitializationError('INITIALIZATION_DRIFT', '治理目录结构无法完整读取，未执行升级。', {
+        paths: [GOVERNANCE_DIRECTORY],
+        cause: error,
+      });
+    }
+    const currentEntries = expectedManagedEntries(STANDARD_MANAGED_FILES);
+    if (
+      actualEntries.length === currentEntries.length &&
+      actualEntries.every((entry, index) => entry === currentEntries[index])
+    ) {
+      const current = await assertManagedDirectoryUnchanged(projectRoot, governancePath);
+      if (current === 'current') {
+        return {
+          projectRoot,
+          governanceManifestPath: MANIFEST_PATH,
+          changedPaths: [],
+          backupPath: null,
+          idempotent: true,
+        };
+      }
+    }
+
+    const previousEntries = expectedManagedEntries(PREVIOUS_STANDARD_MANAGED_FILES);
+    const paths = uniqueSorted([
+      ...previousEntries.filter((entry) => !actualEntries.includes(entry)),
+      ...actualEntries.filter((entry) => !previousEntries.includes(entry)),
+    ]);
+    if (paths.length > 0) {
+      throw new ProjectInitializationError(
+        'INITIALIZATION_DRIFT',
+        '当前治理目录不是可安全增量升级的旧版托管结构，未覆盖任何文件。',
+        { paths: paths.map(managedEntryPath) },
+      );
+    }
+    for (const [fileName, expected] of PREVIOUS_STANDARD_MANAGED_FILES) {
+      const actual = await readFile(join(governancePath, fileName), 'utf8').catch((error) => {
+        throw new ProjectInitializationError('INITIALIZATION_DRIFT', '旧版托管治理文件无法读取，未执行升级。', {
+          paths: [managedEntryPath(fileName)],
+          cause: error,
+        });
+      });
+      if (actual !== expected) {
+        throw new ProjectInitializationError(
+          'INITIALIZATION_DRIFT',
+          '发现用户修改过的治理文件，未执行覆盖式升级。请先检查 details.paths。',
+          { paths: [managedEntryPath(fileName)] },
+        );
+      }
+    }
+
+    const runId = assertRunId(this.createRunId());
+    const backupRelativePath = `${TOOL_DIRECTORY}/backups/governance-upgrade/${runId}/${MANIFEST_PATH}`;
+    const backupPath = join(projectRoot, ...backupRelativePath.split('/'));
+    const sessionTemplatePath = join(
+      projectRoot,
+      ...`${GOVERNANCE_DIRECTORY}/${SESSION_ROTATION_TEMPLATE_ENTRY}`.split('/'),
+    );
+    await assertSafeProjectPath(projectRoot, backupPath);
+    await assertSafeProjectPath(projectRoot, sessionTemplatePath);
+    if ((await pathState(backupPath)) !== 'missing' || (await pathState(sessionTemplatePath)) !== 'missing') {
+      throw new ProjectInitializationError('INITIALIZATION_FAILED', '治理升级目标路径已存在，未写入任何文件。', {
+        backupPath: null,
+        recovery: '请更换运行 ID 后重试。',
+      });
+    }
+
+    try {
+      await mkdir(dirname(backupPath), { recursive: true });
+      await writeFile(backupPath, manifestSource, { encoding: 'utf8', flag: 'wx' });
+      await mkdir(dirname(sessionTemplatePath), { recursive: true });
+      await writeFile(sessionTemplatePath, STANDARD_TEMPLATE_FILES.get(SESSION_ROTATION_TEMPLATE_ENTRY)!, {
+        encoding: 'utf8',
+        flag: 'wx',
+      });
+      await writeFile(manifestPath, STANDARD_MANIFEST_SOURCE, { encoding: 'utf8' });
+    } catch (error) {
+      await rm(sessionTemplatePath, { force: true }).catch(() => undefined);
+      await writeFile(manifestPath, manifestSource, { encoding: 'utf8' }).catch(() => undefined);
+      throw new ProjectInitializationError('INITIALIZATION_FAILED', '治理协议增量升级失败，已尝试恢复原 manifest。', {
+        backupPath,
+        recovery: '请检查治理目录和备份后重试。',
+        cause: error,
+      });
+    }
+
+    return {
+      projectRoot,
+      governanceManifestPath: MANIFEST_PATH,
+      changedPaths: [
+        `${GOVERNANCE_DIRECTORY}/${SESSION_ROTATION_TEMPLATE_ENTRY}`,
+        MANIFEST_PATH,
+      ],
+      backupPath: backupRelativePath,
+      idempotent: false,
+    };
   }
 
   private async clone(input: Extract<ProjectInitializationInput, { mode: 'clone' }>): Promise<string> {

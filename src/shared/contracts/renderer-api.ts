@@ -7,6 +7,7 @@ import type { ProjectConfig, ProjectConfigInput, ProjectScanResult } from './pro
 import type {
   ProjectInitializationInput,
   ProjectInitializationResult,
+  ProjectGovernanceUpgradeResult,
   ProjectRemoteAccessCheckInput,
   ProjectRemoteAccessCheckResult,
 } from './project-initialization.js';
@@ -24,6 +25,7 @@ export interface RendererApi {
   selectProjectDirectory(): Promise<string | null>;
   checkProjectRemoteAccess(input: ProjectRemoteAccessCheckInput): Promise<ProjectRemoteAccessCheckResult>;
   initializeProject(input: ProjectInitializationInput): Promise<ProjectInitializationResult>;
+  upgradeProjectGovernance(config: ProjectConfigInput): Promise<ProjectGovernanceUpgradeResult>;
   scanProject(localPath: string): Promise<ProjectScanResult>;
   saveProjectConfig(config: ProjectConfigInput): Promise<ProjectConfig>;
   loadProjectConfigs(): Promise<ProjectConfig[]>;

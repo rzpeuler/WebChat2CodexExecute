@@ -14,6 +14,7 @@ import type { ProjectConfigService } from '../project/config.js';
 import type {
   ProjectInitializationInput,
   ProjectInitializationResult,
+  ProjectGovernanceUpgradeResult,
   ProjectRemoteAccessCheckInput,
   ProjectRemoteAccessCheckResult,
 } from '../../shared/contracts/project-initialization.js';
@@ -22,6 +23,7 @@ export const RUNTIME_INFO_CHANNEL = 'app:get-runtime-info';
 export const PROJECT_DIRECTORY_SELECT_CHANNEL = 'project:directory-select';
 export const PROJECT_REMOTE_ACCESS_CHECK_CHANNEL = 'project:remote-access-check';
 export const PROJECT_INITIALIZE_CHANNEL = 'project:initialize';
+export const PROJECT_GOVERNANCE_UPGRADE_CHANNEL = 'project:governance-upgrade';
 export const PROJECT_SCAN_CHANNEL = 'project:scan';
 export const PROJECT_CONFIG_SAVE_CHANNEL = 'project-config:save';
 export const PROJECT_CONFIG_LIST_CHANNEL = 'project-config:list';
@@ -43,6 +45,9 @@ export interface ProjectInitializationIpcOptions {
   initialize?: (
     input: ProjectInitializationInput,
   ) => ProjectInitializationResult | Promise<ProjectInitializationResult>;
+  upgradeGovernance?: (
+    config: ProjectConfigInput,
+  ) => ProjectGovernanceUpgradeResult | Promise<ProjectGovernanceUpgradeResult>;
 }
 
 export interface IpcHandlerOptions {
@@ -194,6 +199,17 @@ export function registerIpcHandlers(
     }
     return options.projectInitialization.initialize(value);
   });
+  ipcMain.handle(
+    PROJECT_GOVERNANCE_UPGRADE_CHANNEL,
+    async (event, value: unknown): Promise<ProjectGovernanceUpgradeResult> => {
+      assertTrustedSender(event, options);
+      assertProjectConfigInput(value);
+      if (options.projectInitialization?.upgradeGovernance === undefined) {
+        throw new IpcSecurityError('IPC_INVALID_ARGUMENT', 'Project governance upgrade is unavailable');
+      }
+      return options.projectInitialization.upgradeGovernance(value);
+    },
+  );
   if (projectConfigService === undefined) {
     return;
   }
