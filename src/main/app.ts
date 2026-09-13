@@ -400,6 +400,11 @@ if (!acquireSingleInstanceLock(singleInstanceHost, focusMainWindow)) {
       event.preventDefault();
       hideToTray();
     });
+    mainWindow.on('minimize', () => {
+      if (isQuitting) return;
+      mainWindow?.restore();
+      hideToTray();
+    });
     await mainWindow.loadFile(rendererPath);
     mainWindow.on('closed', () => {
       mainWindow = null;
