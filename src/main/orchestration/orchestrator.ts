@@ -365,7 +365,8 @@ export class MainOrchestrator implements Orchestrator {
     this.state.active = true;
     this.state.status = 'RUNNING';
     this.state.retryCount = 0;
-    if (this.state.loopGraph.roundId === null) await this.beginRound();
+    if (this.state.loopGraph.roundId === null || this.state.loopGraph.currentNodeId === 'wait-sol')
+      await this.beginRound();
     else await this.setPhase('READING_SOL', 'RUNNING', this.state.taskId);
     this.state.recentError = null;
     this.touchState();

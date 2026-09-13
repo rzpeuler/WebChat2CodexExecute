@@ -194,6 +194,34 @@ describe('P0 main orchestration', () => {
     expect(options.codex.startTask).not.toHaveBeenCalled();
   });
 
+  it('starts a new recorded round when a legacy snapshot is paused at wait-sol', async () => {
+    const seed = new MainOrchestrator(baseOptions());
+    await seed.start();
+    const legacy = seed.getState();
+    legacy.active = false;
+    legacy.status = 'PAUSED';
+    legacy.phase = 'PAUSED';
+    legacy.roundHistory = [];
+    legacy.loopGraph = {
+      ...legacy.loopGraph,
+      currentNodeId: 'wait-sol',
+      nodes: legacy.loopGraph.nodes.map((node) => ({
+        ...node,
+        state: node.id === 'wait-sol' ? 'PAUSED' : 'PENDING',
+      })),
+    };
+    const stateStore = {
+      load: vi.fn(async () => legacy),
+      save: vi.fn(async () => undefined),
+    };
+    const restored = new MainOrchestrator(baseOptions({ stateStore }));
+
+    await restored.start();
+
+    expect(restored.getState().roundHistory).toHaveLength(1);
+    expect(restored.getState().loopGraph.currentNodeId).toBe('read-sol');
+  });
+
   it('publishes reconciliation waiting state and pauses with a diagnostic on failure', async () => {
     const orchestrator = new MainOrchestrator(baseOptions());
 
@@ -644,7 +672,7 @@ describe('P0 main orchestration', () => {
     await inFlight;
   });
 
-  it('restores wait-sol after a user pause without creating a new round', async () => {
+  it('starts a new round after a user pause at wait-sol', async () => {
     const orchestrator = new MainOrchestrator(baseOptions());
     await orchestrator.start();
     await orchestrator.runRound();
@@ -658,14 +686,15 @@ describe('P0 main orchestration', () => {
 
     await orchestrator.start();
     expect(orchestrator.getDashboardSnapshot().loopGraph).toMatchObject({
-      roundId,
       currentNodeId: 'read-sol',
     });
+    expect(orchestrator.getDashboardSnapshot().loopGraph.roundId).not.toBe(roundId);
+    expect(orchestrator.getState().roundHistory).toHaveLength(2);
     expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
       state: 'ACTIVE',
     });
     await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'DUPLICATE' });
-    expect(orchestrator.getDashboardSnapshot().loopGraph.roundId).toBe(roundId);
+    expect(orchestrator.getDashboardSnapshot().loopGraph.roundId).not.toBe(roundId);
   });
 
   it('restores wait-sol before retryCurrentStage polls again', async () => {
