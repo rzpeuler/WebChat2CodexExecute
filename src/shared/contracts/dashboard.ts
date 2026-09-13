@@ -13,6 +13,7 @@ export const DASHBOARD_COMMANDS = [
   'commit-and-push',
   'discard-worktree-changes',
   'finish-round-wait-sol',
+  'force-consume-sol-output',
   'open-edge',
   'open-project',
   'view-report',
@@ -22,7 +23,7 @@ export type DashboardCommandName = (typeof DASHBOARD_COMMANDS)[number];
 export type DangerousDashboardCommandName = 'start' | 'pause' | 'retry-current-stage' | 'rebind';
 export type ManualGitDashboardCommandName = 'align-latest-baseline' | 'commit-and-push' | 'discard-worktree-changes';
 export type DashboardConfirmationCommandName =
-  DangerousDashboardCommandName | ManualGitDashboardCommandName | 'finish-round-wait-sol';
+  DangerousDashboardCommandName | ManualGitDashboardCommandName | 'finish-round-wait-sol' | 'force-consume-sol-output';
 
 export const DASHBOARD_CONFIRMATION_COMMANDS = [
   'start',
@@ -33,6 +34,7 @@ export const DASHBOARD_CONFIRMATION_COMMANDS = [
   'commit-and-push',
   'discard-worktree-changes',
   'finish-round-wait-sol',
+  'force-consume-sol-output',
 ] as const satisfies readonly DashboardConfirmationCommandName[];
 
 export interface DashboardActionState {
@@ -68,6 +70,7 @@ export type DashboardCommand =
   | { command: 'governance-consistency-check' }
   | { command: 'stage-goal-review' }
   | { command: 'finish-round-wait-sol'; confirm: true }
+  | { command: 'force-consume-sol-output'; confirm: true }
   | { command: 'open-edge' }
   | { command: 'open-project' }
   | ViewReportDashboardCommand;

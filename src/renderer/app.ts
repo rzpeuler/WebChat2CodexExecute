@@ -95,6 +95,7 @@ const dangerousDashboardCommands = new Set<DashboardCommandName>([
   'commit-and-push',
   'discard-worktree-changes',
   'finish-round-wait-sol',
+  'force-consume-sol-output',
 ]);
 const dashboardCommandNames: DashboardCommandName[] = [
   'start',
@@ -108,6 +109,7 @@ const dashboardCommandNames: DashboardCommandName[] = [
   'commit-and-push',
   'discard-worktree-changes',
   'finish-round-wait-sol',
+  'force-consume-sol-output',
   'open-edge',
   'open-project',
   'view-report',
@@ -868,6 +870,7 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
       'commit-and-push': '提交并同步 Git',
       'discard-worktree-changes': '放弃未提交修改（将先放入 Git stash）',
       'finish-round-wait-sol': '结束当前轮并等待 Sol 新任务',
+      'force-consume-sol-output': '强制消费当前 Sol 输出',
     };
     if (!window.confirm(`确认执行“${labels[command]}”？`)) return null;
     return {
@@ -879,7 +882,8 @@ function dashboardCommandFromButton(button: HTMLButtonElement): DashboardCommand
         | 'align-latest-baseline'
         | 'commit-and-push'
         | 'discard-worktree-changes'
-        | 'finish-round-wait-sol',
+        | 'finish-round-wait-sol'
+        | 'force-consume-sol-output',
       confirm: true,
     };
   }

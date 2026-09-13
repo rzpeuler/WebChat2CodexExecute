@@ -302,6 +302,16 @@ export class MainOrchestrator implements Orchestrator {
             : this.state.loopGraph.roundId === null
               ? disabled('当前没有可结束的循环轮次。')
               : enabled(),
+      'force-consume-sol-output': operationBusy
+        ? disabled('已有操作正在处理中。', true)
+        : this.state.active
+          ? disabled('自动循环正在运行中，请先暂停后再强制消费当前输出。')
+          : this.pendingCodeSync !== null ||
+              this.pendingReconciliationInput !== null ||
+              this.pendingReconciliationSync !== null ||
+              this.state.executionRecovery !== null
+            ? disabled('当前已有中断恢复上下文，请使用继续执行或重试。')
+            : enabled(),
       'open-edge': this.dashboardNavigationPromises.has('open-edge')
         ? disabled('打开 Edge 操作正在处理中。', true)
         : callbackAvailable('openEdge')
@@ -446,6 +456,15 @@ export class MainOrchestrator implements Orchestrator {
       completed = await this.withOrchestrationLock(() => this.performCommitAndPushProject());
     });
     return completed ?? result('PAUSED', this.state, 'Git 提交同步未返回结果。');
+  }
+
+  async forceConsumeCurrentSolOutput(): Promise<OrchestratorResult> {
+    await this.initialize();
+    let completed: OrchestratorResult | undefined;
+    await this.runDashboardOperation(async () => {
+      completed = await this.withOrchestrationLock(() => this.performForceConsumeCurrentSolOutput());
+    });
+    return completed ?? result('PAUSED', this.state, '强制消费当前 Sol 输出未返回结果。');
   }
 
   async discardWorktreeChanges(): Promise<OrchestratorResult> {
@@ -599,6 +618,8 @@ export class MainOrchestrator implements Orchestrator {
           return accepted('WORKTREE_DISCARD_ACCEPTED', (await this.discardWorktreeChanges()).message);
         case 'finish-round-wait-sol':
           return accepted('ROUND_FINISH_ACCEPTED', (await this.finishRoundAndWaitForSol()).message);
+        case 'force-consume-sol-output':
+          return accepted('FORCE_CONSUME_ACCEPTED', (await this.forceConsumeCurrentSolOutput()).message);
         case 'open-edge':
           return await this.invokeCallback('openEdge', '打开 Edge 回调不可用。');
         case 'open-project':
@@ -715,6 +736,55 @@ export class MainOrchestrator implements Orchestrator {
       return result('COMPLETED', this.state, `已提交并同步 Git：${synced.localCommit ?? next.head}`);
     } catch (error) {
       return this.finishManualGitFailure(error, 'Git 提交或推送失败，请按阶段提示处理后重试。');
+    }
+  }
+
+  private async performForceConsumeCurrentSolOutput(): Promise<OrchestratorResult> {
+    if (this.state.active) return result('WAITING', this.state, '自动循环正在运行中，请先暂停后再强制消费当前输出。');
+    if (
+      this.pendingCodeSync !== null ||
+      this.pendingReconciliationInput !== null ||
+      this.pendingReconciliationSync !== null ||
+      this.state.executionRecovery !== null
+    ) {
+      throw new OrchestratorError(
+        'FORCE_CONSUME_RECOVERY_CONFLICT',
+        '当前已有未完成的恢复上下文，请使用“继续执行”或“重试”处理，不能重复消费当前输出。',
+      );
+    }
+
+    let observation = await this.edge.observe();
+    if (observation.status === 'THINKING') observation = await this.edge.observe();
+    if (observation.status !== 'COMPLETED_CANDIDATE') {
+      throw new OrchestratorError(
+        'SOL_OUTPUT_NOT_READY',
+        `当前 Sol 输出尚未稳定可消费，状态为 ${observation.status}。请等待输出完成后重试。`,
+      );
+    }
+    if (observation.projectFingerprint === null)
+      throw new OrchestratorError('SOL_PROJECT_UNKNOWN', '无法确认当前 Sol 输出属于绑定 Project。');
+
+    const outputKey = outputKeyFor(observation);
+    this.state.active = true;
+    this.state.status = 'RUNNING';
+    this.state.phase = 'READING_SOL';
+    this.state.taskId = null;
+    this.state.recentError = null;
+    this.beginExecutionSession();
+    await this.beginRound();
+    this.updateGraphNode('read-sol', {
+      summary: '已读取当前 Sol 输出，准备强制消费。',
+      details: ['来源：维护模块“强制消费当前 Sol 输出”。', '本次仅绕过重复输出判断，不清空历史消费记录。'],
+    });
+    this.touchState();
+    await this.persist();
+
+    try {
+      return await this.processRound(outputKey);
+    } catch (error) {
+      return this.isTerminalFailure(error)
+        ? this.failFor(error)
+        : this.pauseFor(error, '强制消费当前 Sol 输出失败，已暂停以等待处理。');
     }
   }
 
@@ -1110,7 +1180,7 @@ export class MainOrchestrator implements Orchestrator {
     await this.setPhase(wasActive ? 'WAITING_FOR_SOL' : 'IDLE', wasActive ? 'RUNNING' : 'IDLE', null);
   }
 
-  private async processRound(): Promise<OrchestratorResult> {
+  private async processRound(forceCurrentOutputKey?: string): Promise<OrchestratorResult> {
     if (!this.state.active) return result('IDLE', this.state, '编排器未运行。');
     if (this.pendingReconciliationSync !== null && this.state.phase === 'SYNCING_GOVERNANCE')
       return result('WAITING', this.state, '治理一致性同步上下文已恢复，请重试当前同步。');
@@ -1158,6 +1228,7 @@ export class MainOrchestrator implements Orchestrator {
       details: compactDetails([
         `状态：${observation.status}`,
         observation.latestAssistantHash === null ? '' : `输出：${observation.latestAssistantHash}`,
+        forceCurrentOutputKey === outputKeyFor(observation) ? '读取方式：强制消费当前输出' : '',
         `采样：${observation.sampledAt}`,
       ]),
     });
@@ -1180,7 +1251,7 @@ export class MainOrchestrator implements Orchestrator {
       return result('WAITING', this.state, 'Sol 尚未产生稳定的可执行完成输出。');
     }
     const outputKey = outputKeyFor(observation);
-    if (!waitingForNextOutput && this.state.processedOutputKey === outputKey) {
+    if (!waitingForNextOutput && this.state.processedOutputKey === outputKey && forceCurrentOutputKey !== outputKey) {
       this.markNodesNotApplicable([
         'parse-task',
         'apply-updates',

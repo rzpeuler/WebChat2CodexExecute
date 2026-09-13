@@ -1172,6 +1172,24 @@ describe('P0 main orchestration', () => {
     });
   });
 
+  it('force-consumes the current stable output once from paused maintenance', async () => {
+    const options = baseOptions();
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    await orchestrator.runRound();
+    await orchestrator.pause();
+
+    const result = await orchestrator.forceConsumeCurrentSolOutput();
+
+    expect(result.status).toBe('COMPLETED');
+    expect(options.codex.startTask).toHaveBeenCalledTimes(2);
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'read-sol')).toMatchObject({
+      summary: '已读取 Sol 当前状态。',
+      details: expect.arrayContaining(['读取方式：强制消费当前输出']),
+    });
+  });
+
   it('persists the concrete wait reason when Sol has no new stable output', async () => {
     const orchestrator = new MainOrchestrator(
       baseOptions({ edge: { observe: vi.fn(async () => observation('', 'THINKING')) } }),

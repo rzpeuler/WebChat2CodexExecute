@@ -229,6 +229,9 @@
             <button class="button-secondary" type="button" data-dashboard-command="finish-round-wait-sol">
               结束本轮并等待新任务
             </button>
+            <button class="button-secondary" type="button" data-dashboard-command="force-consume-sol-output">
+              强制消费当前 Sol 输出
+            </button>
           </div>
           <p class="helper-text">遇到基线阻塞时使用：先提交并同步工作区，再对齐最新基线；不会自动启动下一轮。</p>
           <details class="maintenance-help">
@@ -243,6 +246,11 @@
               <dt>结束本轮并等待新任务</dt>
               <dd>
                 跳过当前已确认不再执行的输出，标记为已处理并进入等待 Sol 新输出；存在待同步代码或治理更新时不可用。
+              </dd>
+              <dt>强制消费当前 Sol 输出</dt>
+              <dd>
+                当前 Sol
+                已有稳定任务书但被误判为历史输出时使用。只绕过本次重复判断，不清空历史记录；如果已有中断上下文，必须先使用“继续执行”或“重试”。
               </dd>
             </dl>
           </details>

@@ -304,6 +304,7 @@ export interface Orchestrator {
   continueInterrupted(): Promise<OrchestratorResult>;
   alignLatestBaseline(): Promise<OrchestratorResult>;
   commitAndPushProject(): Promise<OrchestratorResult>;
+  forceConsumeCurrentSolOutput(): Promise<OrchestratorResult>;
   runRound(): Promise<OrchestratorResult>;
   beginGovernanceReconciliationWait(): Promise<void>;
   pauseGovernanceReconciliation(error: unknown): Promise<void>;
