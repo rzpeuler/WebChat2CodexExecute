@@ -11,6 +11,7 @@ import { applyGovernanceReconciliation } from '../../src/main/governance/reconci
 import {
   MainOrchestrator,
   OrchestratorError,
+  SOL_WAIT_NOTIFICATION_AFTER_MS,
   type OrchestratorOptions,
   type OrchestratorState,
 } from '../../src/main/orchestration/index.js';
@@ -271,6 +272,40 @@ describe('P0 main orchestration', () => {
       }),
     );
     expect(options.codex.startTask).not.toHaveBeenCalled();
+  });
+
+  it('notifies once after five minutes of waiting without interrupting the loop', async () => {
+    let currentTime = Date.parse('2026-09-14T00:00:00.000Z');
+    const notifier = { notify: vi.fn() };
+    const options = baseOptions({
+      edge: { observe: vi.fn(async () => observation('Sol 仍在生成中。', 'THINKING')) },
+      notifier,
+      now: () => new Date(currentTime),
+    });
+    const orchestrator = new MainOrchestrator(options);
+
+    await orchestrator.start();
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'WAITING' });
+    expect(notifier.notify).not.toHaveBeenCalled();
+
+    currentTime += SOL_WAIT_NOTIFICATION_AFTER_MS + 1;
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'WAITING' });
+    expect(notifier.notify).toHaveBeenCalledOnce();
+    expect(notifier.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: 'WAITING_FOR_SOL',
+        level: 'RECOVERABLE',
+        error: expect.objectContaining({ code: 'SOL_WAIT_EXCEEDED_5_MINUTES' }),
+      }),
+    );
+    expect(orchestrator.getState()).toMatchObject({ active: true, status: 'RUNNING', phase: 'WAITING_FOR_SOL' });
+
+    currentTime += 60_000;
+    await expect(orchestrator.runRound()).resolves.toMatchObject({ status: 'WAITING' });
+    expect(notifier.notify).toHaveBeenCalledOnce();
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'wait-sol')).toMatchObject({
+      details: expect.arrayContaining(['已等待 Sol 超过 5 分钟，已通知用户；循环继续监听。']),
+    });
   });
 
   it('starts a new recorded round when a legacy snapshot is paused at wait-sol', async () => {

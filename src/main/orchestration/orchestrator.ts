@@ -60,6 +60,9 @@ import {
 const MAX_RETRIES = 3;
 const MAX_AUTO_REPAIR_ATTEMPTS_PER_ROUND = 2;
 const REPOSITORY_ACCESS_RECOVERY_DELAY_MS = 5 * 60 * 1000;
+export const SOL_WAIT_NOTIFICATION_AFTER_MS = 5 * 60 * 1000;
+const SOL_WAIT_NOTIFICATION_CODE = 'SOL_WAIT_EXCEEDED_5_MINUTES';
+const SOL_WAIT_NOTIFICATION_DETAIL = '已等待 Sol 超过 5 分钟，已通知用户；循环继续监听。';
 const LEGACY_RECOVERY_OUTPUT_KEY = '__legacy_recovery_pending__';
 
 const DEFAULT_STATE: OrchestratorState = {
@@ -2486,7 +2489,30 @@ export class MainOrchestrator implements Orchestrator {
   private async enterWaiting(message: string): Promise<void> {
     this.completeExecutionRound();
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
-    this.updateGraphNode('wait-sol', { summary: message, details: [] });
+    const waitNode = this.graphNode('wait-sol');
+    const waitStartedAt = waitNode.startedAt === null ? Number.NaN : Date.parse(waitNode.startedAt);
+    const waitExceeded =
+      Number.isFinite(waitStartedAt) && this.now().getTime() - waitStartedAt >= SOL_WAIT_NOTIFICATION_AFTER_MS;
+    const alreadyNotified = waitNode.details.includes(SOL_WAIT_NOTIFICATION_DETAIL);
+    if (waitExceeded && !alreadyNotified && this.notifier !== undefined) {
+      try {
+        this.notifier.notify({
+          project: this.project.name,
+          taskId: this.state.taskId ?? this.currentRoundRecord()?.taskId ?? null,
+          phase: 'WAITING_FOR_SOL',
+          suggestion: 'Sol 已等待超过 5 分钟，自动循环将继续等待；如需检查请打开专用 Edge。',
+          error: {
+            code: SOL_WAIT_NOTIFICATION_CODE,
+            message: 'Sol 输出等待已超过 5 分钟，循环未中断。',
+          },
+          level: 'RECOVERABLE',
+        });
+      } catch {
+        // Notification failures must not interrupt the Sol polling loop.
+      }
+      waitNode.details = [...waitNode.details, SOL_WAIT_NOTIFICATION_DETAIL];
+    }
+    this.updateGraphNode('wait-sol', { summary: message, details: waitNode.details });
     this.touchState();
     await this.persist();
   }

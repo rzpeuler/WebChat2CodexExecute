@@ -731,6 +731,8 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     expect(script).not.toContain('getBoundingClientRect');
     expect(script).toContain('const assistantRootText = text(assistantNode);');
     expect(script).toContain('const assistantNodes = [...new Set(captureUsableAll(');
+    expect(script).not.toContain('visibleAll(');
+    expect(script).toContain('isThinking: captureUsableAll(');
     expect(script).toContain('const finalAnswerCandidates = assistantNode === null');
     expect(script).toContain('const latestProtocolNode = [...assistantNodes]');
     expect(script).toContain(

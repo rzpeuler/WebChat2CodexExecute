@@ -107,9 +107,9 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
     accountFromStorage = accountKey?.match(/(?:^|\\/)user-([a-zA-Z0-9_-]{8,})(?:\\/|$)/)?.[1] || '';
   } catch {}
   const authPath = /\\/(?:auth|login|signin)(?:\\/|$)/i.test(location.pathname);
-  const visibleLoginNodes = visibleAll(${JSON.stringify(rules.loginSelectors)});
-  const visibleEmailFields = visibleAll(['input[type="email"]']);
-  const visiblePasswordFields = visibleAll(['input[type="password"]']);
+  const visibleLoginNodes = captureUsableAll(${JSON.stringify(rules.loginSelectors)});
+  const visibleEmailFields = captureUsableAll(['input[type="email"]']);
+  const visiblePasswordFields = captureUsableAll(['input[type="password"]']);
   const explicitLoginNodes = visibleLoginNodes.filter((node) => {
     return !(node instanceof HTMLInputElement && (node.type || '').toLowerCase() === 'email');
   });
@@ -136,7 +136,7 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
     sessionMissing: false,
     contextLimit: false,
     networkError: false,
-    isThinking: all(${JSON.stringify(rules.thinkingSelectors)}).length > 0,
+    isThinking: captureUsableAll(${JSON.stringify(rules.thinkingSelectors)}).length > 0,
   };
 })()`;
 }
