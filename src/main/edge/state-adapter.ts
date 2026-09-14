@@ -22,7 +22,11 @@ export const DEFAULT_EDGE_ADAPTER_RULES: EdgeAdapterRules = {
     'article[data-testid*="conversation-turn"] [data-message-author-role="assistant"]',
   ],
   finalAnswerSelectors: ['[data-message-content]', '[data-testid*="markdown"]', '.markdown', '.prose'],
-  thinkingSelectors: ['[aria-busy="true"]', '[data-testid*="stop"], button[aria-label*="Stop"]'],
+  thinkingSelectors: [
+    '[aria-busy="true"]',
+    '[data-testid*="stop"], button[aria-label*="Stop"]',
+    '.streaming-animation',
+  ],
   errorSelectors: ['[role="alert"]', '[data-testid*="error"]'],
   loginSelectors: ['input[type="email"]', 'button[data-testid*="login"]', '[data-testid*="logged-out"]'],
   contextLimitPatterns: [
@@ -70,25 +74,21 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
   };
   const finalAnswerCandidates = assistantNode === null
     ? []
-    : assistantNodes.flatMap((root, nodeIndex) => [
-        root,
-        ...captureUsableAll(${JSON.stringify(rules.finalAnswerSelectors)}, root),
-        ...Array.from(root.querySelectorAll('*')).filter(isCaptureUsable),
+    : [
+        assistantNode,
+        ...captureUsableAll(${JSON.stringify(rules.finalAnswerSelectors)}, assistantNode),
+        ...Array.from(assistantNode.querySelectorAll('*')).filter(isCaptureUsable),
       ].map((node, index) => {
         let depth = 0;
-        for (let parent = node.parentElement; parent !== null && parent !== root; parent = parent.parentElement)
+        for (let parent = node.parentElement; parent !== null && parent !== assistantNode; parent = parent.parentElement)
           depth += 1;
-        return { node, index, nodeIndex, depth, value: text(node) };
-      }))
+        return { node, index, nodeIndex: assistantNodes.length - 1, depth, value: text(node) };
+      })
       .filter(({ value }) => isFinalPayload(value));
   const finalAnswer = finalAnswerCandidates
     .sort((left, right) => left.nodeIndex - right.nodeIndex || left.depth - right.depth || left.index - right.index)
     .at(-1);
-  const latestProtocolNode = [...assistantNodes]
-    .map((node, nodeIndex) => ({ nodeIndex, value: text(node) }))
-    .reverse()
-    .find(({ value }) => /\\[WRITING_BLOCK\\b|\\[USER_MESSAGE\\]/.test(normalizeMarkers(value)));
-  const finalAssistant = finalAnswer?.value || latestProtocolNode?.value || assistantRootText;
+  const finalAssistant = finalAnswer?.value || assistantRootText;
   const normalizedAssistant = normalizeMarkers(finalAssistant);
   const writingBlockOpenCount = (normalizedAssistant.match(/\\[WRITING_BLOCK\\b/g) || []).length;
   const writingBlockCloseCount = (normalizedAssistant.match(/\\[\\/WRITING_BLOCK\\]/g) || []).length;
@@ -125,7 +125,7 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
     captureDiagnostics: {
       assistantNodeCount: assistantNodes.length,
       completeCandidateCount: finalAnswerCandidates.length,
-      selectedAssistantNodeIndex: finalAnswer?.nodeIndex ?? latestProtocolNode?.nodeIndex ?? (assistantNode === null ? null : assistantNodes.length - 1),
+      selectedAssistantNodeIndex: finalAnswer?.nodeIndex ?? (assistantNode === null ? null : assistantNodes.length - 1),
       writingBlockOpenCount,
       writingBlockCloseCount,
       userMessageMarkerCount,

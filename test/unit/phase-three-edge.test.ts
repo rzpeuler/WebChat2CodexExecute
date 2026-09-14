@@ -733,11 +733,11 @@ describe('dedicated Edge profile and CDP state adapter', () => {
     expect(script).toContain('const assistantNodes = [...new Set(captureUsableAll(');
     expect(script).not.toContain('visibleAll(');
     expect(script).toContain('isThinking: captureUsableAll(');
+    expect(script).toContain('.streaming-animation');
     expect(script).toContain('const finalAnswerCandidates = assistantNode === null');
-    expect(script).toContain('const latestProtocolNode = [...assistantNodes]');
-    expect(script).toContain(
-      'const finalAssistant = finalAnswer?.value || latestProtocolNode?.value || assistantRootText;',
-    );
+    expect(script).not.toContain('const latestProtocolNode = [...assistantNodes]');
+    expect(script).toContain('const finalAssistant = finalAnswer?.value || assistantRootText;');
+    expect(() => new Function(script)).not.toThrow();
     expect(script).toContain('finalAnswerBoundaryFound: finalAnswer !== undefined');
     expect(script).toContain('const isFinalPayload = (value) =>');
     expect(script).toContain('const loginWall = authPath || explicitLoginNodes.length > 0');
