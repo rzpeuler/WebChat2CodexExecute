@@ -142,6 +142,21 @@ export interface CodexTaskHandle {
   result: Promise<CodexRunResult>;
 }
 
+export interface ScopeReviewResult {
+  identifier: 'SCOPE_REVIEW_RESULT';
+  taskId: string;
+  decision: 'APPROVE' | 'REJECT';
+  reviewedPaths: string[];
+  approvedDriftPaths: string[];
+  scopeRelation: 'DERIVED_SUPPORT' | 'WITHIN_OBJECTIVE' | 'OUTSIDE_OBJECTIVE' | 'UNKNOWN';
+  functionalImpact: 'NONE' | 'WITHIN_OBJECTIVE' | 'MATERIAL' | 'UNKNOWN';
+  risk: 'LOW' | 'MEDIUM' | 'HIGH' | 'UNKNOWN';
+  testsStatus: LunaTestStatus;
+  worktreePathFingerprint: string;
+  reason: string;
+  reviewId: string;
+}
+
 export interface CodexTaskInput {
   task: LunaTaskBlock;
   snapshots: CodexSnapshots;

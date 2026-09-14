@@ -16,7 +16,7 @@ import type {
   LunaTestStatus,
 } from '../../shared/protocol/writing-block.js';
 import type { EdgeSolObservation } from '../edge/types.js';
-import type { CodexSnapshots, CodexTaskHandle } from '../codex/types.js';
+import type { CodexSnapshots, CodexTaskHandle, ScopeReviewResult } from '../codex/types.js';
 import type {
   CaptureBaselineOptions,
   CodeSyncInput,
@@ -39,6 +39,7 @@ export type OrchestratorPhase =
   | 'SYNCING_GOVERNANCE'
   | 'RUNNING_LUNA'
   | 'SYNCING_CODE'
+  | 'REVIEWING_SCOPE'
   | 'NOTIFYING_SOL'
   | 'WAITING_FOR_SOL'
   | 'PAUSED'
@@ -65,6 +66,32 @@ export interface PendingCodeSyncState {
   testsStatus: LunaTestStatus;
   sessionId: string;
   outputKey: string;
+  scopeReviewTask: ScopeReviewTaskContext;
+  scopeDriftPaths?: string[];
+  scopeReview?: {
+    reviewId: string;
+    decision: 'APPROVE';
+    driftPaths: string[];
+    risk: 'LOW';
+    scopeRelation: 'DERIVED_SUPPORT' | 'WITHIN_OBJECTIVE';
+    worktreePathFingerprint: string;
+  };
+}
+
+/** Persisted, non-secret task context used to reconstruct the fixed scope-review prompt after restart. */
+export interface ScopeReviewTaskContext {
+  taskId: string;
+  taskKind: LunaTaskKind;
+  title: string;
+  objective: string;
+  baseCommit: string;
+  scope: string[];
+  outOfScope: string[];
+  deliverables: string[];
+  validationCommands: string[];
+  governanceRevision: string | number;
+  architectureRevisionSet: unknown[];
+  reportPath: string;
 }
 
 /** Minimal JSON-safe context required to resume governance sync after apply succeeded. */
@@ -243,6 +270,15 @@ export interface CodexOrchestratorPort {
     baselineSnapshot?: unknown;
     repositorySnapshot?: unknown;
   }): Promise<CodexTaskHandle>;
+  runScopeReview?(input: {
+    task: LunaTaskBlock;
+    snapshots: CodexSnapshots;
+    repositoryPath: string;
+    baselineSnapshot?: unknown;
+    driftPaths: string[];
+    model?: string;
+    executablePath?: string;
+  }): Promise<ScopeReviewResult>;
 }
 
 export interface SnapshotSource {

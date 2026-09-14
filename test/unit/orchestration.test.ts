@@ -395,6 +395,7 @@ describe('P0 main orchestration', () => {
       'apply-updates',
       'sync-governance',
       'run-luna',
+      'scope-review',
       'sync-code',
       'notify-sol',
       'wait-sol',
@@ -405,6 +406,7 @@ describe('P0 main orchestration', () => {
       'COMPLETED',
       'COMPLETED',
       'COMPLETED',
+      'NOT_APPLICABLE',
       'COMPLETED',
       'COMPLETED',
       'ACTIVE',
@@ -531,6 +533,65 @@ describe('P0 main orchestration', () => {
     expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'sync-code')).toMatchObject({
       state: 'COMPLETED',
       details: expect.arrayContaining(['测试：未通过（证据已同步）']),
+    });
+  });
+
+  it('runs one structured Luna scope-review before syncing approved drift for either task kind', async () => {
+    const defaults = baseOptions();
+    const driftPaths = ['src-adjacent.ts'];
+    const fingerprint = createHash('sha256').update(JSON.stringify(driftPaths)).digest('hex');
+    const syncCode = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error('drift'), { code: 'UNAUTHORIZED_CHANGE', details: { paths: driftPaths } }))
+      .mockResolvedValueOnce({
+        kind: 'code' as const,
+        commit: 'abcdef3',
+        pushed: true,
+        remoteCommit: 'abcdef3',
+        pushRetried: false,
+        scopeDriftPaths: driftPaths,
+      });
+    const runScopeReview = vi.fn(async () => ({
+      identifier: 'SCOPE_REVIEW_RESULT' as const,
+      taskId: 'task-1',
+      decision: 'APPROVE' as const,
+      reviewedPaths: driftPaths,
+      approvedDriftPaths: driftPaths,
+      scopeRelation: 'DERIVED_SUPPORT' as const,
+      functionalImpact: 'NONE' as const,
+      risk: 'LOW' as const,
+      testsStatus: 'NOT_RUN' as const,
+      worktreePathFingerprint: fingerprint,
+      reason: 'helper supports the approved objective',
+      reviewId: 'scope-review-1',
+    }));
+    const orchestrator = new MainOrchestrator(
+      baseOptions({
+        git: { ...defaults.git, syncCode },
+        codex: { ...defaults.codex, runScopeReview },
+      }),
+    );
+
+    await orchestrator.start();
+    const result = await orchestrator.runRound();
+
+    expect(result.status).toBe('COMPLETED');
+    expect(runScopeReview).toHaveBeenCalledTimes(1);
+    expect(syncCode).toHaveBeenCalledTimes(2);
+    expect(syncCode.mock.calls[1]?.[0]).toMatchObject({
+      scopeReviewApproval: {
+        taskId: 'task-1',
+        baselineHead: 'base-commit',
+        driftPaths,
+        decision: 'APPROVE',
+        risk: 'LOW',
+        reviewId: 'scope-review-1',
+        worktreePathFingerprint: fingerprint,
+      },
+    });
+    expect(orchestrator.getDashboardSnapshot().loopGraph.nodes.find((node) => node.id === 'scope-review')).toMatchObject({
+      state: 'COMPLETED',
+      summary: 'Luna scope-review 已批准，继续代码同步。',
     });
   });
 
@@ -715,6 +776,7 @@ describe('P0 main orchestration', () => {
     expect(graph.currentNodeId).toBe('wait-sol');
     expect(graph.nodes.map((node) => node.state)).toEqual([
       'COMPLETED',
+      'NOT_APPLICABLE',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
       'NOT_APPLICABLE',
@@ -1428,7 +1490,7 @@ describe('P0 main orchestration', () => {
     const saved = saves.at(-1);
     expect(saved).toBeDefined();
     const graph = saved!.loopGraph;
-    expect(graph.nodes).toHaveLength(8);
+    expect(graph.nodes).toHaveLength(9);
     expect(graph.nodes.filter((node) => node.state === 'ACTIVE')).toHaveLength(0);
     for (const node of graph.nodes) {
       expect(node.summary.length).toBeLessThanOrEqual(240);

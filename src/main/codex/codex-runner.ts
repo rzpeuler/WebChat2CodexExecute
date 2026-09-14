@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import { extname, isAbsolute, join, relative, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import type { LunaTaskBlock, LunaTestStatus } from '../../shared/protocol/writing-block.js';
 import { assertSafeProjectPath, realProjectRoot } from '../security/path-safety.js';
@@ -29,6 +29,7 @@ import {
   type CodexSnapshots,
   type CodexTaskHandle,
   type CodexTaskInput,
+  type ScopeReviewResult,
   type GitStateCheckResult,
   type LunaProtocolResult,
   type LunaTestResult,
@@ -316,19 +317,124 @@ function promptForTask(task: LunaTaskBlock, snapshots: CodexSnapshots): string {
         authorization:
           'The user and ORCHESTRATOR have already approved this task and the ordinary implementation decisions required to complete it. Do not ask the user or ORCHESTRATOR to approve an implementation plan, design refinement, brainstorming step, test strategy, or other routine decision. Treat any such approval as granted and continue execution immediately. If a planning skill or workflow asks for confirmation, do not pause for that confirmation; make a reasonable in-scope decision and keep working.',
         implementation:
-          'Decide implementation details inside the approved scope without asking for ordinary confirmation. Treat scope entries ending in /** as recursive directories; use exact relative paths for individual files. A legacy trailing slash may appear in an existing task and has the same recursive-directory meaning. For IMPLEMENTATION tasks, scope is the expected audit set rather than a hard file allowlist: reasonable adjacent project-internal non-protected files may be changed when required to complete the task, but report every such path in the result and never touch protected, credential, governance, architecture, .git, project-outside, or task out_of_scope paths.',
+          'Decide ordinary implementation details without asking for ordinary confirmation. Treat scope entries ending in /** as recursive directories; use exact relative paths for individual files. A legacy trailing slash may appear in an existing task and has the same recursive-directory meaning. For both IMPLEMENTATION and TEST tasks, scope is the planned audit set rather than an absolute file allowlist: reasonable project-internal non-protected files may be changed when required to complete the task, but report every such path in the report and result for the ORCHESTRATOR scope-review. Never touch protected, credential, governance, architecture, .git, project-outside, or task out_of_scope paths.',
         blocking:
-          'Emit BLOCKED_EXTERNAL_SETUP for external credentials, project-outside paths, protected or high-risk operations, or a real task out_of_scope conflict. Do not block merely because an IMPLEMENTATION task needs a reasonable adjacent non-protected project-internal file.',
+          'Emit BLOCKED_EXTERNAL_SETUP for external credentials, project-outside paths, protected or high-risk operations, or a real task out_of_scope conflict. Do not block merely because either task kind needs a reasonable adjacent non-protected project-internal file; scope drift is reviewed by ORCHESTRATOR after execution.',
         result:
           'Write the required report and emit exactly one JSON object with identifier LUNA_RESULT, status, summary, report_path, tests_status, and tests. identifier is fixed to LUNA_RESULT. status must be exactly one of COMPLETED, BLOCKED_EXTERNAL_SETUP, or FAILED. tests_status must be exactly one of PASSED, FAILED, or NOT_RUN. tests must be a non-empty JSON array of objects; every object must contain status with exactly one of PASSED, FAILED, or NOT_RUN, may contain only command as an optional non-empty string, and must not contain any other field. Never emit tests as strings, prose, Markdown, or an empty array. tests_status must match the aggregate of tests[].status: any FAILED means FAILED; otherwise any NOT_RUN means NOT_RUN; otherwise PASSED. If the approved implementation or test work is complete and the required report is written, use COMPLETED even when tests_status is FAILED or NOT_RUN; tests are evidence for Sol/CTO acceptance and do not gate code synchronization. For an IMPLEMENTATION task, use FAILED when implementation evidence is present in the required report but the report records a real implementation or acceptance blocker; the orchestrator will sync the validated report and code for Sol/CTO review. Use FAILED for TEST only when the test task itself could not produce a valid completed result. Never use FAILED solely because a test failed. report_path must equal the task report_path.',
         test_scope:
-          'When task_kind is TEST, only modify tests/** and the exact task report_path. Do not modify production code, arbitrary documentation, or any other path. A failed test is evidence for Sol; do not convert it to BLOCKED or ask for approval merely because the assertion failed.',
+          'When task_kind is TEST, preserve the test objective and do not intentionally expand it, but reasonable project-internal non-protected support files may be changed when required. Report every such path for ORCHESTRATOR scope-review. A failed test is evidence for Sol; do not convert it to BLOCKED or ask for approval merely because the assertion failed.',
         git: 'The orchestrator owns commit, push, amend, rebase, and force-push. Do not run any of these Git synchronization operations. Leave implementation and report changes in the worktree for the orchestrator to validate, commit, and push.',
       },
     },
     null,
     2,
   );
+}
+
+function scopePathFingerprint(paths: readonly string[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify([...new Set(paths.map(normalizePath))].sort()))
+    .digest('hex');
+}
+
+function promptForScopeReview(
+  task: LunaTaskBlock,
+  snapshots: CodexSnapshots,
+  driftPaths: readonly string[],
+  fingerprint: string,
+): string {
+  return JSON.stringify(
+    {
+      protocol: 'LUNA_SCOPE_REVIEW',
+      task: task.fields,
+      governance_snapshot: snapshots.governance,
+      architecture_snapshot: snapshots.architecture,
+      drift_paths: [...driftPaths].map(normalizePath).sort(),
+      worktree_path_fingerprint: fingerprint,
+      instructions: {
+        role: 'Review the completed Luna task and decide whether the exact drift paths are reasonable derived support changes for the approved objective.',
+        read_only:
+          'This is a read-only review. Do not edit files, create files, delete files, run formatters that modify files, commit, push, amend, rebase, or force-push.',
+        decision:
+          'Approve only when every listed drift path is project-internal, non-protected, directly supports the approved objective, and has LOW risk. Reject when any path is unrelated, explicitly out_of_scope, protected, high-risk, or materially expands the objective.',
+        output:
+          'Return exactly one JSON object with identifier SCOPE_REVIEW_RESULT, task_id, decision, reviewed_paths, approved_drift_paths, scope_relation, functional_impact, risk, tests_status, worktree_path_fingerprint, reason, and review_id. Do not return Markdown, code fences, or extra protocol objects.',
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function parseScopeReview(lastMessage: string, taskId: string, driftPaths: readonly string[]): ScopeReviewResult {
+  let value: unknown;
+  try {
+    value = JSON.parse(lastMessage);
+  } catch (error) {
+    throw new CodexRunnerError('PROCESS_OUTPUT_FAILED', 'Scope review did not return valid JSON', {}, { cause: error });
+  }
+  if (!isRecord(value) || value.identifier !== 'SCOPE_REVIEW_RESULT')
+    throw new CodexRunnerError('PROCESS_OUTPUT_FAILED', 'Scope review identifier is missing or invalid');
+  const decision = value.decision === 'APPROVE' || value.decision === 'REJECT' ? value.decision : null;
+  const reviewedPaths = Array.isArray(value.reviewed_paths)
+    ? value.reviewed_paths.filter((path): path is string => typeof path === 'string').map(normalizePath)
+    : null;
+  const approvedDriftPaths = Array.isArray(value.approved_drift_paths)
+    ? value.approved_drift_paths.filter((path): path is string => typeof path === 'string').map(normalizePath)
+    : null;
+  const scopeRelation =
+    value.scope_relation === 'DERIVED_SUPPORT' ||
+    value.scope_relation === 'WITHIN_OBJECTIVE' ||
+    value.scope_relation === 'OUTSIDE_OBJECTIVE' ||
+    value.scope_relation === 'UNKNOWN'
+      ? value.scope_relation
+      : null;
+  const functionalImpact =
+    value.functional_impact === 'NONE' ||
+    value.functional_impact === 'WITHIN_OBJECTIVE' ||
+    value.functional_impact === 'MATERIAL' ||
+    value.functional_impact === 'UNKNOWN'
+      ? value.functional_impact
+      : null;
+  const risk = value.risk === 'LOW' || value.risk === 'MEDIUM' || value.risk === 'HIGH' || value.risk === 'UNKNOWN' ? value.risk : null;
+  const testsStatus = testsStatusValue(value.tests_status);
+  const reviewId = stringField(value, 'review_id');
+  const reason = stringField(value, 'reason');
+  const returnedTaskId = stringField(value, 'task_id');
+  const fingerprint = stringField(value, 'worktree_path_fingerprint');
+  if (
+    returnedTaskId !== taskId ||
+    decision === null ||
+    reviewedPaths === null ||
+    approvedDriftPaths === null ||
+    scopeRelation === null ||
+    functionalImpact === null ||
+    risk === null ||
+    testsStatus === null ||
+    reviewId === null ||
+    reason === null ||
+    fingerprint === null
+  )
+    throw new CodexRunnerError('PROCESS_OUTPUT_FAILED', 'Scope review returned an incomplete result');
+  const expectedPaths = [...driftPaths].map(normalizePath).sort();
+  const approvedPaths = [...approvedDriftPaths].sort();
+  if (decision === 'APPROVE' && (approvedPaths.length !== expectedPaths.length || approvedPaths.some((path, index) => path !== expectedPaths[index])))
+    throw new CodexRunnerError('PROCESS_OUTPUT_FAILED', 'Scope review approval does not cover the exact drift paths');
+  return {
+    identifier: 'SCOPE_REVIEW_RESULT',
+    taskId: returnedTaskId,
+    decision,
+    reviewedPaths: [...new Set(reviewedPaths)].sort(),
+    approvedDriftPaths: [...new Set(approvedDriftPaths)].sort(),
+    scopeRelation,
+    functionalImpact,
+    risk,
+    testsStatus,
+    worktreePathFingerprint: fingerprint,
+    reason,
+    reviewId,
+  };
 }
 
 function promptForHandoff(handoff: SessionHandoff, snapshots: CodexSnapshots): string {
@@ -644,6 +750,89 @@ export class CodexRunner {
   async runTask(input: CodexTaskInput): Promise<CodexRunResult> {
     const handle = await this.startTask(input);
     return handle.result;
+  }
+
+  async runScopeReview(input: {
+    task: LunaTaskBlock;
+    snapshots: CodexSnapshots;
+    repositoryPath: string;
+    baselineSnapshot?: CodexRepositorySnapshot;
+    driftPaths: string[];
+    model?: string;
+    executablePath?: string;
+    timeoutMs?: number;
+  }): Promise<ScopeReviewResult> {
+    const sessionId = randomUUID();
+    let reserved = false;
+    let outputDirectory: string | undefined;
+    try {
+      await this.beginSession(sessionId);
+      reserved = true;
+      const expected = normalizeSnapshot(input.baselineSnapshot ?? input.snapshots.git ?? {});
+      const before = normalizeSnapshot(await this.captureSnapshot(input.repositoryPath));
+      if (
+        (expected.repositoryRoot !== null && resolve(expected.repositoryRoot) !== resolve(before.repositoryRoot ?? '')) ||
+        expected.baseCommit !== before.baseCommit ||
+        expected.branch !== before.branch ||
+        snapshotRemote(expected.remote) !== snapshotRemote(before.remote)
+      )
+        throw new CodexRunnerError('BASELINE_CHANGED', 'Scope review baseline changed before review');
+      const beforePaths = [...before.worktree].sort();
+      const expectedDriftPaths = [...new Set(input.driftPaths.map(normalizePath))].sort();
+      if (!expectedDriftPaths.every((path) => beforePaths.includes(path)))
+        throw new CodexRunnerError('BASELINE_CHANGED', 'Scope review drift paths are not present in the current worktree');
+      const capabilities = await this.checkCapabilities({
+        repositoryPath: input.repositoryPath,
+        ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.executablePath === undefined ? {} : { executablePath: input.executablePath }),
+      });
+      outputDirectory = await mkdtemp(join(tmpdir(), 'web-chat2codex-scope-review-'));
+      await mkdir(this.streamLogDirectory, { recursive: true });
+      const lastMessagePath = join(outputDirectory, 'last-message.txt');
+      const stdoutLogPath = join(this.streamLogDirectory, `${sessionId}.stdout.jsonl`);
+      const stderrLogPath = join(this.streamLogDirectory, `${sessionId}.stderr.jsonl`);
+      const fingerprint = scopePathFingerprint(expectedDriftPaths);
+      const execution = { ...capabilities.execution, sandbox: 'read-only' };
+      const args = this.execArgs(execution, lastMessagePath, promptForScopeReview(input.task, input.snapshots, expectedDriftPaths, fingerprint));
+      let process: CodexProcess;
+      try {
+        process = await this.processRunner(capabilities.executablePath, args, {
+          cwd: capabilities.targetRepository,
+          shell: false,
+          windowsHide: true,
+        });
+      } catch (error) {
+        throw new CodexRunnerError('PROCESS_SPAWN_FAILED', 'Scope review Codex process could not be started', {}, { cause: error });
+      }
+      this.activeSession = { sessionId, process };
+      await this.persistSessionState('CREATE_COMPLETED', sessionId);
+      const sessionResult = await this.finishSession(
+        process,
+        sessionId,
+        lastMessagePath,
+        input.timeoutMs ?? this.defaultTimeoutMs,
+        stdoutLogPath,
+        stderrLogPath,
+      );
+      if (sessionResult.status !== 'COMPLETED' || sessionResult.exitCode !== 0)
+        throw new CodexRunnerError('PROCESS_OUTPUT_FAILED', 'Scope review process did not complete successfully');
+      const lastMessage = await readFile(lastMessagePath, 'utf8');
+      const review = parseScopeReview(lastMessage, input.task.fields.task_id, expectedDriftPaths);
+      const after = normalizeSnapshot(await this.captureSnapshot(input.repositoryPath));
+      if (
+        after.baseCommit !== before.baseCommit ||
+        after.branch !== before.branch ||
+        snapshotRemote(after.remote) !== snapshotRemote(before.remote) ||
+        JSON.stringify([...after.worktree].sort()) !== JSON.stringify(beforePaths)
+      )
+        throw new CodexRunnerError('BASELINE_CHANGED', 'Scope review changed the repository worktree');
+      if (review.worktreePathFingerprint !== fingerprint)
+        throw new CodexRunnerError('PROCESS_OUTPUT_FAILED', 'Scope review fingerprint does not match the reviewed drift paths');
+      return review;
+    } finally {
+      if (outputDirectory !== undefined) await rm(outputDirectory, { recursive: true, force: true }).catch(() => undefined);
+      if (reserved) await this.endSession(sessionId);
+    }
   }
 
   async rotateSession(input: {

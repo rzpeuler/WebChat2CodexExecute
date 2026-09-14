@@ -244,7 +244,6 @@ function standardTemplateStructureError(
   const requiredFields = [
     'schema_version',
     ...(schema.required ?? []),
-    ...(type === 'LUNA_TASK' ? ['execution_semantics'] : []),
   ];
   for (const field of requiredFields) {
     if (!(field in value) || value[field] === undefined) {

@@ -91,7 +91,6 @@ export const LUNA_TASK_REQUIRED_FIELDS = [
   'governance_revision',
   'architecture_revision_set',
   'report_path',
-  'remote_sync_policy',
 ] as const;
 
 export const GOVERNANCE_CHANGE_REQUIRED_FIELDS = [
@@ -129,7 +128,7 @@ export const BLOCKED_REQUIRED_FIELDS = ['code', 'reason'] as const;
 export const SESSION_ROTATION_REQUIRED_FIELDS = ['schema_version', 'reason', 'action'] as const;
 
 export const DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS =
-  'Luna may decide implementation details inside the approved scope without asking Sol or the user; emit BLOCKED only for external account/API key/OTP/platform configuration, conflicts, unauthorized scope, or high-risk operations.' as const;
+  'Luna may decide ordinary implementation details without asking Sol or the user; reasonable project-internal scope drift may continue and must be reported for ORCHESTRATOR scope review; emit BLOCKED only for external account/API key/OTP/platform configuration, explicit out-of-scope conflicts, protected or high-risk operations, or unsafe changes.' as const;
 
 export interface LunaTaskFields {
   schema_version?: typeof WRITING_BLOCK_SCHEMA_VERSION;
@@ -145,8 +144,10 @@ export interface LunaTaskFields {
   governance_revision: string | number;
   architecture_revision_set: unknown[];
   report_path: string;
-  remote_sync_policy: unknown;
-  execution_semantics: typeof DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS;
+  /** Legacy taskbook field; W2C supplies the fixed policy when absent. */
+  remote_sync_policy?: unknown;
+  /** Legacy taskbook field; W2C owns the actual execution policy. */
+  execution_semantics?: typeof DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS;
   [key: string]: unknown;
 }
 
@@ -302,7 +303,9 @@ export const WRITING_BLOCK_JSON_SCHEMAS = {
       remote_sync_policy: {
         oneOf: [{ type: 'object' }, { type: 'string' }, { type: 'boolean' }],
       },
-      execution_semantics: { type: 'string', const: DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS },
+      // This is retained as a compatibility field. W2C owns the actual Luna
+      // execution policy and normalizes any supplied value below.
+      execution_semantics: { type: 'string' },
     },
   },
   GOVERNANCE_CHANGE: {
@@ -1076,7 +1079,7 @@ function buildBlock(
       normalizedTask.deliverables = assertStringListField(fields, 'deliverables', blockIndex);
       normalizedTask.validation_commands = assertStringListField(fields, 'validation_commands', blockIndex);
       normalizedTask.report_path = assertStringField(fields, 'report_path', blockIndex);
-      normalizedTask.remote_sync_policy = fields.remote_sync_policy;
+      normalizedTask.remote_sync_policy = fields.remote_sync_policy ?? LUNA_REMOTE_SYNC_POLICY;
       if (
         (typeof fields.governance_revision !== 'string' && typeof fields.governance_revision !== 'number') ||
         (typeof fields.governance_revision === 'string' && fields.governance_revision.trim() === '')
@@ -1094,6 +1097,7 @@ function buildBlock(
         });
       }
       if (
+        fields.remote_sync_policy !== undefined &&
         !isRecord(fields.remote_sync_policy) &&
         !isNonEmptyString(fields.remote_sync_policy) &&
         typeof fields.remote_sync_policy !== 'boolean'
@@ -1237,6 +1241,7 @@ function buildBlock(
   for (const field of requiredFields) knownFields.add(field);
   if (type === 'LUNA_TASK') {
     knownFields.add('task_kind');
+    knownFields.add('remote_sync_policy');
     knownFields.add('execution_semantics');
   }
   if (type === 'GOVERNANCE_RECONCILIATION') {

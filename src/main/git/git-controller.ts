@@ -1,4 +1,5 @@
 import { access, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { execFile as execFileCallback } from 'node:child_process';
 import { isAbsolute, relative, resolve } from 'node:path';
@@ -78,6 +79,12 @@ function pendingPushKey(baseline: Pick<GitBaseline, 'repositoryRoot' | 'remoteNa
 
 function normalizePath(value: string): string {
   return value.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '');
+}
+
+function scopePathFingerprint(paths: readonly string[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify([...new Set(paths.map(normalizePath))].sort()))
+    .digest('hex');
 }
 
 function redactOutput(value: string): string {
@@ -647,12 +654,20 @@ export class GitController {
     let commit = existing;
     let scopeDriftPaths: string[] = [];
     if (commit === null) {
-      scopeDriftPaths = this.assertWorktreePaths(
-        current.worktree,
-        syncAllowedPaths,
-        protectedPaths,
-        input.taskKind === 'IMPLEMENTATION',
-      );
+      try {
+        scopeDriftPaths = this.assertWorktreePaths(current.worktree, syncAllowedPaths, protectedPaths);
+      } catch (error) {
+        if (!(error instanceof GitControllerError) || error.code !== 'UNAUTHORIZED_CHANGE') throw error;
+        scopeDriftPaths = Array.isArray(error.details.paths)
+          ? error.details.paths.filter((path): path is string => typeof path === 'string')
+          : [];
+        if (!this.isApprovedScopeDrift(input, scopeDriftPaths)) throw error;
+      }
+      if (scopeDriftPaths.length > 0 && !this.isApprovedScopeDrift(input, scopeDriftPaths)) {
+        throw new GitControllerError('UNAUTHORIZED_CHANGE', 'Worktree contains files outside the approved scope', {
+          paths: scopeDriftPaths,
+        });
+      }
       if (!current.worktree.some((path) => path === reportRelativePath)) {
         throw new GitControllerError('REPORT_MISSING', 'Luna report exists but was not produced in this run', {
           paths: [reportRelativePath],
@@ -668,6 +683,23 @@ export class GitController {
     }
     const result = await this.pushAndReturn('code', commit, input.baseline, current.repositoryRoot);
     return scopeDriftPaths.length === 0 ? result : { ...result, scopeDriftPaths };
+  }
+
+  private isApprovedScopeDrift(input: CodeSyncInput, paths: string[]): boolean {
+    const approval = input.scopeReviewApproval;
+    if (paths.length === 0) return approval === undefined;
+    if (approval === undefined) return false;
+    if (
+      approval.decision !== 'APPROVE' ||
+      approval.risk !== 'LOW' ||
+      approval.taskId !== input.taskId ||
+      approval.baselineHead !== input.baseline.head ||
+      approval.worktreePathFingerprint !== scopePathFingerprint(paths)
+    )
+      return false;
+    const expected = [...paths].map(normalizePath).sort();
+    const approved = [...approval.driftPaths].map(normalizePath).sort();
+    return expected.length === approved.length && expected.every((path, index) => path === approved[index]);
   }
 
   private async pushAndReturn(

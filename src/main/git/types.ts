@@ -177,6 +177,18 @@ export interface CodeSyncInput {
   reportPath: string;
   allowedPaths: string[];
   protectedPaths?: string[];
+  scopeReviewApproval?: ScopeReviewApproval;
+}
+
+export interface ScopeReviewApproval {
+  taskId: string;
+  baselineHead: string;
+  driftPaths: string[];
+  decision: 'APPROVE';
+  risk: 'LOW';
+  scopeRelation: 'DERIVED_SUPPORT' | 'WITHIN_OBJECTIVE';
+  reviewId: string;
+  worktreePathFingerprint: string;
 }
 
 export interface GitSyncResult {

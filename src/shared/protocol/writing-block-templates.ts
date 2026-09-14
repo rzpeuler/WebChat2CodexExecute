@@ -1,11 +1,6 @@
 import {
-  DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS,
   GOVERNANCE_CHANGE_OPERATIONS,
   GOVERNANCE_CHANGE_RISK_LEVELS,
-  LUNA_REMOTE_SYNC_POLICY,
-  LUNA_RESULT_STATUSES,
-  LUNA_TASK_KINDS,
-  LUNA_TEST_STATUSES,
   WRITING_BLOCK_SCHEMA_VERSION,
   type ArchitectureFreezeFields,
   type BlockedFields,
@@ -86,57 +81,6 @@ const writingBlockTemplates = {
     governance_revision: '<填写治理版本>',
     architecture_revision_set: ['<填写架构版本或 revision>'],
     report_path: '<填写报告相对路径>',
-    remote_sync_policy: LUNA_REMOTE_SYNC_POLICY,
-    execution_semantics: DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS,
-    scope_policy: {
-      implementation:
-        'scope is the expected audit set; reasonable adjacent project-internal non-protected files may change when required and must be reported',
-      test: 'only tests/** and the exact report_path may change',
-      protected: ['docs/governance/**', 'docs/architecture/**', '.git/**', 'credentials', 'secrets', 'private keys'],
-    },
-    git_policy: 'ORCHESTRATOR commits and pushes; Luna must never commit, push, amend, rebase, or force-push',
-    result_contract: {
-      identifier: 'LUNA_RESULT',
-      identifier_options: ['LUNA_RESULT'],
-      status_options: LUNA_RESULT_STATUSES,
-      tests_status_options: LUNA_TEST_STATUSES,
-      tests_required: true,
-      tests_item_schema: {
-        type: 'object',
-        required: ['status'],
-        optional: ['command'],
-        additional_fields_allowed: false,
-        status_options: LUNA_TEST_STATUSES,
-      },
-      tests_example: [{ command: 'npm test', status: 'PASSED' }],
-      tests_are_evidence_only: true,
-      tests_status_does_not_gate_sync: true,
-      failed_tests_must_not_set_status_failed: true,
-      completed_status: 'COMPLETED',
-      report_path_rule: 'must_equal_report_path',
-      git_owner: 'ORCHESTRATOR',
-      luna_must_not_commit_or_push: true,
-    },
-    output_contract: {
-      response_audience: ['ORCHESTRATOR', 'USER'],
-      orchestrator_output:
-        'Emit the applicable Writing Block using this template; ordinary reasoning text may appear elsewhere in the assistant message.',
-      user_output:
-        'When user action, a decision, external setup, or an out-of-authority matter is required, emit exactly one USER_MESSAGE block.',
-      candidate_rule:
-        'The orchestrator scans the complete assistant message and consumes only a complete candidate whose top-level fields follow this template order.',
-      duplicate_rule: 'Do not repeat a top-level field or any Writing Block/User Message marker inside a field value.',
-      no_executable_prose:
-        'Do not rely on ordinary prose to request an orchestrator action; represent every executable action in the applicable block.',
-    },
-    task_kind_options: LUNA_TASK_KINDS,
-    test_task_contract: {
-      allowed_changes: ['tests/**', '<the exact report_path>'],
-      production_paths_forbidden: true,
-      failed_tests_with_valid_report_are_completed: true,
-      not_run_tests_are_evidence_only: true,
-      missing_report_is_failed: true,
-    },
   },
   GOVERNANCE_CHANGE: {
     schema_version: WRITING_BLOCK_TEMPLATE_VERSION,

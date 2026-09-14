@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -527,6 +528,16 @@ describe('GitController', () => {
       taskKind: 'IMPLEMENTATION',
       reportPath: 'docs/task-reports/drift-task.md',
       allowedPaths: ['src/**', 'docs/task-reports/drift-task.md'],
+      scopeReviewApproval: {
+        taskId: 'drift-task',
+        baselineHead: baseline.head,
+        driftPaths: ['src-adjacent.ts'],
+        decision: 'APPROVE',
+        risk: 'LOW',
+        scopeRelation: 'DERIVED_SUPPORT',
+        reviewId: 'review-1',
+        worktreePathFingerprint: createHash('sha256').update(JSON.stringify(['src-adjacent.ts'])).digest('hex'),
+      },
     });
 
     expect(result.scopeDriftPaths).toEqual(['src-adjacent.ts']);

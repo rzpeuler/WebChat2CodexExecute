@@ -20,6 +20,9 @@ import { sanitizeSafeText } from '../../shared/contracts/safe-text.js';
 import {
   extractUserMessage,
   parseWritingBlocks,
+  DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS,
+  LUNA_REMOTE_SYNC_POLICY,
+  WRITING_BLOCK_SCHEMA_VERSION,
   type GovernanceReconciliationBlock,
   type LunaTaskBlock,
   type LunaTestStatus,
@@ -28,7 +31,7 @@ import {
 import { resolve } from 'node:path';
 import { compileSolAutoRepairPrompt } from '../sol/prompt-compiler.js';
 import type { EdgeSolObservation } from '../edge/types.js';
-import type { CodexRunResult } from '../codex/types.js';
+import type { CodexRunResult, ScopeReviewResult } from '../codex/types.js';
 import type { GitManualOperationRecord } from '../git/types.js';
 import {
   type ArchitectureOrchestratorPort,
@@ -48,6 +51,7 @@ import {
   type AutoRepairState,
   type ExecutionRecoveryRecord,
   type PendingCodeSyncState,
+  type ScopeReviewTaskContext,
   type PendingReconciliationSyncState,
   type SolMessageSource,
   type AutoRepairStatus,
@@ -369,9 +373,10 @@ export class MainOrchestrator implements Orchestrator {
       this.beginExecutionSession();
       this.state.active = true;
       this.state.status = 'RUNNING';
-      this.state.phase = 'SYNCING_CODE';
       this.state.taskId = this.pendingCodeSync.taskId;
-      this.activateGraphNode('sync-code', this.pendingCodeSync.taskId);
+      const reviewingScope = this.pendingCodeSync.scopeDriftPaths !== undefined && this.pendingCodeSync.scopeReview === undefined;
+      this.state.phase = reviewingScope ? 'REVIEWING_SCOPE' : 'SYNCING_CODE';
+      this.activateGraphNode(reviewingScope ? 'scope-review' : 'sync-code', this.pendingCodeSync.taskId);
       this.state.recentError = null;
       this.state.retryCount = 0;
       this.touchState();
@@ -952,9 +957,10 @@ export class MainOrchestrator implements Orchestrator {
     this.state.status = 'RUNNING';
     this.beginExecutionSession();
     if (this.pendingCodeSync !== null) {
-      this.state.phase = 'SYNCING_CODE';
       this.state.taskId = this.pendingCodeSync.taskId;
-      this.activateGraphNode('sync-code', this.pendingCodeSync.taskId);
+      const reviewingScope = this.pendingCodeSync.scopeDriftPaths !== undefined && this.pendingCodeSync.scopeReview === undefined;
+      this.state.phase = reviewingScope ? 'REVIEWING_SCOPE' : 'SYNCING_CODE';
+      this.activateGraphNode(reviewingScope ? 'scope-review' : 'sync-code', this.pendingCodeSync.taskId);
     } else if (this.state.phase === 'PAUSED' || this.state.phase === 'FAILED') this.state.phase = 'WAITING_FOR_SOL';
     if (this.state.phase === 'WAITING_FOR_SOL') this.resumeWaitingGraph();
     this.state.recentError = null;
@@ -1192,6 +1198,9 @@ export class MainOrchestrator implements Orchestrator {
     if (!this.state.active) return result('IDLE', this.state, '编排器未运行。');
     if (this.pendingReconciliationSync !== null && this.state.phase === 'SYNCING_GOVERNANCE')
       return result('WAITING', this.state, '治理一致性同步上下文已恢复，请重试当前同步。');
+    if (this.pendingCodeSync !== null && this.state.phase === 'REVIEWING_SCOPE') {
+      return this.reviewScopeAndResume(this.pendingCodeSync, this.pendingCodeSync.scopeDriftPaths ?? []);
+    }
     if (this.pendingCodeSync !== null && this.state.phase === 'SYNCING_CODE') return this.syncPendingCode();
 
     if (
@@ -1280,6 +1289,7 @@ export class MainOrchestrator implements Orchestrator {
         'apply-updates',
         'sync-governance',
         'run-luna',
+        'scope-review',
         'sync-code',
         'notify-sol',
       ]);
@@ -1293,6 +1303,7 @@ export class MainOrchestrator implements Orchestrator {
         'apply-updates',
         'sync-governance',
         'run-luna',
+        'scope-review',
         'sync-code',
         'notify-sol',
       ]);
@@ -1313,6 +1324,7 @@ export class MainOrchestrator implements Orchestrator {
         'apply-updates',
         'sync-governance',
         'run-luna',
+        'scope-review',
         'sync-code',
         'notify-sol',
       ]);
@@ -1432,7 +1444,7 @@ export class MainOrchestrator implements Orchestrator {
       if (parsed.lunaTask === null) {
         this.state.processedOutputKey = outputKey;
         this.state.executionRecovery = null;
-        this.markNodesNotApplicable(['run-luna', 'sync-code', 'notify-sol']);
+        this.markNodesNotApplicable(['run-luna', 'scope-review', 'sync-code', 'notify-sol']);
         this.updateCurrentRoundRecord(
           {
             status: updated ? 'COMPLETED' : 'NO_TASK',
@@ -1707,15 +1719,37 @@ export class MainOrchestrator implements Orchestrator {
     if (!this.state.active) return result('PAUSED', this.state, '编排器已暂停。');
     this.completeGraphNode('run-luna');
     await this.setPhase('SYNCING_CODE', 'RUNNING', pending.taskId);
-    const sync = await this.git.syncCode({
-      baseline: pending.baseline,
-      taskId: pending.taskId,
-      taskKind: pending.taskKind,
-      reportPath: pending.reportPath,
-      allowedPaths: pending.allowedPaths,
-      protectedPaths: pending.protectedPaths,
-    });
+    let sync;
+    try {
+      sync = await this.git.syncCode({
+        baseline: pending.baseline,
+        taskId: pending.taskId,
+        taskKind: pending.taskKind,
+        reportPath: pending.reportPath,
+        allowedPaths: pending.allowedPaths,
+        protectedPaths: pending.protectedPaths,
+        ...(pending.scopeReview === undefined
+          ? {}
+          : {
+              scopeReviewApproval: {
+                ...pending.scopeReview,
+                taskId: pending.taskId,
+                baselineHead: pending.baseline.head,
+              },
+            }),
+      });
+    } catch (error) {
+      const details = error instanceof Error && 'details' in error ? (error as { details?: unknown }).details : null;
+      const paths = isRecord(details) && Array.isArray(details.paths)
+        ? details.paths.filter((path): path is string => typeof path === 'string')
+        : [];
+      if (errorCode(error) === 'UNAUTHORIZED_CHANGE' && paths.length > 0 && pending.scopeReview === undefined)
+        return this.reviewScopeAndResume(pending, paths, observation);
+      throw error;
+    }
     this.state.commits = { local: sync.commit, remote: sync.remoteCommit };
+    if (sync.scopeDriftPaths === undefined || sync.scopeDriftPaths.length === 0)
+      this.markNodesNotApplicable(['scope-review']);
     await this.adoptBaseline({
       ...pending.baseline,
       head: sync.commit,
@@ -1732,7 +1766,12 @@ export class MainOrchestrator implements Orchestrator {
         `测试：${pending.testsStatus === 'PASSED' ? '已通过' : pending.testsStatus === 'FAILED' ? '未通过（证据已同步）' : '未运行'}`,
         ...(sync.scopeDriftPaths === undefined || sync.scopeDriftPaths.length === 0
           ? []
-          : [`超出任务预期范围但已允许同步：${sync.scopeDriftPaths.join('、')}`]),
+          : [
+              `超出任务预期范围但已允许同步：${sync.scopeDriftPaths.join('、')}`,
+              ...(pending.scopeReview === undefined
+                ? []
+                : [`Luna scope-review：APPROVE（${pending.scopeReview.reviewId}，${pending.scopeReview.scopeRelation}）`]),
+            ]),
         ...commitDetails(sync.commit, sync.remoteCommit),
       ],
     });
@@ -1750,8 +1789,8 @@ export class MainOrchestrator implements Orchestrator {
       await this.sol.sendMessage({
         observation,
         text: evidenceNotice
-          ? `LUNA_RESULT task_id=${pending.taskId}\n${implementationFailureNotice ? '代码和任务报告已同步。\nLuna 结果为 FAILED，表示报告中仍有实现或验收阻塞；请由 Sol/CTO 根据报告完成验收判断。' : testFailureNotice ? '代码和任务报告已同步，但测试未通过。' : '代码和任务报告已同步，但测试未运行。'}\n任务类型：${pending.taskKind}\n测试状态：${pending.testsStatus}\n报告：${pending.reportPath}\n最新提交：${sync.commit}${scopeDriftNotice(sync.scopeDriftPaths)}\n请根据报告完成验收并规划后续任务。`
-          : `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。${scopeDriftNotice(sync.scopeDriftPaths)}`,
+           ? `LUNA_RESULT task_id=${pending.taskId}\n${implementationFailureNotice ? '代码和任务报告已同步。\nLuna 结果为 FAILED，表示报告中仍有实现或验收阻塞；请由 Sol/CTO 根据报告完成验收判断。' : testFailureNotice ? '代码和任务报告已同步，但测试未通过。' : '代码和任务报告已同步，但测试未运行。'}\n任务类型：${pending.taskKind}\n测试状态：${pending.testsStatus}\n报告：${pending.reportPath}\n最新提交：${sync.commit}${scopeDriftNotice(sync.scopeDriftPaths, pending.scopeReview)}\n请根据报告完成验收并规划后续任务。`
+           : `LUNA_RESULT task_id=${pending.taskId}\n最新提交 ${sync.commit} 完成，可以开始验收。${scopeDriftNotice(sync.scopeDriftPaths, pending.scopeReview)}`,
       });
       this.updateGraphNode('notify-sol', {
         summary: evidenceNotice
@@ -1799,6 +1838,83 @@ export class MainOrchestrator implements Orchestrator {
     this.completeExecutionRound();
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
     return result('COMPLETED', this.state, `任务 ${pending.taskId} 已完成并同步。`);
+  }
+
+  private async reviewScopeAndResume(
+    pending: PendingCodeSync,
+    driftPaths: string[],
+    observation?: EdgeSolObservation,
+  ): Promise<OrchestratorResult> {
+    const normalizedPaths = [...new Set(driftPaths.map(normalizePath))].sort();
+    if (normalizedPaths.length === 0) return this.syncPendingCode(observation);
+    if (pending.scopeReview !== undefined) return this.syncPendingCode(observation);
+    if (this.codex.runScopeReview === undefined) {
+      return this.pauseForCode(
+        'SCOPE_REVIEW_UNAVAILABLE',
+        '检测到范围漂移，但当前 Codex 运行器不支持结构化 Luna scope-review。',
+        true,
+        '请升级 W2C 后重试；未经过范围审查的额外文件不会自动提交或推送。',
+      );
+    }
+
+    const nextPending = { ...pending, scopeDriftPaths: normalizedPaths };
+    this.setPendingCodeSync(nextPending);
+    await this.setPhase('REVIEWING_SCOPE', 'RUNNING', pending.taskId);
+    this.updateGraphNode('scope-review', {
+      summary: '检测到范围漂移，正在请求 Luna 进行一次性结构化审查。',
+      details: [`任务：${pending.taskId}`, `待审查文件：${normalizedPaths.join('、')}`, '审查次数：1'],
+    });
+    await this.persist();
+
+    try {
+      const reviewTask = scopeReviewTaskFromContext(pending.scopeReviewTask);
+      const snapshots = await this.readSnapshots(reviewTask);
+      const review = await this.codex.runScopeReview({
+        task: reviewTask,
+        snapshots,
+        repositoryPath: this.project.localPath,
+        baselineSnapshot: pending.baseline,
+        driftPaths: normalizedPaths,
+        ...(this.model === undefined ? {} : { model: this.model }),
+        ...(this.executablePath === undefined ? {} : { executablePath: this.executablePath }),
+      });
+      assertScopeReviewResult(review, pending, normalizedPaths);
+      if (review.decision !== 'APPROVE') {
+        return this.pauseForCode(
+          'SCOPE_REVIEW_REJECTED',
+          `Luna scope-review 拒绝了范围漂移：${review.reason}`,
+          true,
+          '请根据拒绝原因修正工作区或重新规划任务；W2C 不会自动提交这些额外文件。',
+        );
+      }
+      const approved = {
+        reviewId: review.reviewId,
+        decision: 'APPROVE' as const,
+        driftPaths: [...review.approvedDriftPaths],
+        risk: 'LOW' as const,
+        scopeRelation: review.scopeRelation as 'DERIVED_SUPPORT' | 'WITHIN_OBJECTIVE',
+        worktreePathFingerprint: review.worktreePathFingerprint,
+      };
+      this.setPendingCodeSync({ ...nextPending, scopeReview: approved });
+      this.updateGraphNode('scope-review', {
+        summary: 'Luna scope-review 已批准，继续代码同步。',
+        details: [
+          `任务：${pending.taskId}`,
+          `审查编号：${review.reviewId}`,
+          `审查结论：APPROVE / ${review.scopeRelation}`,
+          `批准文件：${review.approvedDriftPaths.join('、')}`,
+        ],
+      });
+      await this.persist();
+      return this.syncPendingCode(observation);
+    } catch (error) {
+      return this.pauseForCode(
+        errorCode(error),
+        error instanceof Error ? error.message : String(error),
+        true,
+        '范围审查未通过协议或执行校验，已停止自动同步；请检查 Luna 审查输出后重试。',
+      );
+    }
   }
 
   private async tryAutoRepair(
@@ -2970,6 +3086,49 @@ function createPendingCodeSync(
     testsStatus,
     sessionId: run.sessionId,
     outputKey,
+    scopeReviewTask: createScopeReviewTaskContext(task),
+  };
+}
+
+function createScopeReviewTaskContext(task: LunaTaskBlock): ScopeReviewTaskContext {
+  return {
+    taskId: task.fields.task_id,
+    taskKind: task.fields.task_kind,
+    title: task.fields.title,
+    objective: task.fields.objective,
+    baseCommit: task.fields.base_commit,
+    scope: [...task.fields.scope],
+    outOfScope: [...task.fields.out_of_scope],
+    deliverables: [...task.fields.deliverables],
+    validationCommands: [...task.fields.validation_commands],
+    governanceRevision: task.fields.governance_revision,
+    architectureRevisionSet: [...task.fields.architecture_revision_set],
+    reportPath: task.fields.report_path,
+  };
+}
+
+function scopeReviewTaskFromContext(context: ScopeReviewTaskContext): LunaTaskBlock {
+  return {
+    type: 'LUNA_TASK',
+    fields: {
+      schema_version: WRITING_BLOCK_SCHEMA_VERSION,
+      task_kind: context.taskKind,
+      task_id: context.taskId,
+      title: context.title,
+      objective: context.objective,
+      base_commit: context.baseCommit,
+      scope: [...context.scope],
+      out_of_scope: [...context.outOfScope],
+      deliverables: [...context.deliverables],
+      validation_commands: [...context.validationCommands],
+      governance_revision: context.governanceRevision,
+      architecture_revision_set: [...context.architectureRevisionSet],
+      report_path: context.reportPath,
+      remote_sync_policy: LUNA_REMOTE_SYNC_POLICY,
+      execution_semantics: DEFAULT_LUNA_IMPLEMENTATION_SEMANTICS,
+    },
+    extensions: {},
+    rawBody: '',
   };
 }
 
@@ -2981,6 +3140,18 @@ function clonePendingCodeSync(value: unknown): PendingCodeSyncState | null {
     allowedPaths: [...pending.allowedPaths],
     protectedPaths: [...pending.protectedPaths],
     baseline: { ...pending.baseline, worktree: [...pending.baseline.worktree] },
+    scopeReviewTask: {
+      ...pending.scopeReviewTask,
+      scope: [...pending.scopeReviewTask.scope],
+      outOfScope: [...pending.scopeReviewTask.outOfScope],
+      deliverables: [...pending.scopeReviewTask.deliverables],
+      validationCommands: [...pending.scopeReviewTask.validationCommands],
+      architectureRevisionSet: [...pending.scopeReviewTask.architectureRevisionSet],
+    },
+    ...(pending.scopeDriftPaths === undefined ? {} : { scopeDriftPaths: [...pending.scopeDriftPaths] }),
+    ...(pending.scopeReview === undefined
+      ? {}
+      : { scopeReview: { ...pending.scopeReview, driftPaths: [...pending.scopeReview.driftPaths] } }),
   };
 }
 
@@ -3044,6 +3215,18 @@ function normalizePendingCodeSync(value: unknown): PendingCodeSyncState | null {
         : value.testsPassed === false
           ? 'FAILED'
           : 'NOT_RUN';
+  const scopeReviewTask = normalizeScopeReviewTaskContext(value.scopeReviewTask, {
+    taskId,
+    taskKind,
+    reportPath,
+    baseCommit: baseline.head,
+    scope: normalizePendingStringArray(value.allowedPaths, 512),
+    outOfScope: normalizePendingStringArray(value.protectedPaths, 512),
+  });
+  if (scopeReviewTask === null) return null;
+  const scopeDriftPaths = value.scopeDriftPaths === undefined ? undefined : normalizePendingStringArray(value.scopeDriftPaths, 512);
+  const scopeReview = normalizeScopeReviewApproval(value.scopeReview, scopeDriftPaths);
+  if (value.scopeReview !== undefined && scopeReview === null) return null;
   return {
     taskId,
     taskKind,
@@ -3055,6 +3238,75 @@ function normalizePendingCodeSync(value: unknown): PendingCodeSyncState | null {
     testsStatus,
     sessionId,
     outputKey,
+    scopeReviewTask,
+    ...(scopeDriftPaths === undefined ? {} : { scopeDriftPaths }),
+    ...(scopeReview === null ? {} : { scopeReview }),
+  };
+}
+
+function normalizeScopeReviewTaskContext(
+  value: unknown,
+  fallback: Pick<ScopeReviewTaskContext, 'taskId' | 'taskKind' | 'reportPath' | 'baseCommit' | 'scope' | 'outOfScope'>,
+): ScopeReviewTaskContext | null {
+  const source = isRecord(value) ? value : {};
+  const title = boundedPendingText(source.title, 1024) ?? fallback.taskId;
+  const objective = boundedPendingText(source.objective, 8192) ?? `审查任务 ${fallback.taskId} 的范围漂移。`;
+  const baseCommit = boundedPendingText(source.baseCommit ?? source.base_commit, 128) ?? fallback.baseCommit;
+  const reportPath = boundedPendingText(source.reportPath ?? source.report_path, 1024) ?? fallback.reportPath;
+  const scope = normalizePendingStringArray(source.scope, 512);
+  const outOfScope = normalizePendingStringArray(source.outOfScope ?? source.out_of_scope, 512);
+  const deliverables = normalizePendingStringArray(source.deliverables, 512);
+  const validationCommands = normalizePendingStringArray(source.validationCommands ?? source.validation_commands, 512);
+  const architectureRevisionSet = Array.isArray(source.architectureRevisionSet)
+    ? source.architectureRevisionSet.slice(0, 512)
+    : Array.isArray(source.architecture_revision_set)
+      ? source.architecture_revision_set.slice(0, 512)
+      : [];
+  const governanceRevision = isRevision(source.governanceRevision ?? source.governance_revision)
+    ? (source.governanceRevision ?? source.governance_revision)
+    : 'unknown';
+  return {
+    taskId: fallback.taskId,
+    taskKind: fallback.taskKind,
+    title,
+    objective,
+    baseCommit,
+    scope: scope.length === 0 ? [...fallback.scope] : scope,
+    outOfScope: outOfScope.length === 0 ? [...fallback.outOfScope] : outOfScope,
+    deliverables,
+    validationCommands,
+    governanceRevision: governanceRevision as string | number,
+    architectureRevisionSet,
+    reportPath,
+  };
+}
+
+function normalizeScopeReviewApproval(
+  value: unknown,
+  driftPaths: string[] | undefined,
+): NonNullable<PendingCodeSyncState['scopeReview']> | null {
+  if (!isRecord(value)) return null;
+  const reviewId = boundedPendingText(value.reviewId, 256);
+  const approvedPaths = normalizePendingStringArray(value.driftPaths, 512);
+  const fingerprint = boundedPendingText(value.worktreePathFingerprint, 128);
+  const scopeRelation = value.scopeRelation;
+  if (
+    reviewId === null ||
+    fingerprint === null ||
+    value.decision !== 'APPROVE' ||
+    value.risk !== 'LOW' ||
+    (scopeRelation !== 'DERIVED_SUPPORT' && scopeRelation !== 'WITHIN_OBJECTIVE') ||
+    driftPaths === undefined ||
+    !samePathSet(approvedPaths, driftPaths)
+  )
+    return null;
+  return {
+    reviewId,
+    decision: 'APPROVE',
+    driftPaths: approvedPaths,
+    risk: 'LOW',
+    scopeRelation,
+    worktreePathFingerprint: fingerprint,
   };
 }
 
@@ -3129,6 +3381,8 @@ function nodeForPhase(phase: OrchestratorState['phase']): LoopGraphNodeId | null
       return 'sync-governance';
     case 'RUNNING_LUNA':
       return 'run-luna';
+    case 'REVIEWING_SCOPE':
+      return 'scope-review';
     case 'SYNCING_CODE':
       return 'sync-code';
     case 'NOTIFYING_SOL':
@@ -3152,6 +3406,8 @@ function phaseForNode(nodeId: LoopGraphNodeId): OrchestratorState['phase'] {
       return 'SYNCING_GOVERNANCE';
     case 'run-luna':
       return 'RUNNING_LUNA';
+    case 'scope-review':
+      return 'REVIEWING_SCOPE';
     case 'sync-code':
       return 'SYNCING_CODE';
     case 'notify-sol':
@@ -3169,6 +3425,7 @@ function isOrchestratorPhase(value: unknown): value is OrchestratorState['phase'
     value === 'APPLYING_UPDATES' ||
     value === 'SYNCING_GOVERNANCE' ||
     value === 'RUNNING_LUNA' ||
+    value === 'REVIEWING_SCOPE' ||
     value === 'SYNCING_CODE' ||
     value === 'NOTIFYING_SOL' ||
     value === 'WAITING_FOR_SOL' ||
@@ -3213,6 +3470,8 @@ function phaseSummary(nodeId: LoopGraphNodeId, taskId: string | null, state: Orc
       return '正在创建并同步治理提交。';
     case 'run-luna':
       return taskId === null ? '正在启动 Luna。' : `正在执行任务 ${taskId}。`;
+    case 'scope-review':
+      return taskId === null ? '正在进行范围审查。' : `正在审查任务 ${taskId} 的范围漂移。`;
     case 'sync-code':
       return taskId === null ? '正在同步代码。' : `正在同步任务 ${taskId} 的代码。`;
     case 'notify-sol':
@@ -3230,10 +3489,50 @@ function commitDetails(local: string | null, remote: string | null): string[] {
   return compactDetails([local === null ? '' : `本地提交：${local}`, remote === null ? '' : `远端提交：${remote}`]);
 }
 
-function scopeDriftNotice(paths: string[] | undefined): string {
+function normalizePath(value: string): string {
+  return value.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '');
+}
+
+function samePathSet(left: readonly string[], right: readonly string[]): boolean {
+  const normalize = (paths: readonly string[]) => [...new Set(paths.map(normalizePath))].sort();
+  const expected = normalize(left);
+  const actual = normalize(right);
+  return expected.length === actual.length && expected.every((path, index) => path === actual[index]);
+}
+
+function scopePathFingerprint(paths: readonly string[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify([...new Set(paths.map(normalizePath))].sort()))
+    .digest('hex');
+}
+
+function assertScopeReviewResult(
+  review: ScopeReviewResult,
+  pending: PendingCodeSync,
+  driftPaths: readonly string[],
+): void {
+  if (review.taskId !== pending.taskId) throw new OrchestratorError('SCOPE_REVIEW_INVALID', '范围审查返回了错误的 task_id。');
+  if (review.worktreePathFingerprint !== scopePathFingerprint(driftPaths))
+    throw new OrchestratorError('SCOPE_REVIEW_INVALID', '范围审查指纹与当前漂移文件不一致。');
+  if (!driftPaths.every((path) => review.reviewedPaths.includes(normalizePath(path))))
+    throw new OrchestratorError('SCOPE_REVIEW_INVALID', '范围审查没有覆盖全部漂移文件。');
+  if (review.decision !== 'APPROVE') return;
+  if (
+    review.risk !== 'LOW' ||
+    (review.scopeRelation !== 'DERIVED_SUPPORT' && review.scopeRelation !== 'WITHIN_OBJECTIVE') ||
+    (review.functionalImpact !== 'NONE' && review.functionalImpact !== 'WITHIN_OBJECTIVE') ||
+    !samePathSet(review.approvedDriftPaths, driftPaths)
+  )
+    throw new OrchestratorError('SCOPE_REVIEW_INVALID', '范围审查批准条件不满足，已拒绝自动同步。');
+}
+
+function scopeDriftNotice(
+  paths: string[] | undefined,
+  review: PendingCodeSyncState['scopeReview'] | undefined,
+): string {
   return paths === undefined || paths.length === 0
     ? ''
-    : `\n额外同步的项目内非保护文件：${paths.join('、')}\n请在验收时确认这些额外修改是否合理。`;
+    : `\n额外同步的项目内非保护文件：${paths.join('、')}\n范围审查：${review === undefined ? '未完成' : `APPROVE（${review.reviewId}）`}。`;
 }
 
 function writingBlockCount(parsed: ReturnType<typeof parseWritingBlocks>): number {

@@ -112,7 +112,7 @@ line two"
     expect(Object.isFrozen(WRITING_BLOCK_TEMPLATE_PATHS)).toBe(true);
     expect(Object.isFrozen(WRITING_BLOCK_TEMPLATES)).toBe(true);
     expect(Object.isFrozen(WRITING_BLOCK_TEMPLATES.LUNA_TASK.scope)).toBe(true);
-    expect(Object.isFrozen(WRITING_BLOCK_TEMPLATES.LUNA_TASK.remote_sync_policy)).toBe(true);
+    expect(WRITING_BLOCK_TEMPLATES.LUNA_TASK).not.toHaveProperty('remote_sync_policy');
     expect(Object.isFrozen(WRITING_BLOCK_TEMPLATES.GOVERNANCE_RECONCILIATION.instructions)).toBe(true);
     expect(Object.isFrozen(WRITING_BLOCK_TEMPLATES.GOVERNANCE_RECONCILIATION.variants)).toBe(true);
     expect(Object.isFrozen(WRITING_BLOCK_TEMPLATES.GOVERNANCE_RECONCILIATION.variants.PASS.files)).toBe(true);

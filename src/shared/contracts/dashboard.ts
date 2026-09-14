@@ -228,6 +228,7 @@ export const LOOP_GRAPH_NODE_DEFINITIONS = [
   { id: 'apply-updates', label: '应用治理/架构更新' },
   { id: 'sync-governance', label: '同步治理' },
   { id: 'run-luna', label: 'Luna 执行' },
+  { id: 'scope-review', label: 'Luna 范围审查' },
   { id: 'sync-code', label: '同步代码' },
   { id: 'notify-sol', label: '通知 Sol' },
   { id: 'wait-sol', label: '等待 Sol' },
