@@ -724,8 +724,13 @@ describe('dedicated Edge profile and CDP state adapter', () => {
 
   it('extracts a visible complete Writing Block candidate inside the assistant message', () => {
     const script = domSnapshotScript();
+    expect(script).toContain('const isCaptureUsable');
+    expect(script).toContain('node.isConnected');
+    expect(script).toContain("node.getAttribute('aria-hidden') !== 'true'");
+    expect(script).toContain('node.innerText || node.textContent');
+    expect(script).not.toContain('getBoundingClientRect');
     expect(script).toContain('const assistantRootText = text(assistantNode);');
-    expect(script).toContain('const assistantNodes = [...new Set(');
+    expect(script).toContain('const assistantNodes = [...new Set(captureUsableAll(');
     expect(script).toContain('const finalAnswerCandidates = assistantNode === null');
     expect(script).toContain('const latestProtocolNode = [...assistantNodes]');
     expect(script).toContain(

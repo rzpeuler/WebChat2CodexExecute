@@ -40,17 +40,17 @@ export function extractWritingBlockTail(value: string): string | null {
 
 export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER_RULES): string {
   return `(() => {
-  const isVisible = (node) => {
+  const isCaptureUsable = (node) => {
     if (!(node instanceof HTMLElement)) return false;
+    if (!node.isConnected) return false;
     const style = window.getComputedStyle(node);
-    const rect = node.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse' &&
-      style.opacity !== '0' && rect.width > 0 && rect.height > 0;
+      node.getAttribute('aria-hidden') !== 'true';
   };
-  const text = (node) => isVisible(node) ? (node.innerText || node.textContent || '').trim() : '';
+  const text = (node) => isCaptureUsable(node) ? (node.innerText || node.textContent || '').trim() : '';
   const all = (selectors, root = document) => selectors.flatMap((selector) => Array.from(root.querySelectorAll(selector)));
-  const visibleAll = (selectors, root = document) => all(selectors, root).filter(isVisible);
-  const assistantNodes = [...new Set(visibleAll(${JSON.stringify(rules.assistantSelectors)}))];
+  const captureUsableAll = (selectors, root = document) => all(selectors, root).filter(isCaptureUsable);
+  const assistantNodes = [...new Set(captureUsableAll(${JSON.stringify(rules.assistantSelectors)}))];
   const assistantNode = assistantNodes.at(-1) || null;
   const assistantRootText = text(assistantNode);
   const normalizeMarkers = (value) => value
@@ -72,8 +72,8 @@ export function domSnapshotScript(rules: EdgeAdapterRules = DEFAULT_EDGE_ADAPTER
     ? []
     : assistantNodes.flatMap((root, nodeIndex) => [
         root,
-        ...visibleAll(${JSON.stringify(rules.finalAnswerSelectors)}, root),
-        ...Array.from(root.querySelectorAll('*')).filter(isVisible),
+        ...captureUsableAll(${JSON.stringify(rules.finalAnswerSelectors)}, root),
+        ...Array.from(root.querySelectorAll('*')).filter(isCaptureUsable),
       ].map((node, index) => {
         let depth = 0;
         for (let parent = node.parentElement; parent !== null && parent !== root; parent = parent.parentElement)
