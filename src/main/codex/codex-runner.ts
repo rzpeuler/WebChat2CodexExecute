@@ -2,7 +2,7 @@ import { appendFile, access, lstat, mkdir, mkdtemp, readFile, readdir, realpath,
 import { spawn, type ChildProcess } from 'node:child_process';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import type { LunaTaskBlock, LunaTestStatus } from '../../shared/protocol/writing-block.js';
@@ -1085,6 +1085,11 @@ export class CodexRunner {
         .map((line) => line.replace(/^"(.*)"$/, '$1'));
       checkedPaths.push(...pathResults);
       for (const executable of pathResults) {
+        // Windows `where codex` commonly returns npm's extensionless POSIX
+        // launcher and `.cmd` shim before the native executable. Neither can
+        // be passed to execFile with shell:false; select only native .exe
+        // entries and let the known-installation fallback handle the rest.
+        if (process.platform === 'win32' && extname(executable).toLowerCase() !== '.exe') continue;
         try {
           if ((await stat(executable)).isFile()) return executable;
         } catch {

@@ -133,6 +133,36 @@ describe('CodexRunner', () => {
     ]);
   });
 
+  it('skips Windows shell launchers returned before the native executable', async () => {
+    const { root } = await targetRepository();
+    const extensionless = join(root, 'codex');
+    const commandShim = join(root, 'codex.cmd');
+    const nativeExecutable = join(root, 'codex.exe');
+    await writeFile(extensionless, '#!/bin/sh\n', 'utf8');
+    await writeFile(commandShim, '@echo off\n', 'utf8');
+
+    const runner = new CodexRunner({
+      execFile: async (file, args) => {
+        if (file === 'where.exe') {
+          return { stdout: `${extensionless}\r\n${commandShim}\r\n${nativeExecutable}\r\n`, stderr: '' };
+        }
+        if (file !== nativeExecutable) throw new Error(`unexpected executable: ${file}`);
+        if (args[0] === '--version') return { stdout: 'codex-cli 0.154.0', stderr: '' };
+        if (args[0] === 'login') return { stdout: 'Logged in', stderr: '' };
+        if (args[0] === 'exec') return { stdout: 'Codex execution entrypoint available', stderr: '' };
+        throw new Error(`unexpected probe: ${args.join(' ')}`);
+      },
+      repositoryValidator: async () => true,
+    });
+
+    await expect(runner.checkCapabilities({ repositoryPath: root })).resolves.toMatchObject({
+      executablePath: nativeExecutable,
+      version: 'codex-cli 0.154.0',
+      authenticated: true,
+      modelAvailable: true,
+    });
+  });
+
   it('adds an execution authorization contract before running Luna', () => {
     const prompt = JSON.parse(
       promptForTask(task(), {
