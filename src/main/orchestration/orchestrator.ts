@@ -2135,6 +2135,7 @@ export class MainOrchestrator implements Orchestrator {
       if (nextNode !== null && status === 'RUNNING') this.activateGraphNode(nextNode, taskId);
     }
     this.state.taskId = taskId;
+    if (phase === 'WAITING_FOR_SOL' && status === 'RUNNING') this.maybeNotifySolWaitExceeded();
     this.touchState();
     await this.persist();
   }
@@ -2490,31 +2491,42 @@ export class MainOrchestrator implements Orchestrator {
     this.completeExecutionRound();
     await this.setPhase('WAITING_FOR_SOL', 'RUNNING', null);
     const waitNode = this.graphNode('wait-sol');
-    const waitStartedAt = waitNode.startedAt === null ? Number.NaN : Date.parse(waitNode.startedAt);
-    const waitExceeded =
-      Number.isFinite(waitStartedAt) && this.now().getTime() - waitStartedAt >= SOL_WAIT_NOTIFICATION_AFTER_MS;
-    const alreadyNotified = waitNode.details.includes(SOL_WAIT_NOTIFICATION_DETAIL);
-    if (waitExceeded && !alreadyNotified && this.notifier !== undefined) {
-      try {
-        this.notifier.notify({
-          project: this.project.name,
-          taskId: this.state.taskId ?? this.currentRoundRecord()?.taskId ?? null,
-          phase: 'WAITING_FOR_SOL',
-          suggestion: 'Sol 已等待超过 5 分钟，自动循环将继续等待；如需检查请打开专用 Edge。',
-          error: {
-            code: SOL_WAIT_NOTIFICATION_CODE,
-            message: 'Sol 输出等待已超过 5 分钟，循环未中断。',
-          },
-          level: 'RECOVERABLE',
-        });
-      } catch {
-        // Notification failures must not interrupt the Sol polling loop.
-      }
-      waitNode.details = [...waitNode.details, SOL_WAIT_NOTIFICATION_DETAIL];
-    }
     this.updateGraphNode('wait-sol', { summary: message, details: waitNode.details });
     this.touchState();
     await this.persist();
+  }
+
+  async notifySolWaitExceeded(): Promise<void> {
+    if (this.maybeNotifySolWaitExceeded()) {
+      this.touchState();
+      await this.persist();
+    }
+  }
+
+  private maybeNotifySolWaitExceeded(): boolean {
+    const waitNode = this.graphNode('wait-sol');
+    const waitStartedAt = waitNode.startedAt === null ? Number.NaN : Date.parse(waitNode.startedAt);
+    const waitExceeded =
+      Number.isFinite(waitStartedAt) && this.now().getTime() - waitStartedAt >= SOL_WAIT_NOTIFICATION_AFTER_MS;
+    if (!waitExceeded || waitNode.details.includes(SOL_WAIT_NOTIFICATION_DETAIL)) return false;
+    try {
+      this.notifier?.notify({
+        project: this.project.name,
+        taskId: this.state.taskId ?? this.currentRoundRecord()?.taskId ?? null,
+        phase: 'WAITING_FOR_SOL',
+        suggestion: 'Sol 已等待超过 5 分钟，自动循环将继续等待；如需检查请打开专用 Edge。',
+        error: {
+          code: SOL_WAIT_NOTIFICATION_CODE,
+          message: 'Sol 输出等待已超过 5 分钟，循环未中断。',
+        },
+        level: 'RECOVERABLE',
+      });
+    } catch {
+      // Notification failures must not interrupt the Sol polling loop.
+    }
+    waitNode.details = compactDetails([...waitNode.details, SOL_WAIT_NOTIFICATION_DETAIL]);
+    waitNode.updatedAt = this.now().toISOString();
+    return true;
   }
 
   private setPendingCodeSync(pending: PendingCodeSync): void {
@@ -2608,7 +2620,12 @@ export class MainOrchestrator implements Orchestrator {
   private updateGraphNode(nodeId: LoopGraphNodeId, update: Pick<LoopGraphNodeSnapshot, 'summary' | 'details'>): void {
     const node = this.graphNode(nodeId);
     node.summary = update.summary;
-    node.details = compactDetails(update.details);
+    node.details = compactDetails([
+      ...update.details,
+      ...(nodeId === 'wait-sol' && node.details.includes(SOL_WAIT_NOTIFICATION_DETAIL)
+        ? [SOL_WAIT_NOTIFICATION_DETAIL]
+        : []),
+    ]);
     node.updatedAt = this.now().toISOString();
   }
 

@@ -337,7 +337,9 @@ describe('P0 main orchestration', () => {
   });
 
   it('publishes reconciliation waiting state and pauses with a diagnostic on failure', async () => {
-    const orchestrator = new MainOrchestrator(baseOptions());
+    let currentTime = Date.parse('2026-09-14T00:00:00.000Z');
+    const notifier = { notify: vi.fn() };
+    const orchestrator = new MainOrchestrator(baseOptions({ now: () => new Date(currentTime), notifier }));
 
     await orchestrator.beginGovernanceReconciliationWait();
     expect(orchestrator.getDashboardSnapshot()).toMatchObject({
@@ -347,6 +349,17 @@ describe('P0 main orchestration', () => {
       actions: { 'governance-consistency-check': { busy: false } },
       loopGraph: { currentNodeId: 'wait-sol' },
     });
+
+    currentTime += SOL_WAIT_NOTIFICATION_AFTER_MS + 1;
+    await orchestrator.beginGovernanceReconciliationWait();
+    expect(notifier.notify).toHaveBeenCalledOnce();
+    expect(notifier.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: 'WAITING_FOR_SOL',
+        level: 'RECOVERABLE',
+        error: expect.objectContaining({ code: 'SOL_WAIT_EXCEEDED_5_MINUTES' }),
+      }),
+    );
 
     await orchestrator.pauseGovernanceReconciliation(
       new OrchestratorError('GOVERNANCE_RECONCILIATION_TIMEOUT', '等待 Sol 回复超过 2 分钟。'),

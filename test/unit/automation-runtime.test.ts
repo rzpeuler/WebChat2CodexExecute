@@ -82,6 +82,39 @@ describe('automation runtime lifecycle', () => {
     expect(delays).toEqual([2_000, 2_000, 2_000]);
   });
 
+  it('notifies once after five minutes during reconciliation polling and keeps waiting', async () => {
+    const outputs = [
+      observation({
+        latestAssistantText: 'partial-1',
+        latestAssistantHash: 'partial-1',
+        status: 'THINKING',
+        isThinking: true,
+      }),
+      observation({
+        latestAssistantText: 'partial-2',
+        latestAssistantHash: 'partial-2',
+        status: 'THINKING',
+        isThinking: true,
+      }),
+      observation({ latestAssistantText: 'complete', latestAssistantHash: 'complete-hash' }),
+    ];
+    let now = 0;
+    const onWaitExceeded = vi.fn();
+    const result = await waitForReconciliationOutput({
+      before: observation(),
+      observe: async () => {
+        now += 5 * 60 * 1000 + 1;
+        return outputs.shift()!;
+      },
+      onWaitExceeded,
+      sleep: async () => undefined,
+      now: () => now,
+    });
+
+    expect(result.latestAssistantText).toBe('complete');
+    expect(onWaitExceeded).toHaveBeenCalledOnce();
+  });
+
   it('stops reconciliation polling promptly after the orchestrator is paused', async () => {
     let shouldContinue = true;
     const sleep = vi.fn(async () => {

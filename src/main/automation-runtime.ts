@@ -23,7 +23,12 @@ import { ArchitectureFreezeDownloader } from './architecture/freeze-downloader.j
 import { GitController } from './git/index.js';
 import type { GitBaseline } from './git/types.js';
 import { CodexRunner } from './codex/index.js';
-import { MainOrchestrator, OrchestratorError, type OrchestratorState } from './orchestration/index.js';
+import {
+  MainOrchestrator,
+  OrchestratorError,
+  SOL_WAIT_NOTIFICATION_AFTER_MS,
+  type OrchestratorState,
+} from './orchestration/index.js';
 import type { NotificationService } from './notify/index.js';
 import { SolPromptCompiler, compileSolStageGoalReviewPrompt } from './sol/prompt-compiler.js';
 import { assertFixedGovernanceManifestPath } from './project/config.js';
@@ -57,6 +62,7 @@ export interface ReconciliationOutputWaitOptions {
   observe: () => Promise<EdgeSolObservation>;
   assertRuntimeOperationAllowed?: () => void;
   shouldContinue?: () => boolean;
+  onWaitExceeded?: () => void | Promise<void>;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => number;
 }
@@ -66,6 +72,7 @@ export async function waitForReconciliationOutput({
   observe,
   assertRuntimeOperationAllowed = () => undefined,
   shouldContinue = () => true,
+  onWaitExceeded,
   sleep = (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
   now = () => Date.now(),
 }: ReconciliationOutputWaitOptions): Promise<EdgeSolObservation> {
@@ -74,6 +81,7 @@ export async function waitForReconciliationOutput({
   let lastProgressAt = startedAt;
   let lastHash = beforeHash;
   let lastStatus = before.status;
+  let waitExceededNotified = false;
 
   while (true) {
     if (!shouldContinue())
@@ -108,6 +116,15 @@ export async function waitForReconciliationOutput({
       lastStatus = current.status;
     }
     if (current.status === 'COMPLETED_CANDIDATE' && currentHash !== null && currentHash !== beforeHash) return current;
+
+    if (!waitExceededNotified && currentTime - startedAt >= SOL_WAIT_NOTIFICATION_AFTER_MS) {
+      waitExceededNotified = true;
+      try {
+        await onWaitExceeded?.();
+      } catch {
+        // Notification failures must not interrupt reconciliation polling.
+      }
+    }
 
     const exceededMaxWait = currentTime - startedAt >= GOVERNANCE_RECONCILIATION_MAX_WAIT_MS;
     const exceededIdleWait =
@@ -638,7 +655,9 @@ export async function createAutomationRuntime(
           currentCommit: input.currentCommit,
           taskId: input.taskId,
         });
-        return new RepositoryAccessRecoveryManager({ bindingStore, conversations: conversationPort }).recover({ prompt });
+        return new RepositoryAccessRecoveryManager({ bindingStore, conversations: conversationPort }).recover({
+          prompt,
+        });
       },
     },
     git: guardedGit,
@@ -698,6 +717,7 @@ export async function createAutomationRuntime(
                     observe: () => edge.observe(),
                     assertRuntimeOperationAllowed,
                     shouldContinue: () => orchestrator.getState().active,
+                    onWaitExceeded: () => orchestrator.notifySolWaitExceeded(),
                   });
                   assertRuntimeOperationAllowed();
                   const result = await orchestrator.runGovernanceReconciliation({
