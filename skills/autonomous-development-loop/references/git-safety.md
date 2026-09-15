@@ -28,3 +28,12 @@ For either active push, the expected previous remote tip is the baseline for
 `C` or `C` for `D`: the expected tip permits a safe retry, the local commit
 means success for that phase, another tip refuses overwrite, and an unknown
 tip remains uncertain.
+
+Crash recovery is conservative. With no pending record and `HEAD != B`, ADL
+reconstructs `C` only when `B` is an ancestor, the worktree is clean, the
+current branch and report identity match, the report is `READY_TO_SYNC`, all
+changed paths satisfy policy, and required paths plus the expected remote tip
+are present. With `phase: REPORT_FINALIZATION` and no recorded `D`, ADL
+reconstructs `D` only when `D^ = C`, the worktree is clean, the commit changes
+only the finalized report, and the report is valid and identifies `C`.
+Ambiguous evidence fails closed.

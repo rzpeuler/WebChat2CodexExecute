@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { main, redact } from './lib/cli.mjs';
-import { git, fetchBranch, remoteTip, snapshot } from './lib/git.mjs';
+import { commitParent, commitPaths, git, fetchBranch, isAncestor, remoteTip, snapshot } from './lib/git.mjs';
 import { checkPaths, matchesPath } from './lib/path-policy.mjs';
 import { finalizeTaskReport, validateTaskReport } from './lib/report.mjs';
 
@@ -112,6 +112,80 @@ function remoteOutcome(remote, baseline, local) {
   return 'REMOTE_CHANGED';
 }
 
+function pathsAllowed(paths, input) {
+  const policy = checkPaths(paths, input.protected_paths ?? []);
+  if (!policy.ok) return { ok: false, code: 'PATH_POLICY_REJECTED', message: 'recovered commit paths violate protected or sensitive path policy', details: { policy } };
+  const outsideAllowed = paths.filter((path) => !allowed(path, input.allowed_paths));
+  if (outsideAllowed.length) return { ok: false, code: 'PATH_NOT_ALLOWED', message: 'recovered commit path is outside the explicit allowed set', details: { paths: outsideAllowed } };
+  return { ok: true };
+}
+
+async function recoverImplementationCommit({ repo, input, before }) {
+  if (before.worktree.length) return { ok: false, code: 'CRASH_RECOVERY_AMBIGUOUS', message: 'working tree is not clean; cannot attribute HEAD to the task', details: { paths: before.worktree } };
+  if (!(await isAncestor(repo, input.baseline_head, before.head))) return { ok: false, code: 'CRASH_RECOVERY_NOT_SAFE', message: 'baseline is not an ancestor of current HEAD' };
+  const paths = await commitPaths(repo, input.baseline_head, before.head);
+  const pathPolicy = pathsAllowed(paths, input);
+  if (!pathPolicy.ok) return pathPolicy;
+  const required = [...new Set([input.report_path, ...(input.required_paths ?? [])].map(String))];
+  const missing = required.filter((path) => !paths.some((changed) => matchesPath(changed, path)));
+  if (missing.length) return { ok: false, code: 'CRASH_RECOVERY_REQUIRED_PATH_MISSING', message: 'recovered commit does not contain all required paths', details: { missing, changed_paths: paths } };
+  const reportExists = await git(repo, ['cat-file', '-e', `HEAD:${input.report_path}`], { allowFailure: true });
+  if (!reportExists.ok) return { ok: false, code: 'CRASH_RECOVERY_REPORT_MISSING', message: 'recovered HEAD does not contain the expected task report' };
+  const report = await validateTaskReport({ repo, report_path: input.report_path, task_id: input.task_id, baseline: input.baseline_head, branch: before.branch, phase: 'pre-sync' });
+  if (!report.ok) return { ok: false, code: 'CRASH_RECOVERY_REPORT_INVALID', message: report.message, details: { report } };
+  return {
+    ok: true,
+    pending: {
+      version: 2,
+      phase: IMPLEMENTATION_PUSH,
+      repository_root: before.repository_root,
+      remote_name: input.remote,
+      branch: before.branch,
+      task_id: input.task_id,
+      baseline_head: input.baseline_head,
+      expected_remote_tip: input.baseline_remote_tip ?? null,
+      implementation_commit: before.head,
+      finalization_commit: null,
+      report_path: input.report_path,
+    },
+    changed_paths: paths,
+  };
+}
+
+async function recoverFinalizationCommit({ repo, input, pending, before, implementationCommit }) {
+  if (before.head === implementationCommit) return { ok: false, code: 'FINALIZATION_RECOVERY_NOT_NEEDED', message: 'local HEAD is the implementation commit' };
+  if (!before.clean) return { ok: false, code: 'FINALIZATION_RECOVERY_AMBIGUOUS', message: 'working tree is not clean; cannot attribute HEAD to report finalization', details: { paths: before.worktree } };
+  const parent = await commitParent(repo, before.head);
+  if (parent !== implementationCommit) return { ok: false, code: 'FINALIZATION_RECOVERY_NOT_SAFE', message: 'current HEAD parent is not the implementation commit', details: { parent, implementation_commit: implementationCommit } };
+  const paths = await commitPaths(repo, implementationCommit, before.head);
+  if (paths.length !== 1 || !matchesPath(paths[0], input.report_path))
+    return { ok: false, code: 'FINALIZATION_RECOVERY_PATHS_INVALID', message: 'finalization commit changes more than the permitted report path', details: { paths } };
+  const report = await validateTaskReport({ repo, report_path: input.report_path, task_id: input.task_id, baseline: input.baseline_head, branch: before.branch, phase: 'final' });
+  if (!report.ok || report.fields.implementation_commit !== implementationCommit || report.fields.verified_remote_tip !== implementationCommit)
+    return { ok: false, code: 'FINALIZATION_RECOVERY_REPORT_INVALID', message: report.ok ? 'finalized report does not identify the pending implementation commit' : report.message, details: { report } };
+  return { ok: true, finalization_commit: before.head, paths, pending: { ...pending, finalization_commit: before.head, expected_remote_tip: implementationCommit } };
+}
+
+async function detectCompletedSync({ repo, input, before }) {
+  if (!before.clean || !before.remote_tip_known || before.remote_tip !== before.head) return null;
+  const report = await validateTaskReport({ repo, report_path: input.report_path, task_id: input.task_id, baseline: input.baseline_head, branch: before.branch, phase: 'final' });
+  if (!report.ok || !(await isAncestor(repo, input.baseline_head, before.head))) return null;
+  if (!(await isAncestor(repo, report.fields.implementation_commit, before.head))) return null;
+  if (await commitParent(repo, before.head) !== report.fields.implementation_commit) return null;
+  const paths = await commitPaths(repo, report.fields.implementation_commit, before.head);
+  if (paths.length !== 1 || !matchesPath(paths[0], input.report_path)) return null;
+  return {
+    ok: true,
+    code: 'SYNCED',
+    sync_status: 'SYNCED',
+    implementation_commit: report.fields.implementation_commit,
+    verified_remote_tip: report.fields.verified_remote_tip,
+    finalization_commit: before.head,
+    remote_tip: before.remote_tip,
+    idempotent: true,
+  };
+}
+
 async function pushAndObserve(repo, remote, branch) {
   const pushed = await git(repo, ['push', remote, `HEAD:refs/heads/${branch}`], { allowFailure: true });
   const observed = await remoteTip(repo, remote, branch);
@@ -212,11 +286,18 @@ await main(async (input) => {
   let pending = pendingResult.value;
   const recoveredFromBackup = pendingResult.recovered_from_backup;
   if (pending !== null && !validPending(pending)) return fail('PENDING_PUSH_INVALID', 'pending push state has an unsupported schema', 2, { pending });
-  const isPendingRetry = pending !== null;
-  if (pending !== null && (pending.repository_root !== before.repository_root || pending.branch !== before.branch || pending.task_id !== input.task_id || pending.remote_name !== remote))
+  let isPendingRetry = pending !== null;
+  if (pending !== null && (pending.repository_root !== before.repository_root || pending.branch !== before.branch || pending.task_id !== input.task_id || pending.remote_name !== remote || pending.baseline_head !== input.baseline_head || pending.report_path !== input.report_path))
     return fail('PENDING_PUSH_CONFLICT', 'a different pending push belongs to this repository', 2, { pending });
-  if (!isPendingRetry && before.head !== input.baseline_head)
-    return fail('BASELINE_CHANGED', 'current HEAD differs from baseline_head', 2, { baseline: before });
+  if (!isPendingRetry && before.head !== input.baseline_head) {
+    const completed = await detectCompletedSync({ repo, input: { ...input, remote }, before });
+    if (completed) return completed;
+    const recovered = await recoverImplementationCommit({ repo, input: { ...input, remote }, before });
+    if (!recovered.ok) return fail(recovered.code, recovered.message, 2, recovered.details);
+    pending = recovered.pending;
+    isPendingRetry = true;
+    await writePending(pendingPath, pending);
+  }
   if (input.fetch !== false) await fetchBranch(repo, remote, before.branch);
   const observedBefore = await remoteTip(repo, remote, before.branch);
   if (!observedBefore.known) return fail('REMOTE_UNKNOWN', redact(observedBefore.reason), 22);
@@ -230,8 +311,13 @@ await main(async (input) => {
       return completeFinalization({ repo, input: { ...input, remote }, pending, implementationCommit, finalizationCommit, recoveredFromBackup });
     if (finalizationCommit && before.head !== finalizationCommit)
       return fail('PENDING_PUSH_HEAD_MISMATCH', 'local HEAD differs from pending finalization commit', 2, { pending, head: before.head });
-    if (!finalizationCommit && before.head !== implementationCommit)
-      return fail('PENDING_PUSH_HEAD_MISMATCH', 'local HEAD differs from pending implementation commit', 2, { pending, head: before.head });
+    if (!finalizationCommit && before.head !== implementationCommit) {
+      const recovered = await recoverFinalizationCommit({ repo, input: { ...input, remote }, pending, before, implementationCommit });
+      if (!recovered.ok) return fail(recovered.code, recovered.message, 2, recovered.details);
+      pending = recovered.pending;
+      await writePending(pendingPath, pending);
+      return completeFinalization({ repo, input: { ...input, remote }, pending, implementationCommit, finalizationCommit: recovered.finalization_commit, recoveredFromBackup });
+    }
     return completeFinalization({ repo, input: { ...input, remote }, pending, implementationCommit, finalizationCommit, recoveredFromBackup });
   }
 

@@ -49,6 +49,25 @@ export function parseStatusPaths(output) {
   return [...new Set(paths)];
 }
 
+export function parseNullSeparatedPaths(output) {
+  return [...new Set(output.split('\0').map((path) => path.trim()).filter(Boolean))];
+}
+
+export async function commitPaths(repo, base, head) {
+  const result = await git(repo, ['diff', '--name-only', '-z', `${base}..${head}`]);
+  return parseNullSeparatedPaths(result.stdout);
+}
+
+export async function isAncestor(repo, ancestor, descendant) {
+  const result = await git(repo, ['merge-base', '--is-ancestor', ancestor, descendant], { allowFailure: true });
+  return result.ok;
+}
+
+export async function commitParent(repo, commit) {
+  const result = await git(repo, ['rev-parse', `${commit}^`], { allowFailure: true });
+  return result.ok ? result.stdout.trim() : null;
+}
+
 export async function remoteTip(repo, remote, branch) {
   if (!remote || !branch) return { known: false, tip: null, reason: 'remote or branch is missing' };
   const result = await git(repo, ['ls-remote', remote, `refs/heads/${branch}`], { allowFailure: true });

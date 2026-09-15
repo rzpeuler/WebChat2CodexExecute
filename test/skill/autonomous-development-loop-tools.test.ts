@@ -239,6 +239,51 @@ describe('autonomous development loop deterministic tools', () => {
     await expect(readFile(join(root, 'src.txt'), 'utf8')).resolves.toBe('implemented\n');
   });
 
+  it('reconstructs implementation commit C when a crash occurred before pending state was written', async () => {
+    const fixture = await createPendingFixture();
+    await unlink(fixture.pendingPath);
+    const input = {
+      repo: fixture.root,
+      task_id: 'TASK-PENDING',
+      baseline_head: fixture.baseline,
+      baseline_remote_tip: fixture.baseline,
+      remote: 'origin',
+      branch: 'main',
+      report_path: 'report.md',
+      allowed_paths: ['implementation.txt', 'report.md'],
+      required_paths: ['report.md'],
+    };
+    const result = await runTool('safe-git-sync', input);
+    expect(result.ok).toBe(true);
+    expect(result.code).toBe('SYNCED');
+    expect(result.implementation_commit).toBe(fixture.implementation);
+    await expect(readFile(fixture.pendingPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const headBeforeRerun = await command(fixture.root, ['git', 'rev-parse', 'HEAD']);
+    const rerun = await runTool('safe-git-sync', input);
+    expect(rerun).toMatchObject({ ok: true, code: 'SYNCED', idempotent: true, implementation_commit: fixture.implementation });
+    expect(await command(fixture.root, ['git', 'rev-parse', 'HEAD'])).toBe(headBeforeRerun);
+  });
+
+  it('fails closed when a no-pending HEAD cannot be attributed to the task', async () => {
+    const fixture = await createPendingFixture();
+    await unlink(fixture.pendingPath);
+    await writeFile(join(fixture.root, 'unrelated.txt'), 'ambiguous\n', 'utf8');
+    const result = await runTool('safe-git-sync', {
+      repo: fixture.root,
+      task_id: 'TASK-PENDING',
+      baseline_head: fixture.baseline,
+      baseline_remote_tip: fixture.baseline,
+      remote: 'origin',
+      branch: 'main',
+      report_path: 'report.md',
+      allowed_paths: ['implementation.txt', 'report.md'],
+      required_paths: ['report.md'],
+    });
+    expect(result.code).toBe('CRASH_RECOVERY_AMBIGUOUS');
+    expect(await command(fixture.root, ['git', 'rev-parse', 'HEAD'])).toBe(fixture.implementation);
+  });
+
   it('refuses to overwrite a remote branch that advanced after baseline capture', async () => {
     const parent = await temporaryDirectory();
     const remote = join(parent, 'remote.git');
@@ -297,6 +342,55 @@ describe('autonomous development loop deterministic tools', () => {
     expect(result.ok).toBe(true);
     expect(result.implementation_commit).toBe(fixture.implementation);
     expect(result.code).toBe('SYNCED');
+  });
+
+  it('reconstructs finalization commit D when pending state was not updated after D', async () => {
+    const fixture = await createPendingFixture();
+    await command(fixture.root, ['git', 'push', 'origin', 'main']);
+    await writeFile(join(fixture.root, 'report.md'), taskReport('TASK-PENDING', fixture.baseline, {
+      implementation_commit: fixture.implementation,
+      verified_remote_tip: fixture.implementation,
+      sync_status: 'SYNCED',
+    }), 'utf8');
+    await command(fixture.root, ['git', 'add', '--', 'report.md']);
+    await command(fixture.root, ['git', 'commit', '-m', 'finalize report']);
+    const finalization = await command(fixture.root, ['git', 'rev-parse', 'HEAD']);
+    const pending = JSON.parse(await readFile(fixture.pendingPath, 'utf8')) as Record<string, unknown>;
+    await writeFile(fixture.pendingPath, `${JSON.stringify({ ...pending, phase: 'REPORT_FINALIZATION', expected_remote_tip: fixture.implementation, finalization_commit: null }, null, 2)}\n`, 'utf8');
+    const result = await runTool('safe-git-sync', {
+      repo: fixture.root,
+      task_id: 'TASK-PENDING',
+      baseline_head: fixture.baseline,
+      remote: 'origin',
+      branch: 'main',
+      report_path: 'report.md',
+    });
+    expect(result).toMatchObject({ ok: true, code: 'SYNCED', finalization_commit: finalization });
+    expect(await command(fixture.root, ['git', 'ls-remote', 'origin', 'refs/heads/main'])).toContain(finalization);
+  });
+
+  it('rejects a fake finalization commit with an unrelated path', async () => {
+    const fixture = await createPendingFixture();
+    await command(fixture.root, ['git', 'push', 'origin', 'main']);
+    await writeFile(join(fixture.root, 'report.md'), taskReport('TASK-PENDING', fixture.baseline, {
+      implementation_commit: fixture.implementation,
+      verified_remote_tip: fixture.implementation,
+      sync_status: 'SYNCED',
+    }), 'utf8');
+    await writeFile(join(fixture.root, 'fake.txt'), 'not finalization\n', 'utf8');
+    await command(fixture.root, ['git', 'add', '--', 'report.md', 'fake.txt']);
+    await command(fixture.root, ['git', 'commit', '-m', 'fake finalization']);
+    const pending = JSON.parse(await readFile(fixture.pendingPath, 'utf8')) as Record<string, unknown>;
+    await writeFile(fixture.pendingPath, `${JSON.stringify({ ...pending, phase: 'REPORT_FINALIZATION', expected_remote_tip: fixture.implementation, finalization_commit: null }, null, 2)}\n`, 'utf8');
+    const result = await runTool('safe-git-sync', {
+      repo: fixture.root,
+      task_id: 'TASK-PENDING',
+      baseline_head: fixture.baseline,
+      remote: 'origin',
+      branch: 'main',
+      report_path: 'report.md',
+    });
+    expect(result.code).toBe('FINALIZATION_RECOVERY_PATHS_INVALID');
   });
 
   it('retains pending state when remote remains at B and recovers a valid backup after interrupted write', async () => {
