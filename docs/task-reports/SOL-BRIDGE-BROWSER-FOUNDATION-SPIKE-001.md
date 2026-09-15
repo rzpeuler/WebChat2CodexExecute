@@ -3,9 +3,9 @@ status: READY_FOR_SOL_REVIEW
 baseline: e74a6a204af811ba390a77020d84e97a23af1b98
 architecture_baseline: 60df5440fc659ad2d8d8dd2058e178a57850fe10
 branch: feat/adl-sol-bridge-v1.1
-implementation_commit: pending
-verified_remote_tip: pending
-sync_status: READY_TO_SYNC
+implementation_commit: 7ececd29fd9b9dcdc26a345cfd7c7ec9393ab63e
+verified_remote_tip: 7ececd29fd9b9dcdc26a345cfd7c7ec9393ab63e
+sync_status: SYNCED
 summary: Compared W2C custom CDP, Playwright Direct, and Playwright over CDP using one isolated Edge fixture plus real ChatGPT read-only probes. Selected Playwright Direct as the browser foundation and retained W2C Sol-specific policy outside the browser driver.
 changes: Added an isolated spikes/sol-bridge-browser-foundation harness and fixture, added temporary Playwright 1.63.0 development dependency, and documented the weighted comparison and migration impact. No production Sol Bridge code or old W2C runtime was changed.
 tests: passed
