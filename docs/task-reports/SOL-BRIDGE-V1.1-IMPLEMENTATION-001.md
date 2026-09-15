@@ -2,9 +2,9 @@ task_id: SOL-BRIDGE-V1.1-IMPLEMENTATION-001
 status: BLOCKED
 baseline: 60df5440fc659ad2d8d8dd2058e178a57850fe10
 branch: feat/adl-sol-bridge-v1.1
-implementation_commit: pending
-verified_remote_tip: pending
-sync_status: READY_TO_SYNC
+implementation_commit: dad981f8e7ddb246244511d606f01ff9c5f2cc0c
+verified_remote_tip: dad981f8e7ddb246244511d606f01ff9c5f2cc0c
+sync_status: SYNCED
 summary: Implemented the frozen V1.1 Sol Bridge as a standalone standard-library ESM package inside sol-engineering-loop. Deterministic browser identity, bounded read observation, outbound pending-delivery recovery, and minimal crash-safe local persistence are covered by focused tests. Real bind/read/send dogfood is blocked by the dedicated Edge profile requiring manual ChatGPT login.
 changes: Added scripts/sol-bridge with ensure, bind, read, send, status and isolated CDP, profile, capture, binding, security, conversation, and atomic I/O modules. Updated the cross-project Skill routing without changing ADL Core or W2C runtime code.
 tests: passed
