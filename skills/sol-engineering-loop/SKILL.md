@@ -15,6 +15,12 @@ This Skill is cross-project and contributes no project-specific rules. Read the
 target repository's active governance, toolchain, architecture constraints,
 protected paths, and project state before making decisions.
 
+The final package is `sol-engineering-loop`. It contains the ADL Core and the
+optional Sol Bridge. The Bridge is a deterministic transport boundary for a
+dedicated Microsoft Edge localhost-CDP profile; it has no dependency on the
+WebChat2CodexExecute runtime, Electron, Edge CDP session objects, Writing
+Blocks, or screen/focus state.
+
 ## Role boundary
 
 Sol owns product direction, architecture decisions, governance decisions, task
@@ -45,6 +51,31 @@ decide product intent, architecture, task completion, or governance authority.
 7. Run the deterministic checks and `safe-git-sync`.
 8. Stop at `READY_FOR_SOL_REVIEW`, `BLOCKED`, or
    `FAILED_UNRECOVERABLE`. Do not invent the next top-level task.
+
+## Sol Bridge routing
+
+When a task requires Sol I/O, Luna remains the only workflow owner. The Bridge
+only exposes `ensure`, `bind`, `read`, `send`, and `status` through
+`scripts/sol-bridge/sol-bridge.mjs` and enforces browser identity, stable DOM
+capture, bounded polling, and transport recovery. It never interprets task
+meaning, acknowledges a task, owns a planner, or decides acceptance.
+
+Use the loop in this order when Sol I/O is needed:
+
+1. `ensure` the owned Edge/CDP environment and handle manual login.
+2. `bind` one fully identified Project/account/conversation target.
+3. `read` ordinary text using an explicit `after_hash` and bounded `wait_ms`.
+   Reading is observation only; it is never message consumption.
+4. Interpret and execute the Sol task through ADL Core and the target
+   repository's governance.
+5. Validate, sync, verify the GitHub/remote durable truth, then use `send` for
+   a compact review notification if required. A pending send is recovered by
+   transport evidence and is never automatically resent when ambiguous.
+6. Persist `last_observed_assistant_hash` only as a diagnostics/polling hint.
+
+Bridge state is local transport material only. Workflow truth remains in the
+repository task report, `CURRENT_STATUS`, `IMPLEMENTATION_HISTORY`, and Git.
+Do not add a second Planner, daemon, scheduler, or orchestration layer.
 
 ## Blocker boundary
 
