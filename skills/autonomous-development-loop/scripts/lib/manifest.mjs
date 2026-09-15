@@ -174,6 +174,14 @@ export async function validateGovernance(input) {
   }
   if (missingFiles.length)
     return { ...result, code: 'GOVERNANCE_DOCUMENT_MISSING_OR_UNSAFE', message: `missing or unsafe documents: ${missingFiles.join(', ')}` };
+  const forbiddenTimeFields = [];
+  for (const document of manifest.documents) {
+    const source = await readFile(resolve(repo, document.path), 'utf8');
+    const match = source.match(/^\s*(ETA|estimated_duration|predicted_completion|planned_start_time)\s*:/im);
+    if (match) forbiddenTimeFields.push(`${document.path}: ${match[1]}`);
+  }
+  if (forbiddenTimeFields.length)
+    return { ...result, code: 'GOVERNANCE_TIME_FIELD_FORBIDDEN', message: `future time fields are forbidden: ${forbiddenTimeFields.join(', ')}` };
   const required = input.required_documents ?? [
     'CURRENT_STATUS.md',
     'PROJECT_EXECUTION_PLAN.md',

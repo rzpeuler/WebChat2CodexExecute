@@ -4,8 +4,9 @@ task_id: TASK-...
 status: READY_FOR_SOL_REVIEW
 baseline: 0000000000000000000000000000000000000000
 branch: main
-final_commit: pending
-remote_verified: false
+implementation_commit: pending
+verified_remote_tip: pending
+sync_status: READY_TO_SYNC
 summary:
 tests:
 acceptance_criteria:

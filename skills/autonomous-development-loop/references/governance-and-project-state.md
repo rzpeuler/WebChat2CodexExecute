@@ -7,6 +7,17 @@ authoritative, use `docs/governance/governance-manifest.yaml` as the default
 bootstrap convention. Do not treat a normal README as authoritative merely
 because it exists.
 
+Apply exactly one adoption case:
+
+- No governance: inspect the repository, propose the minimal compatible
+  governance entry point, and bootstrap only when the task or authority allows
+  it. Do not invent product policy.
+- Compatible governance: preserve the existing entry point and rules; register
+  only missing ADL evidence or ledger documents that the project accepts.
+- Conflicting governance: identify the authoritative rule and exact conflict,
+  preserve unrelated project content, and stop the conflicting change when no
+  authority resolves it.
+
 Preserve compatible project rules. For conflicts, identify authority, preserve
 non-conflicting content, update only stale rules, revise the manifest/changelog,
 update the canonical Sol prompt if needed, and validate. Never replace a whole

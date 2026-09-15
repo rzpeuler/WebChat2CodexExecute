@@ -121,10 +121,11 @@ Receive Sol Task
 → Decompose internally
 → Implement / test / debug / recover
 → Validate acceptance criteria and scope
-→ Write task report and factual ledger updates
+→ Write a READY_TO_SYNC task report and factual ledger updates
 → Run deterministic safety checks
-→ Commit and push through safe-git-sync
-→ Verify remote commit
+→ Create and push implementation commit C through safe-git-sync
+→ Verify remote C
+→ Finalize the report in a separate commit D and verify remote D
 → READY_FOR_SOL_REVIEW
 ```
 
@@ -165,13 +166,15 @@ state.
 
 ## Frozen uncertain-push semantics
 
-For local commit `C` and baseline remote `B`:
+For implementation commit `C` and baseline remote `B`, the first push uses
+`B` as its expected previous tip. After `C` is verified, report finalization
+creates commit `D` and the second push uses `C` as its expected previous tip:
 
 | Observed remote | Meaning | Required result |
 |---|---|---|
-| `C` | Push succeeded | Synchronized success; clear pending record |
-| `B` | Push did not take effect | Retryable push state; retain local commit and pending record |
-| neither `B` nor `C` | Independent remote advance/divergence | Refuse overwrite; require inspect/integrate or block |
+| local phase commit | Push succeeded | Advance to the next phase; clear pending only after finalization commit is verified |
+| expected previous tip | Push did not take effect | Retryable push state; retain local commit and pending record |
+| neither expected tip nor phase commit | Independent remote advance/divergence | Refuse overwrite; require inspect/integrate or block |
 | unknown | Outcome cannot be verified | Preserve uncertain state; do not claim success |
 
 The pending record is local recovery material and must never be staged as a
@@ -186,10 +189,16 @@ validation, protected constraints, expected artifacts, risks, and blocking
 conditions.
 
 The durable Task Report records facts and evidence, including task identity,
-status, baseline, branch, commit, tests, acceptance evidence, decisions,
-debugging summary, risks, governance status, scope deviations, blockers, and
-input-quality feedback. It never records private reasoning or full command
-transcripts.
+status, baseline, branch, implementation commit, verified remote tip, sync
+status, tests, acceptance evidence, decisions, debugging summary, risks,
+governance status, scope deviations, blockers, and input-quality feedback. A
+pre-sync report uses `implementation_commit: pending`,
+`verified_remote_tip: pending`, and `sync_status: READY_TO_SYNC`. The verified
+final report records `implementation_commit: C`,
+`verified_remote_tip: C`, and `sync_status: SYNCED`. It does not record the
+report-finalization commit D because that would require a self-referential
+commit hash. The current remote HEAD is the remote branch tip returned by Git.
+The report never records private reasoning or full command transcripts.
 
 Completion statuses are:
 
@@ -221,4 +230,3 @@ Any change to ownership, package portability, governance separation, tool
 responsibilities, uncertain-push semantics, or V1 non-goals requires a new
 architecture decision and a new freeze revision. Normal implementation detail,
 test additions, and narrow tool hardening do not reopen this freeze.
-

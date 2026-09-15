@@ -16,6 +16,15 @@ Never force-push, reset destructively, rewrite shared history, or commit
 credentials by default. A remote advance must be inspected and integrated or
 reported as a blocker.
 
-The tool's uncertain-push result is based on local commit `C` and baseline
-remote `B`: remote `C` means success, remote `B` permits a safe retry, another
-remote tip refuses overwrite, and an unknown tip remains uncertain.
+The tool uses two commits without self-reference. Implementation commit `C`
+contains the ready-to-sync report. After remote `C` is verified, a separate
+report-finalization commit `D` records `implementation_commit: C`,
+`verified_remote_tip: C`, and `sync_status: SYNCED`; the remote HEAD is `D`.
+The report does not record `D` because that would require a self-referential
+commit hash. The pending record tracks the active phase and both commits, but
+is never staged as a project change.
+
+For either active push, the expected previous remote tip is the baseline for
+`C` or `C` for `D`: the expected tip permits a safe retry, the local commit
+means success for that phase, another tip refuses overwrite, and an unknown
+tip remains uncertain.

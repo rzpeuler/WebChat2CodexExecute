@@ -260,10 +260,10 @@ agent's workflow owner. It must:
 4. compare the expected remote tip;
 5. detect protected and sensitive paths;
 6. confirm required report and operational-state changes;
-7. create the requested commit;
-8. push without force or history rewriting;
-9. fetch again;
-10. verify that the remote branch equals the pushed commit;
+7. create implementation commit `C` with a `READY_TO_SYNC` report;
+8. push `C` without force or history rewriting and verify remote `C`;
+9. finalize the report in a separate commit `D` with the verified `C` facts;
+10. push `D` without force and verify the remote branch equals `D`;
 11. return a machine-readable result with redacted diagnostics.
 
 Luna decides when the task is complete, which changes are reasonable, and how
@@ -301,8 +301,9 @@ status
 objective
 baseline
 branch
-final_commit
-remote_verified
+implementation_commit
+verified_remote_tip
+sync_status
 summary
 changes
 tests
@@ -325,7 +326,7 @@ not private reasoning or complete shell transcripts.
 
 ## V1 acceptance scenarios
 
-The later implementation must validate at least:
+The V1 implementation validates at least:
 
 1. a normal bounded task completes without routine confirmation;
 2. compile, typecheck, and test failures trigger autonomous diagnosis;
@@ -338,7 +339,9 @@ The later implementation must validate at least:
 9. remote advancement is never overwritten;
 10. uncertain push outcomes follow the `B`/`C` semantics above;
 11. interruption resumes from repository facts and durable reports;
-12. completion stops at `READY_FOR_SOL_REVIEW` and does not invent the next task.
+12. successful synchronization leaves the finalized report recoverable from the
+    remote branch tip;
+13. completion stops at `READY_FOR_SOL_REVIEW` and does not invent the next task.
 
 ## V1 non-goals
 
@@ -347,23 +350,39 @@ Edge/CDP dependency, Writing Block parser, task database, scheduler, daemon,
 second Planner, multi-agent orchestration, or direct ChatGPT Project prompt
 mutation.
 
-## Design-stage open decisions
+## Decision classification after V1 freeze
 
-Before implementation, the architecture owner must decide:
+### FROZEN
 
-1. the final installation location for the Skill package and whether it is
-   personal-only or repository-distributed;
-2. the implementation language for the deterministic scripts on Windows;
-3. whether `safe-git-sync` uses a shared library plus CLI wrappers or one
-   standalone executable with strictly separated subcommands;
-4. the exact minimal governance manifest schema for ADL revisions;
-5. whether adoption bootstrap commits ledger files in the same commit as
-   governance or as a separate commit;
-6. the default policy for pushing operational ledger updates together with code.
+- The package source is `skills/autonomous-development-loop/`; installation is
+  a separate packaging action.
+- Deterministic tools are Node.js 20+ ESM `.mjs` scripts using the standard
+  library, explicit JSON I/O, positional Git arguments, and stable results.
+- Sol owns product, architecture, governance, task scope, and acceptance;
+  Luna owns the engineering loop; tools enforce safety facts only.
+- An explicit authoritative governance entry point is preserved; the default
+  bootstrap convention is `docs/governance/governance-manifest.yaml`.
+- Implementation commit `C` is pushed and verified before a separate report
+  finalization commit `D`; the report records `C` and the verified tip `C`, not
+  `D`, so no report/Git self-reference is created.
+- Pending recovery distinguishes expected previous tip, local commit, remote
+  divergence, and unknown remote state; force push and silent overwrite remain
+  forbidden.
 
-The governance entry-point rule is already decided: preserve an explicit,
-safe, authoritative project convention; otherwise use
-`docs/governance/governance-manifest.yaml` as the default bootstrap location.
+### IMPLEMENTATION_DETAIL
 
-These choices do not change the core boundary: Luna owns engineering judgment,
-tools enforce deterministic safety, and GitHub stores durable truth.
+- Personal versus repository distribution is a packaging choice outside the
+  runtime contract.
+- The shared `scripts/lib/` modules and CLI wrappers implement the frozen tool
+  responsibilities.
+- The minimal manifest fields, adoption bootstrap commit grouping, and the
+  target project's policy for co-committing ledger updates are configurable
+  repository details.
+- The pending JSON record and its Windows-safe atomic replacement/backup
+  fallback are local recovery details.
+
+### STILL_REQUIRES_ARCHITECTURE_DECISION
+
+None for V1. Any change to ownership, portability, governance separation, tool
+responsibilities, two-commit report finalization, or uncertain-push semantics
+requires a new architecture decision and freeze revision.
