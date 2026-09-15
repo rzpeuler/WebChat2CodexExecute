@@ -1,10 +1,10 @@
 # Sol Bridge — W2C Capability Extraction Mapping
 
-Status: Final architecture amendment complete; ready for V1.1 architecture freeze
+Status: V1.1 ARCHITECTURE FROZEN
 Date: 2026-09-15
 Source repository: `WebChat2CodexExecute`
 V1.1 branch: `feat/adl-sol-bridge-v1.1`
-V1.1 design base: `91f5cf2e2d476b1de6affe8e98355cd60844d0bc`
+V1.1 design base: `6fd0cf3f604bb28d852dcc19739b03594ba50d04`
 
 ## Purpose and boundary
 
@@ -160,6 +160,23 @@ repository facts: the task report, `CURRENT_STATUS`,
 crashes after reading Sol, the next run may observe the same output again; it
 must not silently discard it because a local hash was updated.
 
+The frozen invariant is:
+
+> Reading a Sol message does not acknowledge or consume it.
+
+Outbound and inbound guarantees are deliberately asymmetric:
+
+```text
+Sol → Luna
+at-least-once observation
++ idempotent execution
+
+Luna → Sol
+persist intent before send
++ prove transport transition
++ never auto-resend ambiguous delivery
+```
+
 ## Bounded `read --after` semantics
 
 The Bridge has two distinct read modes.
@@ -276,6 +293,7 @@ version
 conversation identity
 message_hash
 delivery_key
+pre_send_latest_user_hash
 created_at
 ```
 
@@ -285,7 +303,9 @@ state, acceptance state, Git state, or a durable project artifact.
 The send transaction is:
 
 ```text
-persist pending delivery intent
+revalidate binding
+→ capture latest user-message transport state
+→ persist pending delivery intent including pre-send baseline
 → submit message
 → confirm composer/assistant delivery evidence
 → clear pending delivery record
@@ -293,15 +313,24 @@ persist pending delivery intent
 
 If the process crashes after submission but before confirmation state is
 persisted, the next Bridge invocation must reload the pending record, revalidate
-the bound origin, Project, account, and conversation, and capture only the
+the origin, Project, account, and conversation, and capture only the current
 latest bound-conversation user text/hash as transport evidence.
 
-If that latest user message matches the pending `message_hash`, return
-`MESSAGE_ALREADY_DELIVERED` and clear the pending record. If delivery cannot be
-proven, return `SEND_UNCONFIRMED` and do not automatically send the text again.
-While unresolved, `send` must not bypass the pending record by submitting
-another message. The Bridge never parses the message as a task or decides
-whether Luna should continue.
+The minimum proof rule is a post-intent transport transition, not content
+equality alone:
+
+| Recovery case | Evidence | Result |
+|---|---|---|
+| A — message appeared | `current_latest_user_hash == message_hash` and `pre_send_latest_user_hash != message_hash` | Return `MESSAGE_ALREADY_DELIVERED`; clear pending |
+| B — still pre-send state | `current_latest_user_hash == pre_send_latest_user_hash` and `current_latest_user_hash != message_hash` | Return `SEND_UNCONFIRMED`; retain pending; never auto-resend |
+| C — identical pre-existing content | `pre_send_latest_user_hash == message_hash` | Return `SEND_UNCONFIRMED`; hash alone cannot prove a new message |
+| D — unexpected later content | Current hash is neither the pre-send baseline nor the pending message hash | Return `SEND_UNCONFIRMED`; do not overwrite, guess, or auto-resend |
+
+If a stronger, validated user-message identity is available, it may supplement
+the hash proof. V1.1 does not require a DOM sequence database, message ledger,
+or new state machine. While unresolved, `send` must not bypass the pending
+record by submitting another message. The Bridge never parses the message as a
+task or decides whether Luna should continue.
 
 ## Multiple live targets
 
@@ -338,11 +367,14 @@ The new Bridge tests must prove:
   still `H`;
 - no-change and unstable-new-output deadlines return different codes;
 - a crash after read does not mark a Sol Task consumed;
+- send persists `pre_send_latest_user_hash` before submission;
 - a crash after send and before confirmation persistence recovers the pending
   delivery;
-- an already visible matching latest user message returns
-  `MESSAGE_ALREADY_DELIVERED` without a duplicate send;
-- an unresolved pending delivery returns `SEND_UNCONFIRMED` without a retry;
+- the four pending-delivery cases distinguish a real post-intent transition,
+  pre-send state, identical pre-existing content, and unexpected later content;
+- only a proven transition returns `MESSAGE_ALREADY_DELIVERED` without a
+  duplicate send;
+- every ambiguous pending delivery returns `SEND_UNCONFIRMED` without a retry;
 - ambiguous multi-target bind returns `BINDING_AMBIGUOUS`;
 - the renamed package retains all ADL V1 tests and tools.
 

@@ -1,10 +1,10 @@
 # Sol Bridge — V1.1 Design
 
-Status: READY_FOR_V1.1_ARCHITECTURE_FREEZE
+Status: V1.1 ARCHITECTURE FROZEN
 Date: 2026-09-15
 Skill: `sol-engineering-loop`
 Branch: `feat/adl-sol-bridge-v1.1`
-Design base: `91f5cf2e2d476b1de6affe8e98355cd60844d0bc`
+Design base: `6fd0cf3f604bb28d852dcc19739b03594ba50d04`
 
 ## 1. Goal
 
@@ -273,6 +273,25 @@ acknowledgement or consumption. The exact `read --after` contract is:
 The Bridge never waits indefinitely and never decides whether the text is a
 task, review, correction, or acceptance.
 
+The formal observation invariant is:
+
+> Reading a Sol message does not acknowledge or consume it.
+
+`last_observed_assistant_hash` is limited to diagnostics, polling optimization,
+and dedupe hints. It cannot determine whether a Sol Task was safely executed.
+The corresponding directional guarantees are:
+
+```text
+Sol → Luna
+at-least-once observation
++ idempotent execution
+
+Luna → Sol
+persist intent before send
++ prove transport transition
++ never auto-resend ambiguous delivery
+```
+
 The persisted hint is named `last_observed_assistant_hash`. It is used only for
 diagnostics, polling optimization, and dedupe hints. It is not task-consumption
 state. The required semantics are at-least-once Sol observation plus
@@ -292,12 +311,14 @@ Input contains text and may include expected identity fields. The operation is:
 
 ```text
 load local binding
-→ ensure live allowed target
-→ verify Project/account/conversation identity
+→ revalidate origin/Project/account/conversation binding
+→ capture latest user-message transport baseline
+→ persist pending delivery intent including pre-send baseline
 → locate usable composer
 → insert text
 → locate and click submit
 → confirm composer cleared or observable assistant/submission change
+→ clear pending delivery record
 ```
 
 Success:
@@ -325,6 +346,7 @@ version
 conversation identity
 message_hash
 delivery_key
+pre_send_latest_user_hash
 created_at
 ```
 
@@ -338,14 +360,25 @@ persist pending delivery intent
 ```
 
 If a process crashes after submission but before confirmation persistence, the
-next invocation reloads the record, revalidates the bound conversation, and
-captures only the latest bound-conversation user text/hash. If it matches the
-pending `message_hash`, return `MESSAGE_ALREADY_DELIVERED` and clear the
-record. If it cannot be proven, return `SEND_UNCONFIRMED` and do not send the
-message again automatically. While the pending delivery remains unresolved,
-`send` must not bypass it by submitting another message; it returns
-`SEND_UNCONFIRMED` until an explicit recovery decision clears the record. This
-evidence path never parses task semantics.
+next invocation reloads the record, revalidates origin, Project, account, and
+conversation, and captures only the current latest bound-conversation user
+text/hash. Matching content alone is insufficient when the same content was
+already present before the send intent.
+
+The minimum recovery proof is:
+
+| Case | Evidence | Result |
+|---|---|---|
+| A — normal recovery | `current_latest_user_hash == pending.message_hash` and `pending.pre_send_latest_user_hash != pending.message_hash` | `MESSAGE_ALREADY_DELIVERED`; clear pending |
+| B — crash before actual send | `current_latest_user_hash == pending.pre_send_latest_user_hash` and `current_latest_user_hash != pending.message_hash` | `SEND_UNCONFIRMED`; retain pending; no automatic resend |
+| C — identical-message ambiguity | `pending.pre_send_latest_user_hash == pending.message_hash` | `SEND_UNCONFIRMED`; never infer a new message from hash equality |
+| D — unexpected later user message | Current hash is neither the pre-send baseline nor the pending message hash | `SEND_UNCONFIRMED`; do not overwrite, guess, or resend |
+
+An independently validated user-message DOM identity or monotonic transport
+evidence may strengthen the proof, but is not a V1.1 architecture dependency.
+V1.1 does not add a DOM sequence database, message ledger, or state machine.
+While unresolved, `send` must not bypass the pending record by submitting
+another message. This evidence path never parses task semantics.
 
 ### `status`
 
@@ -592,7 +625,7 @@ V1.1 does not add:
 
 ## 11. Final V1.1 architecture decisions
 
-The following decisions are closed and ready to freeze:
+The following decisions are frozen:
 
 - `autonomous-development-loop` evolves into `sol-engineering-loop` as an
   architecture revision, with one final Skill containing ADL Core plus Sol
@@ -612,10 +645,13 @@ The following decisions are closed and ready to freeze:
   hint; Luna uses durable repository evidence for idempotent execution.
 - `read --after` is bounded and distinguishes no-change from unstable-new-
   output deadlines.
-- `send` persists a local pending delivery intent before submission and never
-  automatically resends an unresolved delivery.
-- A matching latest user message resolves pending delivery as
-  `MESSAGE_ALREADY_DELIVERED`.
+- `send` follows `revalidate → capture pre-send user state → persist pending
+  intent → submit → confirm → clear`; the pending record includes
+  `pre_send_latest_user_hash`.
+- Pending recovery returns `MESSAGE_ALREADY_DELIVERED` only when the current
+  latest user hash equals `message_hash` and differs from the pre-send hash.
+- Pending recovery returns `SEND_UNCONFIRMED` for pre-send state, identical
+  pre-existing content, or unexpected later content, with no automatic resend.
 - `bind` fails closed with `BINDING_AMBIGUOUS` when live targets cannot be
   uniquely identified.
 - V1.1 targets owned Microsoft Edge plus localhost CDP on Windows.
@@ -630,11 +666,9 @@ The following decisions are closed and ready to freeze:
 - Poll interval, timeout defaults, and WebSocket cleanup mechanics.
 - Whether the isolated hidden-window adapter is needed after real dogfood.
 
-### STILL REQUIRES ARCHITECTURE DECISION
+### STILL_REQUIRES_ARCHITECTURE_DECISION
 
-None within the stated V1.1 scope. The design is ready for explicit V1.1
-architecture freeze; implementation remains prohibited until that freeze is
-accepted.
+STILL_REQUIRES_ARCHITECTURE_DECISION: None
 
 ## 12. Architecture amendment closure
 
@@ -643,22 +677,24 @@ accepted.
 | A. Skill rename/migration | One final `sol-engineering-loop` retains ADL Core and adds Sol Bridge; old package paths are migrated and not retained as a second Skill. | Closed |
 | B. Bounded `read --after` | No-wait unchanged hash returns `NO_NEW_ASSISTANT_OUTPUT`; bounded wait polls; no-change and unstable-new-output deadlines are distinct. | Closed |
 | C. Observation versus consumption | Reading is not acknowledgement or consumption; `last_observed_assistant_hash` is only a hint; Luna uses durable repository evidence and idempotent execution. | Closed |
-| D. Outbound delivery recovery | Persist pending intent before send; verify latest bound-conversation user hash after crash; return `MESSAGE_ALREADY_DELIVERED` or `SEND_UNCONFIRMED` without automatic duplicate send. | Closed |
+| D. Outbound delivery recovery | Persist pending intent with `pre_send_latest_user_hash` before send; prove a post-intent transition; return `MESSAGE_ALREADY_DELIVERED` only for Case A and `SEND_UNCONFIRMED` for Cases B–D without automatic duplicate send. | Closed |
 | E. Multiple targets | Bind only with explicit disambiguation or one complete identity match; otherwise `BINDING_AMBIGUOUS`. | Closed |
 | F. Regression coverage | The listed read, delivery, binding, rename-retention, and full ADL V1 tests are mandatory implementation gates. | Closed as a requirement |
 
 No architecture issue remains open within the stated V1.1 scope.
 
-## 13. Acceptance gate before coding
+## 13. Post-freeze implementation gate
 
-Coding may begin only after review confirms:
+Implementation may now begin under these frozen gates:
 
 1. the integrated Skill boundary is correct;
 2. GitHub is the mandatory Sol project-information channel;
 3. Bridge/Luna/ADL/GitHub ownership is unambiguous;
 4. no Writing Block or W2C runtime dependency is hidden in the extraction;
 5. CLI and local-binding contracts are sufficient for deterministic tests;
-6. the real Sol → Luna → GitHub → Sol flow is a required final gate.
+6. the real Sol → Luna → GitHub → Sol flow is a required final gate;
+7. the four pending-delivery recovery cases and rename-retention tests are
+   implemented before V1.1 completion.
 
-This document is the V1.1 design artifact. It does not itself implement the
+This document freezes the V1.1 architecture. It does not itself implement the
 Bridge or modify the existing W2C runtime.
