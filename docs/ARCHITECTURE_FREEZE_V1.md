@@ -45,7 +45,7 @@ browser transport, or multi-agent workflow is introduced.
 The canonical, versioned Skill source is:
 
 ```text
-skills/autonomous-development-loop/
+skills/sol-engineering-loop/
 ```
 
 This repository is the distribution source for the package. Installing the

@@ -2,7 +2,7 @@
 
 Status: Design-stage proposal  
 Date: 2026-09-15  
-Skill name: `autonomous-development-loop`  
+Skill name: `sol-engineering-loop`
 Executor: Codex GPT-5.6 Luna, reasoning `medium`
 
 ## Goal
@@ -80,7 +80,7 @@ acceptance authority.
 ## Proposed file tree
 
 ```text
-autonomous-development-loop/
+sol-engineering-loop/
 ├── SKILL.md
 ├── references/
 │   ├── sol-task-authoring-guide.md
@@ -365,7 +365,7 @@ mutation.
 
 ### FROZEN
 
-- The package source is `skills/autonomous-development-loop/`; installation is
+- The package source is `skills/sol-engineering-loop/`; installation is
   a separate packaging action.
 - Deterministic tools are Node.js 20+ ESM `.mjs` scripts using the standard
   library, explicit JSON I/O, positional Git arguments, and stable results.

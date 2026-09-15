@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 const execFile = promisify(execFileCallback);
 const workspace = resolve(import.meta.dirname, '..', '..');
-const tools = join(workspace, 'skills', 'autonomous-development-loop', 'scripts');
+const tools = join(workspace, 'skills', 'sol-engineering-loop', 'scripts');
 const temporaryDirectories: string[] = [];
 
 async function command(cwd: string, args: string[]): Promise<string> {
@@ -112,7 +112,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-describe('autonomous development loop deterministic tools', () => {
+describe('Sol engineering loop deterministic tools', () => {
   it('rejects protected and sensitive paths while allowing ordinary paths', async () => {
     await temporaryDirectory();
     const result = await runTool('check-protected-paths', { paths: ['src/app.ts', '.git/config', '.env.local'] });

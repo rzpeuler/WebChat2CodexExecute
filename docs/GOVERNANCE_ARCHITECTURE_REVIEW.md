@@ -2,7 +2,7 @@
 
 Status: Design-stage analysis only  
 Date: 2026-09-15  
-Target: `autonomous-development-loop`
+Target: `sol-engineering-loop`
 
 ## Review objective
 

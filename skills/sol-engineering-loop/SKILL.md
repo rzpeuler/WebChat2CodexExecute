@@ -1,11 +1,11 @@
 ---
-name: autonomous-development-loop
+name: sol-engineering-loop
 description: Execute an approved Sol engineering task in any Git repository through autonomous inspection, implementation, testing, recovery, reporting, and safe commit/push. Read target-project governance first; do not use this for product ideation, browser automation, or unconstrained work.
 metadata:
   short-description: Autonomous, evidence-driven Git task execution
 ---
 
-# Autonomous Development Loop
+# Sol Engineering Loop
 
 Use this Skill when an approved, bounded Sol task must be carried through a
 complete engineering loop in a Git repository. The default executor is Codex
