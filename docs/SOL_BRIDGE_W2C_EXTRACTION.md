@@ -1,10 +1,10 @@
 # Sol Bridge — W2C Capability Extraction Mapping
 
-Status: Inspect and capability mapping complete; design-stage artifact only
+Status: Final architecture amendment complete; ready for V1.1 architecture freeze
 Date: 2026-09-15
 Source repository: `WebChat2CodexExecute`
 V1.1 branch: `feat/adl-sol-bridge-v1.1`
-V1.1 design base: `1a6c495f644eb967cbf2e51529b7f3c42e83725b`
+V1.1 design base: `91f5cf2e2d476b1de6affe8e98355cd60844d0bc`
 
 ## Purpose and boundary
 
@@ -17,6 +17,38 @@ purpose is to let Codex/Luna communicate with Sol through a Web Chatbot while
 using GitHub as Sol's durable project-information channel. The Skill remains
 usable for arbitrary Git repositories: project-specific governance, commands,
 paths, and acceptance rules continue to come from the target repository.
+
+V1.1 is an architecture revision of the accepted V1 Skill identity:
+
+```text
+autonomous-development-loop → sol-engineering-loop
+```
+
+There is one final Skill, not two overlapping Skills. The final package
+contains both the retained ADL Core and the new Sol Bridge. The rename is not a
+replacement of the ADL Core and does not authorize rewriting its accepted
+contracts or deterministic tools.
+
+## V1 Skill migration
+
+The migration is a whole-package identity migration:
+
+1. Rename the canonical source directory from
+   `skills/autonomous-development-loop/` to `skills/sol-engineering-loop/`.
+2. Update `SKILL.md` frontmatter and all documentation, tests, references,
+   templates, and script paths to the new name.
+3. Keep every V1 ADL reference, template, and deterministic
+   Git/governance/report tool in the final package.
+4. Add only the V1.1 Sol I/O capability under
+   `skills/sol-engineering-loop/scripts/sol-bridge/`.
+5. Remove the old source and installed paths after migration; do not retain a
+   second discoverable Skill with overlapping behavior.
+6. Do not rewrite or re-scope the accepted ADL Core to accommodate the Bridge.
+
+The migration changes package identity and routing only. Luna remains the
+workflow owner; deterministic tools remain safety/evidence enforcement; the
+existing V1 Git finalization, governance, report, and recovery semantics stay
+intact.
 
 The target responsibility boundary is:
 
@@ -71,7 +103,7 @@ documents are the local architecture evidence for this design phase.
 | `edge/profile.ts` / executable discovery | `EXTRACT` | Retain explicit Edge executable validation and Windows discovery. | `browser-profile.mjs` |
 | `edge/profile.ts` / dedicated profile and ownership | `EXTRACT WITH MINIMAL LIFECYCLE` | Retain dedicated user-data directory, remote debugging port, ownership token, persistent login profile, owned-process reuse, ownership verification, bounded startup, and process-exit invalidation. | `browser-profile.mjs` and `ensure` command |
 | `edge/profile.ts` / window controller calls | `OPTIONAL ISOLATED ADAPTER` | Hidden/background operation is required as a capability, but PowerShell/User32 window manipulation is not part of the Bridge contract. Do not import Electron lifecycle or focus-stealing behavior. | Keep behind a narrow platform adapter only if needed by real dogfood |
-| `edge/session-binding.ts` / identity binding | `EXTRACT WITH REDUCTION` | Retain persistent Project, account, conversation, URL, identity evidence, and last-seen assistant hash. Revalidate identity on every read/send. | `binding.mjs` |
+| `edge/session-binding.ts` / identity binding | `EXTRACT WITH REDUCTION` | Retain persistent Project, account, conversation, URL, identity evidence, and `last_observed_assistant_hash`. Revalidate identity on every read/send. | `binding.mjs` |
 | `edge/session-binding.ts` / raw input and recovery fields | `DELETE FROM BINDING` | Do not persist raw Sol messages, context-recovery attempts, rotation keys, pause state, or workflow status in Bridge state. | Luna and repository report/ledger own those facts |
 | `edge/session-rotation.ts` | `DEFER` | Do not port the rotation state machine or automatic replacement conversation flow. | Structured `CONTEXT_LIMIT` / `SESSION_MISSING` errors only |
 | `edge/url-security.ts` | `REUSE` | Preserve allowed ChatGPT origins, localhost CDP hosts, secure URL parsing, and known-identity checks. | `lib/security.mjs` or `binding.mjs` |
@@ -101,6 +133,69 @@ The extraction may preserve these invariants:
 6. Network waits, socket waits, browser startup, and read waits are bounded.
 7. Local binding state is redacted operational state and is not committed to the
    target project.
+
+## Observation is not consumption
+
+Reading Sol is an observation only. It never acknowledges, consumes, reserves,
+or marks a Sol Task as executed.
+
+The local field is named `last_observed_assistant_hash` and has only these
+uses:
+
+- diagnostics;
+- polling optimization;
+- a dedupe hint for Luna.
+
+It is never task-consumption state. The required delivery model is:
+
+```text
+at-least-once Sol observation
++
+idempotent Luna execution
+```
+
+Luna determines whether a task was executed by inspecting the durable
+repository facts: the task report, `CURRENT_STATUS`,
+`IMPLEMENTATION_HISTORY`, Git state, and verified GitHub history. If a process
+crashes after reading Sol, the next run may observe the same output again; it
+must not silently discard it because a local hash was updated.
+
+## Bounded `read --after` semantics
+
+The Bridge has two distinct read modes.
+
+### No wait
+
+With no positive wait deadline:
+
+```text
+after_hash == current stable hash
+→ NO_NEW_ASSISTANT_OUTPUT
+```
+
+The command returns immediately after the current observation is classified as
+stable. The Bridge does not infer task meaning.
+
+### Bounded wait
+
+With `after_hash == current hash` and `wait_ms > 0`, the Bridge continues
+polling until the deadline. It returns `ASSISTANT_OUTPUT_READY` only when all
+of the following hold:
+
+```text
+new assistant hash
++
+stable sample sequence
++
+isThinking == false
+```
+
+At the deadline, distinguish the two outcomes:
+
+- the hash never changed → `NO_NEW_ASSISTANT_OUTPUT`;
+- a new hash appeared but never became stable/not-thinking → `READ_TIMEOUT`.
+
+The wait is always bounded. Luna decides whether to call `read` again.
 
 ### Explicitly non-reusable W2C behavior
 
@@ -171,6 +266,56 @@ with the existing Skill tool contract. Subcommands are intentionally narrow:
 - `status`: report browser/CDP/login/binding/identity/thinking facts; never
   report ADL workflow state.
 
+## Outbound delivery recovery
+
+`send` has a transport-level crash boundary. Before submission, persist a small
+local pending-delivery record:
+
+```text
+version
+conversation identity
+message_hash
+delivery_key
+created_at
+```
+
+The record is local recovery material only. It is not workflow state, task
+state, acceptance state, Git state, or a durable project artifact.
+
+The send transaction is:
+
+```text
+persist pending delivery intent
+→ submit message
+→ confirm composer/assistant delivery evidence
+→ clear pending delivery record
+```
+
+If the process crashes after submission but before confirmation state is
+persisted, the next Bridge invocation must reload the pending record, revalidate
+the bound origin, Project, account, and conversation, and capture only the
+latest bound-conversation user text/hash as transport evidence.
+
+If that latest user message matches the pending `message_hash`, return
+`MESSAGE_ALREADY_DELIVERED` and clear the pending record. If delivery cannot be
+proven, return `SEND_UNCONFIRMED` and do not automatically send the text again.
+While unresolved, `send` must not bypass the pending record by submitting
+another message. The Bridge never parses the message as a task or decides
+whether Luna should continue.
+
+## Multiple live targets
+
+`bind` must fail closed when more than one live target has an allowed ChatGPT
+origin. It may bind only when:
+
+- an explicit expected conversation URL or target selection identifies exactly
+  one target; or
+- exactly one target satisfies the complete Project, account, and conversation
+  identity constraints.
+
+Otherwise it returns `BINDING_AMBIGUOUS`. It must never select the first target
+returned by CDP or silently bind a different conversation.
+
 ## Boundary risks requiring test evidence
 
 - ChatGPT DOM selectors are external and may change; selector configuration is
@@ -185,6 +330,22 @@ with the existing Skill tool contract. Subcommands are intentionally narrow:
   handling; no credentials are automated.
 - The final Sol notification is valid only after GitHub remote verification.
 
+## Additional V1.1 regression requirements
+
+The new Bridge tests must prove:
+
+- `read --after H --wait` does not return merely because the first sample is
+  still `H`;
+- no-change and unstable-new-output deadlines return different codes;
+- a crash after read does not mark a Sol Task consumed;
+- a crash after send and before confirmation persistence recovers the pending
+  delivery;
+- an already visible matching latest user message returns
+  `MESSAGE_ALREADY_DELIVERED` without a duplicate send;
+- an unresolved pending delivery returns `SEND_UNCONFIRMED` without a retry;
+- ambiguous multi-target bind returns `BINDING_AMBIGUOUS`;
+- the renamed package retains all ADL V1 tests and tools.
+
 This mapping is complete for the requested V1.1 extraction scope. It authorizes
-no implementation by itself; the design contract in
+no implementation by itself; the amended design contract in
 `SOL_BRIDGE_V1_1_DESIGN.md` must be reviewed before coding.

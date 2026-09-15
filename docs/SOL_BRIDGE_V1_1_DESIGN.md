@@ -1,10 +1,10 @@
 # Sol Bridge — V1.1 Design
 
-Status: Design-stage proposal; pending V1.1 architecture freeze
+Status: READY_FOR_V1.1_ARCHITECTURE_FREEZE
 Date: 2026-09-15
 Skill: `sol-engineering-loop`
 Branch: `feat/adl-sol-bridge-v1.1`
-Design base: `1a6c495f644eb967cbf2e51529b7f3c42e83725b`
+Design base: `91f5cf2e2d476b1de6affe8e98355cd60844d0bc`
 
 ## 1. Goal
 
@@ -12,6 +12,16 @@ V1.1 gives Codex/Luna a safe, deterministic I/O bridge to the Web Chatbot
 conversation used by Sol. Sol can provide a task and receive a concise review
 notification without the user manually copying either the Sol task or the Luna
 report.
+
+V1.1 formally evolves the V1 Skill identity:
+
+```text
+autonomous-development-loop → sol-engineering-loop
+```
+
+`sol-engineering-loop` is the only final Skill. It contains the accepted ADL
+Core and the new Sol Bridge. The rename is an architecture revision and a
+whole-package migration, not a rewrite of the accepted ADL Core.
 
 The bridge is not a second agent. It does not interpret Sol's text, choose an
 implementation, manage an engineering phase, run Git, update governance, or
@@ -104,6 +114,25 @@ or a project-specific build command. V1.1's Bridge environment is explicitly
 Microsoft Edge with localhost CDP on Windows; unsupported environments return a
 deterministic error rather than weakening the security boundary.
 
+### Rename and migration contract
+
+The package migration is:
+
+1. `skills/autonomous-development-loop/` becomes
+   `skills/sol-engineering-loop/`.
+2. `SKILL.md` frontmatter, references, templates, scripts, and tests use the
+   `sol-engineering-loop` identity.
+3. All accepted V1 ADL behavior and deterministic Git, governance, report, and
+   recovery tools remain in the final package.
+4. V1.1 adds only Sol I/O and its transport recovery records.
+5. The old source and installed paths are removed after migration; two
+   overlapping Skills are not supported.
+6. No ADL Core rewrite, workflow-ownership change, or W2C runtime refactor is
+   implied by the rename.
+
+Luna remains the workflow owner throughout migration. The final package is
+`sol-engineering-loop`, not a long-term pair of ADL and Bridge Skills.
+
 ## 4. CLI contract
 
 The executable is one CLI with five commands. It follows the Skill's existing
@@ -157,7 +186,13 @@ the persistent profile for a later `ensure`.
 ### `bind`
 
 `bind` requires a live, allowed ChatGPT page and optional expected identity
-constraints. It selects exactly one target, samples it, and persists:
+constraints. It must not select the first matching CDP target. Binding is
+allowed only when an explicit expected conversation URL/target selection
+identifies exactly one target, or when exactly one live target satisfies the
+complete allowed-origin, Project, account, and conversation identity
+constraints. Otherwise it returns `BINDING_AMBIGUOUS` and persists nothing.
+
+When one target is uniquely identified, `bind` samples it and persists:
 
 ```json
 {
@@ -168,7 +203,7 @@ constraints. It selects exactly one target, samples it, and persists:
   "conversation_url": "https://chatgpt.com/g/.../c/...",
   "conversation_title": "Sol",
   "target_id_hint": "...",
-  "last_seen_assistant_hash": "...",
+  "last_observed_assistant_hash": "...",
   "updated_at": "..."
 }
 ```
@@ -224,11 +259,27 @@ assistant_text is non-empty
 assistant_hash is equal across stable_sample_count samples
 ```
 
-The default stable sample count is `2`. If `after_hash` equals the current
-stable assistant hash, return `NO_NEW_ASSISTANT_OUTPUT`. If the output changes
-but is still streaming, wait only until the bounded deadline and return
-`READ_TIMEOUT` if no stable result appears. The Bridge never decides whether
-the text is a task, review, correction, or acceptance.
+The default stable sample count is `2`. Reading is observation, not
+acknowledgement or consumption. The exact `read --after` contract is:
+
+- no positive wait: if `after_hash` equals the current stable hash, return
+  `NO_NEW_ASSISTANT_OUTPUT` immediately;
+- positive bounded wait: if `after_hash` equals the current hash, continue
+  polling until a new hash is stable and `isThinking == false`;
+- deadline with no hash change: return `NO_NEW_ASSISTANT_OUTPUT`;
+- deadline after a new hash appeared but never became stable/not-thinking:
+  return `READ_TIMEOUT`.
+
+The Bridge never waits indefinitely and never decides whether the text is a
+task, review, correction, or acceptance.
+
+The persisted hint is named `last_observed_assistant_hash`. It is used only for
+diagnostics, polling optimization, and dedupe hints. It is not task-consumption
+state. The required semantics are at-least-once Sol observation plus
+idempotent Luna execution. Luna checks the repository, task report,
+`CURRENT_STATUS`, `IMPLEMENTATION_HISTORY`, Git state, and verified GitHub
+history to determine whether a task was executed. A read crash may therefore
+cause safe re-observation, never silent loss or false consumption.
 
 Capture uses DOM usability and `innerText → textContent` fallback. It does not
 use `getBoundingClientRect`, screen visibility, window focus, minimization, or
@@ -265,6 +316,37 @@ If the message may have been submitted but confirmation is unavailable, return
 conversation returns `CONVERSATION_IDENTITY_CHANGED` and does not retry against
 another target.
 
+#### Pending delivery recovery
+
+Before submission, persist this local transport-recovery record:
+
+```text
+version
+conversation identity
+message_hash
+delivery_key
+created_at
+```
+
+The send transaction is:
+
+```text
+persist pending delivery intent
+→ submit message
+→ confirm delivery
+→ clear pending delivery record
+```
+
+If a process crashes after submission but before confirmation persistence, the
+next invocation reloads the record, revalidates the bound conversation, and
+captures only the latest bound-conversation user text/hash. If it matches the
+pending `message_hash`, return `MESSAGE_ALREADY_DELIVERED` and clear the
+record. If it cannot be proven, return `SEND_UNCONFIRMED` and do not send the
+message again automatically. While the pending delivery remains unresolved,
+`send` must not bypass it by submitting another message; it returns
+`SEND_UNCONFIRMED` until an explicit recovery decision clears the record. This
+evidence path never parses task semantics.
+
 ### `status`
 
 `status` reports only live Bridge facts:
@@ -300,6 +382,12 @@ allowed ChatGPT origin
 The current live target must match the tuple before `read` or `send`. A CDP
 target ID is only a lookup hint. Missing identity is not equivalent to a match.
 
+When multiple live targets have an allowed ChatGPT origin, `bind` must not
+choose the first result. It may bind only through an explicit expected
+conversation URL/target selection or when exactly one target satisfies the
+complete identity tuple. Otherwise it returns `BINDING_AMBIGUOUS` and persists
+nothing.
+
 The Bridge must reject:
 
 - non-HTTPS or non-ChatGPT origins;
@@ -322,11 +410,13 @@ The first implementation must expose stable codes in these families:
 | `CDP_UNAVAILABLE` | Endpoint cannot be reached or target list is invalid | Bounded retry, then report |
 | `LOGIN_REQUIRED` | Manual login is required | Ask user to log in once |
 | `BINDING_MISSING` | No local Sol binding exists | Require explicit bind |
+| `BINDING_AMBIGUOUS` | Multiple allowed live targets cannot be uniquely identified | Require explicit target/URL selection |
 | `IDENTITY_UNKNOWN` | Required Project/account/conversation identity is unavailable | Fail closed |
 | `CONVERSATION_IDENTITY_CHANGED` | Live target no longer matches binding | Stop and require explicit rebind |
 | `NO_NEW_ASSISTANT_OUTPUT` | `read --after` observed no new output | Luna may continue waiting or execute no action |
 | `READ_TIMEOUT` | Bounded wait ended without stable output | Luna decides whether to retry |
 | `SEND_UNCONFIRMED` | Submission cannot be proven | Do not duplicate automatically |
+| `MESSAGE_ALREADY_DELIVERED` | Pending message matches latest bound-conversation user message | Clear pending delivery; do not resend |
 | `CONTEXT_LIMIT` | ChatGPT reports a context limit | Luna decides; no automatic rotation in V1.1 |
 | `SESSION_MISSING` | Conversation/session is unavailable | Luna decides; no hidden target switch |
 | `NETWORK_ERROR` | Live page or CDP network failure | Bounded retry, then report |
@@ -350,7 +440,7 @@ ensure Sol Bridge
 → safe-git-sync and verify GitHub remote
 → construct concise READY_FOR_SOL_REVIEW notification
 → send through Sol Bridge
-→ remember current assistant hash as a dedupe hint
+→ remember current assistant hash as `last_observed_assistant_hash` only
 → read --after that hash
 → Luna interprets Sol's next response
 ```
@@ -413,7 +503,10 @@ They must cover:
 
 - latest stable assistant text and hash;
 - thinking output not marked stable;
-- unchanged and changed `after_hash` behavior;
+- no-wait unchanged `after_hash` returns immediately with
+  `NO_NEW_ASSISTANT_OUTPUT`;
+- bounded `after_hash` wait continues polling after an initial unchanged hash;
+- no-change deadline and unstable-new-output deadline return different codes;
 - bounded wait and timeout;
 - hidden/minimized DOM usability without screen gates;
 - empty assistant output;
@@ -436,10 +529,23 @@ They must cover:
 
 - initial bind and persisted reload;
 - target ID change with matching conversation identity;
+- multiple allowed targets require explicit disambiguation or
+  `BINDING_AMBIGUOUS`;
 - identity change rejection;
 - corrupt primary binding with valid backup recovery;
 - corrupt primary and backup fail-closed;
 - no credentials or raw conversation transcript in state.
+
+### Observation and delivery recovery
+
+- reading followed by a crash does not mark a Sol Task consumed;
+- the persisted field is `last_observed_assistant_hash`, never a consumption
+  marker;
+- a crash after send and before confirmation persistence recovers the pending
+  delivery;
+- a matching latest user message returns `MESSAGE_ALREADY_DELIVERED` without a
+  duplicate send;
+- an unresolved pending delivery returns `SEND_UNCONFIRMED` without retrying;
 
 ### Browser
 
@@ -484,17 +590,34 @@ V1.1 does not add:
 - MCP, Plugin, Electron, or external Codex process dependencies;
 - ETA, predicted completion, or model-estimated future timing.
 
-## 11. Decision classification
+## 11. Final V1.1 architecture decisions
 
-### PROPOSED FOR V1.1 FREEZE
+The following decisions are closed and ready to freeze:
 
+- `autonomous-development-loop` evolves into `sol-engineering-loop` as an
+  architecture revision, with one final Skill containing ADL Core plus Sol
+  Bridge.
+- Every accepted V1 ADL capability and deterministic Git/governance/report
+  tool remains in the final Skill; V1.1 adds only Sol I/O and transport
+  recovery.
 - Sol Bridge is a first-class capability of `sol-engineering-loop`.
 - The Bridge exposes exactly `ensure`, `bind`, `read`, `send`, and `status`.
 - Sol Bridge performs I/O and identity enforcement only; Luna controls meaning
   and workflow.
 - GitHub remote verification is mandatory before Sol notification.
 - The Bridge returns ordinary assistant text and never parses Writing Blocks.
-- Binding is local operational state; repository facts remain in Git/GitHub.
+- Reading never consumes or acknowledges a Sol message; binding state is local
+  operational state and repository facts remain in Git/GitHub.
+- `last_observed_assistant_hash` is only a diagnostics, polling, and dedupe
+  hint; Luna uses durable repository evidence for idempotent execution.
+- `read --after` is bounded and distinguishes no-change from unstable-new-
+  output deadlines.
+- `send` persists a local pending delivery intent before submission and never
+  automatically resends an unresolved delivery.
+- A matching latest user message resolves pending delivery as
+  `MESSAGE_ALREADY_DELIVERED`.
+- `bind` fails closed with `BINDING_AMBIGUOUS` when live targets cannot be
+  uniquely identified.
 - V1.1 targets owned Microsoft Edge plus localhost CDP on Windows.
 - Context/session replacement is deferred; structured errors are sufficient.
 
@@ -509,10 +632,24 @@ V1.1 does not add:
 
 ### STILL REQUIRES ARCHITECTURE DECISION
 
-None within the stated V1.1 scope. The proposed freeze must still be explicitly
-accepted as a new V1.1 revision before implementation begins.
+None within the stated V1.1 scope. The design is ready for explicit V1.1
+architecture freeze; implementation remains prohibited until that freeze is
+accepted.
 
-## 12. Acceptance gate before coding
+## 12. Architecture amendment closure
+
+| Amendment | Final decision | Closure |
+|---|---|---|
+| A. Skill rename/migration | One final `sol-engineering-loop` retains ADL Core and adds Sol Bridge; old package paths are migrated and not retained as a second Skill. | Closed |
+| B. Bounded `read --after` | No-wait unchanged hash returns `NO_NEW_ASSISTANT_OUTPUT`; bounded wait polls; no-change and unstable-new-output deadlines are distinct. | Closed |
+| C. Observation versus consumption | Reading is not acknowledgement or consumption; `last_observed_assistant_hash` is only a hint; Luna uses durable repository evidence and idempotent execution. | Closed |
+| D. Outbound delivery recovery | Persist pending intent before send; verify latest bound-conversation user hash after crash; return `MESSAGE_ALREADY_DELIVERED` or `SEND_UNCONFIRMED` without automatic duplicate send. | Closed |
+| E. Multiple targets | Bind only with explicit disambiguation or one complete identity match; otherwise `BINDING_AMBIGUOUS`. | Closed |
+| F. Regression coverage | The listed read, delivery, binding, rename-retention, and full ADL V1 tests are mandatory implementation gates. | Closed as a requirement |
+
+No architecture issue remains open within the stated V1.1 scope.
+
+## 13. Acceptance gate before coding
 
 Coding may begin only after review confirms:
 
